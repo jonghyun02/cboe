@@ -1,0 +1,448 @@
+class	desc	ono	family	category	min_on_s	merge_gap_s
+Accelerating, revving, vroom	가속하는 소리	부릉	car	ambient	0.3	0.0
+Air brake	에어 브레이크 소리	치익	car	ambient	0.2	0.0
+Air conditioning	에어컨 소리	웅	appliance	minor	1.0	0.0
+Air horn, truck horn	경적 소리	빠앙	horn	event	0.2	0.0
+Aircraft	비행기 소리	슈웅	aircraft	ambient	0.5	0.0
+Aircraft engine	비행기 엔진 소리	우웅	aircraft	ambient	0.5	0.0
+Alarm	경보음	삐삐	alarm	event	0.2	1.0
+Alarm clock	알람 소리	따르릉	alarm	event	0.2	1.0
+Alert	알림음	띠링	alarm	event	0.1	1.0
+Ambulance (siren)	구급차 소리	삐뽀삐뽀	siren	event	0.3	1.0
+Animal		동물 울음	dog	ambient	0.2	0.5
+Applause	박수 소리	짝짝짝	crowd_reaction	event	0.3	1.0
+Arrow	화살 소리	슈웅	whoosh	event	0.1	0.5
+Artillery fire	포격 소리	쾅	gun	event	0.1	1.0
+Audio logo				background	0.2	0.5
+Babbling	옹알이		baby	speech	0.3	0.0
+Baby cry, infant cry	아기 울음		crying	vocal	0.3	0.5
+Baby laughter	아기 웃음소리		laughter	vocal	0.2	0.5
+Background noise				background	0.2	0.5
+Bang	쾅 소리	쾅	explosion	event	0.1	0.5
+Bark	개 짖는 소리	멍멍	dog	ambient	0.1	1.0
+Basketball bounce	농구공 소리	통통	impact	event	0.1	0.5
+Bathroom sounds	욕실 물 소리	쏴	water	ambient	0.5	0.5
+Bathtub (filling or washing)	욕조 물 소리	쏴	water	ambient	0.5	0.5
+Battle cry	함성		scream	vocal	0.3	0.0
+Bee, wasp, etc.	벌 소리	윙윙	insect	ambient	0.3	1.0
+Beep, bleep	기계음	삑	alarm	event	0.1	1.0
+Bell	종소리	댕	bell	event	0.2	1.0
+Bellow	고함		scream	vocal	0.2	0.0
+Belly laugh	껄껄 웃는 소리		laughter	vocal	0.2	0.5
+Bicycle bell	자전거 소리	따르릉	bell	event	0.1	1.0
+Bicycle, tricycle	자전거 소리	따르륵	bicycle	ambient	0.5	0.0
+Bird	새소리	짹짹	bird	ambient	0.3	1.0
+Bird flight, flapping wings	날갯짓 소리	푸드덕	bird	ambient	0.2	1.0
+Bird vocalization, bird call, bird song	새소리	짹짹	bird	ambient	0.3	1.0
+Biting	깨무는 소리	와삭	eating	minor	0.1	0.5
+Bleat	염소 울음소리	메에	livestock	ambient	0.2	1.0
+Blender, food processor	믹서기 소리	위이잉	kitchen	minor	0.5	0.5
+Boat, Water vehicle	배 소리	부웅	boat	ambient	0.5	0.0
+Boiling	물 소리	보글보글	kitchen	minor	0.5	0.5
+Boing	띠용 소리	띠용	whoosh	event	0.1	0.5
+Booing	야유 소리	우우	crowd_reaction	event	0.3	1.0
+Boom	쾅 소리	쿠궁	explosion	event	0.1	0.5
+Bouncing	튀는 소리	통통	impact	event	0.1	0.5
+Bow-wow	개 소리	멍멍	dog	ambient	0.1	1.0
+Breaking	깨지는 소리	우지끈	break	event	0.1	0.0
+Breathing	숨소리		breath	vocal	0.3	0.5
+Brief tone	삐 소리	삐	alarm	event	0.1	1.0
+Burping, eructation	트림 소리		body	minor	0.1	0.0
+Burst, pop	펑 소리	펑	explosion	event	0.1	0.5
+Bus	버스 소리	부릉	car	ambient	0.5	0.0
+Busy signal	통화 끊기는 소리	뚜뚜	phone	event	0.3	1.0
+Buzz	윙윙거리는 소리	윙	buzz	minor	0.3	0.0
+Buzzer	부저 소리	삐	alarm	event	0.1	1.0
+Cacophony				background	0.2	0.5
+Camera	셔터 소리	찰칵	camera	event	0.1	0.0
+Canidae, wild dogs, wolves	늑대 소리	아우우	dog	ambient	0.3	1.0
+Cap gun	장난감 총 소리	탕	gun	event	0.1	1.0
+Car	자동차 소리	부릉	car	ambient	0.5	0.0
+Car alarm	자동차 경보 소리	삐용삐용	alarm	event	0.3	1.0
+Car passing by	차 지나가는 소리	쌩	car	ambient	0.3	0.0
+Carbon monoxide detector, CO detector	경보기 소리	삐삐	alarm	event	0.2	1.0
+Cart	카트 소리	드르륵	bicycle	ambient	0.3	0.0
+Cash register	계산대 소리	띵	misc_object	minor	0.2	0.0
+Cat	고양이 울음소리	야옹	cat	ambient	0.2	1.0
+Caterwaul	고양이 울음소리	왜앵	cat	ambient	0.2	1.0
+Cattle, bovinae	소 소리	음메	livestock	ambient	0.3	1.0
+Caw	까마귀 울음소리	까악	bird	ambient	0.1	1.0
+Cellphone buzz, vibrating alert	휴대폰 진동 소리	지잉	phone	event	0.2	1.0
+Chain	쇠사슬 소리	철컹	tools	minor	0.2	1.0
+Chainsaw	전기톱 소리	부아앙	tools	minor	0.3	1.0
+Change ringing (campanology)	종 소리	댕댕	bell	event	0.3	1.0
+Channel, environment and background				background	0.2	0.5
+Chant	노랫소리		music	music	0.5	0.0
+Cheering	환호 소리	와아	crowd_reaction	event	0.3	1.0
+Chewing, mastication	씹는 소리	쩝쩝	eating	minor	0.2	0.5
+Chicken, rooster	닭 소리	꼬꼬	poultry	ambient	0.3	1.0
+Child singing	아이 노랫소리		music	music	0.5	0.0
+Child speech, kid speaking				speech	0.2	0.5
+Children playing	아이들 노는 소리	까르르	crowd	ambient	1.0	0.0
+Children shouting	아이들 외치는 소리		scream	vocal	0.3	0.0
+Chime	차임벨 소리	딩동	bell	event	0.2	1.0
+Chipmunk	다람쥐 소리	찍찍	rodent	ambient	0.2	1.0
+Chirp tone	삑 소리	삑	alarm	event	0.1	1.0
+Chirp, tweet	새소리	짹짹	bird	ambient	0.2	1.0
+Choir	합창 소리		music	music	0.5	0.0
+Chop	내리찍기 소리	탁	impact	event	0.1	0.5
+Chopping (food)	도마 소리	탁탁	kitchen	minor	0.2	0.5
+Chorus effect				background	0.2	0.5
+Chuckle, chortle	킥킥 웃는 소리		laughter	vocal	0.2	0.5
+Church bell	교회 종 소리	댕	bell	event	0.3	1.0
+Civil defense siren	민방위 사이렌 소리	위이잉	siren	event	0.5	1.0
+Clang	쨍그랑 소리	쨍그랑	impact	event	0.1	0.5
+Clapping	박수	짝	crowd_reaction	event	0.2	1.0
+Clatter	달그락거리는 소리	달그락	impact	event	0.1	0.5
+Clickety-clack	기차 소리	덜컹덜컹	train	ambient	0.3	0.0
+Clicking	딸깍 소리	딸깍	click	minor	0.1	1.0
+Clip-clop	말발굽 소리	따각따각	livestock	ambient	0.2	1.0
+Clock	시계 소리	째깍째깍	clock	event	0.3	1.5
+Cluck	암탉 소리	꼬꼬	poultry	ambient	0.2	1.0
+Clunk	덜컹 소리	덜컹	impact	event	0.1	0.5
+Coin (dropping)	동전 소리	짤랑	impact	event	0.1	0.5
+Computer keyboard	키보드 소리	타닥타닥	typing	minor	0.3	1.0
+Conversation				speech	0.2	0.5
+Coo	비둘기 소리	구구	bird	ambient	0.2	1.0
+Cough	기침		cough	vocal	0.1	0.5
+Cowbell	워낭 소리	딸랑	livestock	ambient	0.2	1.0
+Crack	부러지는 소리	딱	impact	event	0.1	0.5
+Crackle	불 타닥거리는 소리	타닥타닥	fire	ambient	0.3	0.0
+Creak	삐걱 소리	삐걱	creak	event	0.2	0.0
+Cricket	귀뚜라미 소리	귀뚤귀뚤	insect	ambient	0.5	1.0
+Croak	개구리 소리	개굴개굴	frog	ambient	0.2	1.0
+Crockery breaking and smashing	그릇 소리	와장창	break	event	0.1	0.0
+Crow	까마귀 울음소리	까악	bird	ambient	0.2	1.0
+Crowd	웅성거리는 소리	웅성웅성	crowd	ambient	1.0	0.0
+Crowing, cock-a-doodle-doo	수탉 소리	꼬끼오	poultry	ambient	0.3	1.0
+Crumpling, crinkling	종이 구기는 소리	바스락	paper	minor	0.2	0.5
+Crunch	바삭 소리	바삭	impact	event	0.1	0.5
+Crushing	으스러지는 소리	우지직	impact	event	0.1	0.5
+Crying, sobbing	흐느끼는 소리		crying	vocal	0.3	0.5
+Cupboard open or close	찬장 여닫는 소리	달칵	door	event	0.1	0.5
+Cutlery, silverware	수저 달그락거리는 소리	달그락	kitchen	minor	0.2	0.5
+Deformable shell		바스락	paper	minor	0.2	0.5
+Dental drill, dentist's drill	치과 드릴 소리	위이잉	tools	minor	0.3	1.0
+Dial tone	통화 연결음	뚜	phone	event	0.3	1.0
+Digestive				background	0.2	0.5
+Ding	알림음	띵	alarm	event	0.1	1.0
+Ding-dong	초인종 소리	딩동	doorbell	event	0.2	0.0
+Dishes, pots, and pans	그릇 달그락거리는 소리	달그락	kitchen	minor	0.2	0.5
+Distortion				background	0.2	0.5
+Dog	개 짖는 소리	멍멍	dog	ambient	0.2	1.0
+Domestic animals, pets		동물 울음	dog	ambient	0.2	0.5
+Dong, bong	댕 울리는 소리	댕	bell	event	0.2	1.0
+Donkey, ass	당나귀 소리	히잉	livestock	ambient	0.3	1.0
+Door	문소리	덜컥	door	event	0.1	0.5
+Doorbell	초인종 소리	딩동	doorbell	event	0.2	0.0
+Drawer open or close	서랍 여닫는 소리	드르륵	door	event	0.1	0.5
+Drill	드릴 소리	위잉	tools	minor	0.3	1.0
+Drip	물방울 소리	똑똑	water	ambient	0.2	0.5
+Duck call (hunting tool)	오리 피리 소리	꽥꽥	poultry	ambient	0.2	1.0
+Ducks, geese, waterfowl	오리 소리	꽥꽥	poultry	ambient	0.3	1.0
+Echo				background	0.2	0.5
+Effects unit				background	0.2	0.5
+Electric rotor drone, quadcopter	드론 소리	위잉	aircraft	ambient	0.5	0.0
+Electric shaver, electric razor	면도기 소리	위잉	appliance	minor	0.3	0.0
+Electric toothbrush	전동 칫솔 소리	위잉	appliance	minor	0.3	0.0
+Electronic tuner				background	0.2	0.5
+Emergency vehicle	사이렌 소리	삐뽀삐뽀	siren	event	0.3	1.0
+Engine	엔진 소리	부르릉	car	ambient	0.5	0.0
+Engine knocking	엔진 소리	덜덜덜	car	ambient	0.3	0.0
+Engine starting	시동 거는 소리	부릉	car	ambient	0.2	0.0
+Environmental noise				background	0.2	0.5
+Error signal	오류음 소리	삐빅	alarm	event	0.1	1.0
+Eruption	폭발 소리	콰르릉	explosion	event	0.3	0.5
+Explosion	폭발 소리	쾅	explosion	event	0.1	0.5
+Fart	방귀 소리		body	minor	0.1	0.0
+Female singing	여자 노랫소리		music	music	0.5	0.0
+Female speech, woman speaking				speech	0.2	0.5
+Filing (rasp)	줄질 소리	슥슥	tools	minor	0.2	1.0
+Fill (with liquid)	물 따르는 소리	쪼르륵	water	ambient	0.3	0.5
+Finger snapping	손가락 튕기는 소리	딱	hit	event	0.1	0.5
+Fire	불 소리	타닥타닥	fire	ambient	0.5	0.0
+Fire alarm	화재경보 소리	따르릉	alarm	event	0.3	1.0
+Fire engine, fire truck (siren)	소방차 소리	삐뽀삐뽀	siren	event	0.3	1.0
+Firecracker	폭죽 소리	타다닥	explosion	event	0.1	0.5
+Fireworks	불꽃놀이 소리	펑펑	explosion	event	0.1	0.5
+Fixed-wing aircraft, airplane	비행기 소리	슈웅	aircraft	ambient	0.5	0.0
+Fizz	탄산 소리	치익	water	ambient	0.2	0.5
+Flap	펄럭이는 소리	펄럭	whoosh	event	0.1	0.5
+Fly, housefly	파리 소리	윙	insect	ambient	0.3	1.0
+Foghorn	뱃고동 소리	부웅	horn	event	0.3	0.0
+Fowl	닭 소리	꼬꼬	poultry	ambient	0.3	1.0
+Frog	개구리 소리	개굴개굴	frog	ambient	0.3	1.0
+Frying (food)	지글지글 굽는 소리	지글지글	kitchen	minor	0.5	0.5
+Fusillade	총성 소리	탕탕탕	gun	event	0.1	1.0
+Gargling	가글 소리		body	minor	0.2	0.0
+Gasp	헉 하는 소리		breath	vocal	0.1	0.5
+Gears	톱니바퀴 소리	철컥	tools	minor	0.2	1.0
+Generic impact sounds	부딪히는 소리	쿵	impact	event	0.2	0.5
+Giggle	키득거리는 소리		laughter	vocal	0.2	0.5
+Glass	유리 소리	쨍	glass	event	0.1	0.0
+Glass chink, clink	잔 부딪히는 소리	쨍	glass	event	0.1	0.0
+Glass shatter	유리 소리	와장창	break	event	0.1	0.0
+Goat	염소 울음소리	메에	livestock	ambient	0.3	1.0
+Gobble	칠면조 소리	골골	poultry	ambient	0.2	1.0
+Grind	연마 소리	지이익	tools	minor	0.3	1.0
+Groan	신음 소리		moan	vocal	0.2	0.0
+Growling	으르렁거리는 소리	으르렁	dog	ambient	0.2	1.0
+Grunt	끙 하는 소리		breath	vocal	0.1	0.5
+Gull, seagull	갈매기 소리	끼룩	bird	ambient	0.2	1.0
+Gunshot, gunfire	총성 소리	탕	gun	event	0.1	1.0
+Gurgling, bubbling	보글보글 소리	보글보글	water	ambient	0.3	0.5
+Gush	물소리	쏴아	water	ambient	0.3	0.5
+Hair dryer	드라이어 소리	위잉	appliance	minor	0.5	0.0
+Hammer	망치 소리	쾅쾅	tools	minor	0.1	1.0
+Hands	손으로 치는 소리	탁	hit	event	0.2	0.5
+Heart sounds, heartbeat	심장 박동 소리	쿵쿵	body	minor	0.5	0.0
+Heavy engine (low frequency)	엔진 소리	부르릉	car	ambient	0.5	0.0
+Helicopter	헬기 소리	두두두	aircraft	ambient	0.5	0.0
+Hiccup	딸꾹질 소리		body	minor	0.1	0.0
+Hiss	쉭 소리	쉭	hiss	minor	0.2	0.0
+Honk	거위 소리	꽉꽉	poultry	ambient	0.2	1.0
+Hoot	부엉이 소리	부엉	bird	ambient	0.2	1.0
+Horse	말 소리	히힝	livestock	ambient	0.3	1.0
+Howl	울부짖는 소리	아우우	dog	ambient	0.3	1.0
+Howl (wind)	바람 부는 소리	휘이잉	wind	ambient	0.5	0.0
+Hubbub, speech noise, speech babble	웅성거리는 소리	웅성웅성	crowd	ambient	1.0	0.0
+Hum	웅웅거리는 소리		hum	minor	1.0	0.0
+Human group actions	사람들 소리	웅성웅성	crowd	ambient	0.2	0.5
+Human locomotion	발걸음 소리	저벅저벅	footsteps	event	0.2	0.5
+Human sounds				background	0.2	0.5
+Human voice				speech	0.2	0.5
+Humming	흥얼거리는 소리		hum_voice	vocal	0.5	0.0
+Ice cream truck, ice cream van	아이스크림 트럭 음악		music	music	0.5	0.0
+Idling	엔진 공회전 소리	부르르	car	ambient	0.5	0.0
+Insect	벌레 소리	윙	insect	ambient	0.5	1.0
+Inside, large room or hall				background	0.2	0.5
+Inside, public space				background	0.2	0.5
+Inside, small room				background	0.2	0.5
+Jackhammer	착암기 소리	두두두	tools	minor	0.3	1.0
+Jet engine	제트 엔진 소리	쉬익	aircraft	ambient	0.5	0.0
+Jingle bell	종소리	딸랑	bell	event	0.2	1.0
+Jingle, tinkle	딸랑 소리	딸랑	bell	event	0.1	1.0
+Kettle whistle	주전자 소리	삐이	kitchen	minor	0.3	0.5
+Keypress tone	버튼 소리	삑	alarm	event	0.1	1.0
+Keys jangling	열쇠 짤랑거리는 소리	짤랑	keys	event	0.2	0.0
+Kitchen and dining room sounds	주방 소리	달그락	kitchen	minor	0.5	0.5
+Knife	칼 소리	슥슥	kitchen	minor	0.2	0.5
+Knock	노크 소리	똑똑	door	event	0.1	0.5
+Laughter	웃음소리		laughter	vocal	0.2	0.5
+Lawn mower	잔디깎이 소리	부르릉	tools	minor	0.5	1.0
+Light engine (high frequency)	엔진 소리	위잉	car	ambient	0.5	0.0
+Liquid	물소리	찰랑	water	ambient	0.2	0.5
+Livestock, farm animals, working animals		가축 울음	livestock	ambient	0.2	0.5
+Lock	잠금장치 소리	철컥	door	event	0.1	0.5
+Machine gun	기관총 소리	타타타탕	gun	event	0.1	1.0
+Mains hum				background	0.2	0.5
+Male singing	남자 노랫소리		music	music	0.5	0.0
+Male speech, man speaking				speech	0.2	0.5
+Mantra	읊조리는 소리		music	music	0.5	0.0
+Mechanical bell	벨 소리	따르릉	bell	event	0.2	1.0
+Mechanical fan	선풍기 소리	윙	appliance	minor	1.0	0.0
+Mechanisms	기계 작동 소리	덜컹	misc_object	minor	0.2	0.5
+Medium engine (mid frequency)	엔진 소리	부릉	car	ambient	0.5	0.0
+Meow	고양이 울음소리	야옹	cat	ambient	0.1	1.0
+Microphone				background	0.2	0.5
+Microwave oven	전자레인지 소리	위잉	kitchen	minor	0.5	0.5
+Moo	소 소리	음메	livestock	ambient	0.2	1.0
+Mosquito	모기 소리	애앵	insect	ambient	0.3	1.0
+Motor vehicle (road)	차 지나가는 소리	부웅	car	ambient	0.5	0.0
+Motorboat, speedboat	보트 소리	부르릉	boat	ambient	0.5	0.0
+Motorcycle	오토바이 소리	부아앙	car	ambient	0.5	0.0
+Mouse	쥐 소리	찍찍	rodent	ambient	0.2	1.0
+Music	음악		music	music	1.0	0.0
+Narration, monologue				speech	0.2	0.5
+Neigh, whinny	말 소리	히힝	livestock	ambient	0.2	1.0
+Noise				background	0.2	0.5
+Non-motorized land vehicle	바퀴 소리	드르륵	bicycle	ambient	0.2	0.5
+Ocean	파도 소리	철썩	sea	ambient	1.0	0.0
+Oink	돼지 소리	꿀꿀	livestock	ambient	0.2	1.0
+Other sourceless				background	0.2	0.5
+Outside, urban or manmade				background	0.2	0.5
+Owl	부엉이 소리	부엉	bird	ambient	0.2	1.0
+Packing tape, duct tape	테이프 뜯는 소리	찌익	paper	minor	0.2	0.5
+Pant	헐떡이는 소리		breath	vocal	0.3	0.5
+Pant (dog)	개 소리	헥헥	dog	ambient	0.3	1.0
+Paper rustling	종이 소리	바스락	paper	minor	0.2	0.5
+Patter	후두둑 소리	후두둑	rain	ambient	0.3	0.0
+Pig	돼지 소리	꿀꿀	livestock	ambient	0.3	1.0
+Pigeon, dove	비둘기 소리	구구	bird	ambient	0.3	1.0
+Ping	알림음	띵	alarm	event	0.1	1.0
+Plop	물에 떨어지는 소리	퐁	water	ambient	0.1	0.5
+Police car (siren)	경찰차 소리	삐뽀삐뽀	siren	event	0.3	1.0
+Pour	물 따르는 소리	쪼르륵	water	ambient	0.3	0.5
+Power saw, circular saw, table saw	전기톱 소리	위잉	tools	minor	0.3	1.0
+Power tool	전동 공구 소리	위잉	tools	minor	0.3	1.0
+Power windows, electric windows	차창 소리	위잉	car	ambient	0.3	0.0
+Printer	프린터 소리	지이잉	appliance	minor	0.5	0.0
+Propeller, airscrew	프로펠러 소리	부르르	aircraft	ambient	0.5	0.0
+Puff	훅 부는 소리		breath	vocal	0.1	0.5
+Pulleys	도르래 소리	삐걱	tools	minor	0.3	1.0
+Pulse				background	0.2	0.5
+Pump (liquid)	펌프 소리	쿨렁쿨렁	appliance	minor	0.5	0.0
+Purr	고양이 가르랑거리는 소리	그르릉	cat	ambient	0.5	1.0
+Quack	오리 소리	꽥꽥	poultry	ambient	0.1	1.0
+Race car, auto racing	경주용 차 소리	부아앙	car	ambient	0.5	0.0
+Radio	라디오 소리		media	minor	0.5	0.0
+Rail transport	기차 소리	덜컹덜컹	train	ambient	0.5	0.0
+Railroad car, train wagon	기차 소리	덜컹덜컹	train	ambient	0.5	0.0
+Rain	빗소리	쏴아	rain	ambient	1.0	0.0
+Rain on surface	빗소리	후두둑	rain	ambient	1.0	0.0
+Raindrop	빗방울 소리	똑똑	rain	ambient	0.3	0.0
+Rapping	랩 소리		music	music	0.5	0.0
+Ratchet, pawl	래칫 소리	드르륵	tools	minor	0.2	1.0
+Rattle	덜그럭거리는 소리	덜그럭	impact	event	0.2	0.5
+Refrigerator	냉장고 소리	웅	appliance	minor	1.0	0.0
+Respiratory sounds				background	0.2	0.5
+Reverberation				background	0.2	0.5
+Reversing beeps	후진 경고음 소리	삐삐	alarm	event	0.3	1.0
+Ringing tone, ringback tone	통화 연결음	뚜르르	phone	event	0.3	1.0
+Ringtone	휴대폰 벨소리	띠리링	phone	event	0.3	1.0
+Roar	포효하는 소리	크아앙	big_cat	ambient	0.2	0.0
+Roaring cats (lions, tigers)	맹수 소리	어흥	big_cat	ambient	0.2	0.0
+Rodents, rats, mice	쥐 소리	찍찍	rodent	ambient	0.2	1.0
+Roll	굴러가는 소리	데구루루	impact	event	0.3	0.5
+Rowboat, canoe, kayak	노 소리	철벅	boat	ambient	0.5	0.0
+Rub	문지르는 소리	쓱쓱	scrape	minor	0.2	0.5
+Rumble	우르릉 소리	우르릉	rumble	ambient	0.5	0.0
+Run	뛰는 소리	다다닥	footsteps	event	0.2	1.0
+Rustle	부스럭거리는 소리	부스럭	paper	minor	0.2	0.5
+Sailboat, sailing ship	돛 소리	펄럭	boat	ambient	0.5	0.0
+Sanding	사포 소리	슥슥	tools	minor	0.3	1.0
+Sawing	톱 소리	슥삭슥삭	tools	minor	0.3	1.0
+Scissors	가위질 소리	싹둑	paper	minor	0.1	0.5
+Scrape	긁기 소리	득득	scrape	minor	0.2	0.5
+Scratch	긁기 소리	벅벅	scrape	minor	0.2	0.5
+Screaming	비명		scream	vocal	0.2	0.0
+Screech	끼익 소리	끼이익	scrape	minor	0.2	0.5
+Sewing machine	재봉틀 소리	드르륵	appliance	minor	0.5	0.0
+Sheep	양 울음소리	메에	livestock	ambient	0.3	1.0
+Ship	배 소리	부웅	boat	ambient	0.5	0.0
+Shout	고함		scream	vocal	0.2	0.0
+Shower	샤워 소리	쏴아	water	ambient	0.5	0.5
+Shuffle	발 끄는 소리	질질	footsteps	event	0.3	1.0
+Shuffling cards	카드 섞는 소리	촤르륵	paper	minor	0.2	0.5
+Sigh	한숨 소리		breath	vocal	0.2	0.5
+Sine wave				background	0.2	0.5
+Singing	노랫소리		music	music	0.5	0.0
+Single-lens reflex camera	셔터 소리	찰칵	camera	event	0.1	0.0
+Sink (filling or washing)	물 트는 소리	쏴	water	ambient	0.5	0.5
+Siren	사이렌 소리	위이잉	siren	event	0.3	1.0
+Sizzle	지글거리는 소리	지글지글	kitchen	minor	0.3	0.5
+Skateboard	스케이트보드 소리	드르륵	bicycle	ambient	0.3	0.0
+Slam	문 닫히는 소리	쾅	door	event	0.1	0.5
+Slap, smack	뺨 맞는 소리	찰싹	hit	event	0.1	0.5
+Sliding door	미닫이문 소리	드르륵	door	event	0.2	0.5
+Slosh	출렁이는 물소리	출렁	water	ambient	0.3	0.5
+Slurp, drinking straw	후루룩 소리	후루룩	eating	minor	0.2	0.5
+Smash, crash	와장창 소리	와장창	break	event	0.1	0.0
+Smoke detector, smoke alarm	화재경보기 소리	삐삐	alarm	event	0.3	1.0
+Snake	뱀 소리	쉭쉭	snake	ambient	0.3	0.0
+Snap	탁 소리	탁	impact	event	0.1	0.5
+Sneeze	재채기		sneeze	vocal	0.1	0.5
+Snicker	피식 웃는 소리		laughter	vocal	0.1	0.5
+Sniff	코 훌쩍이는 소리		breath	vocal	0.1	0.5
+Snoring	코 고는 소리		snore	vocal	0.5	0.0
+Snort	콧방귀 소리		breath	vocal	0.1	0.5
+Snort (horse)	말 소리	푸르릉	livestock	ambient	0.1	1.0
+Sonar	소나 소리	핑	alarm	event	0.3	1.0
+Sonic boom	음속 폭음 소리	쾅	explosion	event	0.1	0.5
+Sound effect				background	0.2	0.5
+Sound equipment				background	0.2	0.5
+Sound reproduction				background	0.2	0.5
+Speech				speech	0.2	0.5
+Speech synthesizer				speech	0.2	0.5
+Splash, splatter	물 튀는 소리	첨벙	water	ambient	0.1	0.5
+Splinter	쪼개지는 소리	빠직	break	event	0.1	0.0
+Spray	분무 소리	칙	water	ambient	0.2	0.5
+Squawk	새 소리	꽥	bird	ambient	0.1	1.0
+Squeak	끼익 소리	끽	scrape	minor	0.1	0.5
+Squeal	날카로운 소리	끼이익	scrape	minor	0.1	0.5
+Squish	철퍽 소리	철퍽	impact	event	0.1	0.5
+Stairs	계단 오르는 소리	터벅터벅	footsteps	event	0.3	1.0
+Static				background	0.2	0.5
+Steam	증기 소리	치익	hiss	minor	0.3	0.0
+Steam whistle	기적 소리	삐익	horn	event	0.3	0.0
+Stir	젓기 소리	달그락	kitchen	minor	0.2	0.5
+Stomach rumble	꼬르륵 소리	꼬르륵	body	minor	0.2	0.0
+Stomp, stamp	발 구르는 소리	쿵쿵	footsteps	event	0.1	1.0
+Stream, river	물 흐르는 소리	졸졸	stream	ambient	1.0	0.0
+Subway, metro, underground	지하철 소리	덜컹덜컹	train	ambient	0.5	0.0
+Surface contact	부딪히는 소리	탁	impact	event	0.2	0.5
+Sweeping	비질 소리	쓱쓱	misc_object	minor	0.3	0.0
+Synthetic singing	노랫소리		music	music	0.5	0.0
+Tap	톡톡 두드리는 소리	톡톡	impact	event	0.1	0.5
+Tap dance	탭댄스 소리	타닥타닥	footsteps	event	0.3	1.0
+Tape hiss				background	0.2	0.5
+Tearing	찢는 소리	부욱	paper	minor	0.1	0.5
+Telephone	전화 벨소리	따르릉	phone	event	0.3	1.0
+Telephone bell ringing	전화 벨소리	따르릉	phone	event	0.3	1.0
+Telephone dialing, DTMF	전화 버튼 누르는 소리	삑삑	phone	event	0.1	1.0
+Television	TV 소리		media	minor	0.5	0.0
+Throat clearing	헛기침		cough	vocal	0.1	0.5
+Thump, thud	떨어지는 소리	쿵	impact	event	0.1	0.5
+Thunder	천둥 소리	우르릉	thunder	event	0.3	0.0
+Thunderstorm	천둥 소리	우르릉	thunder	event	0.5	0.0
+Thunk	부딪히는 소리	툭	impact	event	0.1	0.5
+Tick	시계 초침 소리	째깍	clock	event	0.3	1.5
+Tick-tock	시계 소리	째깍째깍	clock	event	0.3	1.5
+Tire squeal, skidding	타이어 소리	끼익	car	ambient	0.2	0.0
+Toilet flush	변기 물 내리는 소리	쏴아	water	ambient	0.5	0.5
+Tools	공구 소리	달그락	tools	minor	0.2	0.5
+Toothbrush	칫솔 소리	치카치카	body	minor	0.3	0.0
+Traffic noise, roadway noise	거리의 소음	차량 소음	car	ambient	1.0	0.0
+Train	기차 소리	덜컹덜컹	train	ambient	0.5	0.0
+Train horn	기차 경적 소리	빠앙	horn	event	0.3	0.0
+Train wheels squealing	기차 바퀴 소리	끼이익	train	ambient	0.3	0.0
+Train whistle	기차 기적 소리	삐익	horn	event	0.3	0.0
+Trickle, dribble	물 떨어지는 소리	졸졸	water	ambient	0.3	0.5
+Truck	트럭 소리	부르릉	car	ambient	0.5	0.0
+Tuning fork	소리굽쇠 소리	띵	bell	event	0.2	1.0
+Turkey	칠면조 소리	골골	poultry	ambient	0.3	1.0
+Typewriter	타자기 소리	탁탁	typing	minor	0.3	1.0
+Typing	타자 소리	타닥타닥	typing	minor	0.3	1.0
+Unknown sound				background	0.2	0.5
+Vacuum cleaner	청소기 소리	위이잉	appliance	minor	0.5	0.0
+Vehicle	차 소리	부릉	car	ambient	0.2	0.5
+Vehicle horn, car horn, honking, toot	경적 소리	빵	horn	event	0.1	0.0
+Velcro, hook and loop fastener	찍찍이 소리	찌직	clothes	minor	0.1	0.0
+Video game sound	게임 효과음		media	minor	0.5	0.0
+Wail, moan	울부짖는 소리		moan	vocal	0.2	0.0
+Walk, footsteps	발걸음 소리	저벅저벅	footsteps	event	0.3	1.0
+Washing machine	세탁기 소리	덜컹덜컹	appliance	minor	1.0	0.0
+Water	물소리	찰랑	water	ambient	0.2	0.5
+Water tap, faucet	수돗물 소리	쏴	water	ambient	0.5	0.5
+Waterfall	물소리	쏴아	stream	ambient	1.0	0.0
+Waves, surf	파도 소리	철썩	sea	ambient	1.0	0.0
+Whack, thwack	치는 소리	퍽	hit	event	0.1	0.5
+Whale vocalization	고래 소리	우우웅	whale	ambient	0.5	0.0
+Wheeze	쌕쌕거리는 소리		breath	vocal	0.2	0.5
+Whimper	훌쩍이는 소리		crying	vocal	0.2	0.5
+Whimper (dog)	개 소리	낑낑	dog	ambient	0.2	1.0
+Whip	채찍 소리	휙	whoosh	event	0.1	0.5
+Whir	윙 돌아가는 소리	위잉	hum	minor	0.5	0.0
+Whispering	속삭이는 소리		whisper	speech	0.5	0.0
+Whistle	호루라기 소리	삑	whistle	event	0.1	0.0
+Whistling	휘파람 소리		whistle_voice	vocal	0.3	0.0
+White noise, pink noise				background	0.2	0.5
+Whoop	환호성 소리	와	crowd_reaction	event	0.2	1.0
+Whoosh, swoosh, swish	휙 소리	휙	whoosh	event	0.1	0.5
+Wild animals		동물 울음	bird	ambient	0.2	0.5
+Wildfire	불 소리	화르르	fire	ambient	0.5	0.0
+Wind	바람 부는 소리	휘잉	wind	ambient	1.0	0.0
+Wind chime	풍경 소리	딸랑	bell	event	0.3	1.0
+Wind noise (microphone)				background	0.2	0.5
+Windscreen wiper, windshield wiper	와이퍼 소리	끽끽	car	ambient	0.3	0.0
+Wobble	흔들리는 소리	흔들흔들	impact	event	0.2	0.5
+Wolf-whistling	휘파람 소리		whistle_voice	vocal	0.2	0.0
+Wood	나무 부딪히는 소리	탁	impact	event	0.1	0.5
+Writing	필기하는 소리	사각사각	paper	minor	0.3	0.5
+Yak	야크 소리	음메	livestock	ambient	0.3	1.0
+Yawn	하품 소리		breath	vocal	0.2	0.5
+Yell	고함		scream	vocal	0.2	0.0
+Yip	개 소리	깽	dog	ambient	0.1	1.0
+Yodeling	요들 소리		music	music	0.5	0.0
+Zing	쌩 소리	쌩	whoosh	event	0.1	0.5
+Zipper (clothing)	지퍼 소리	직	clothes	minor	0.1	0.0

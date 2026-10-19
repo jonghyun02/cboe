@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>CBoE 작업 목록</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237180CB'/%3E%3Cpath d='M8 12h16M8 17h11M8 22h14' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="/static/app.css?v={{v}}">
+<link rel="stylesheet" href="/static/home.css?v={{v}}">
+</head>
+<body>
+<div class="home" id="home">
+  <header class="topbar">
+    <div class="brand">
+      <span class="logo" aria-hidden="true">SDH</span>
+      <h1>CBoE</h1>
+      <span class="work-title">근거를 제시하는 SDH 자막 검수 보조 도구</span>
+    </div>
+    <div class="env" id="env" aria-label="환경 점검"></div>
+    <div class="top-actions">
+      <button type="button" class="btn btn-primary" data-act="new">
+        <svg class="i-plus" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 5v14M5 12h14"/></svg>새 작업</button>
+    </div>
+    <div class="busy-bar" aria-hidden="true"></div>
+  </header>
+
+  <div class="banner" id="banner" role="alert" hidden></div>
+
+  <main class="home-main">
+    <section class="card plist-card" aria-labelledby="plist-title">
+      <div class="list-head">
+        <h2 id="plist-title">작업 목록</h2>
+        <span class="hint">영상 하나에 작업 하나 · 결정은 고칠 때마다 저장된다</span>
+        <span class="list-count tnum" id="plist-count"></span>
+      </div>
+      <div class="plist" id="plist" role="listbox" aria-label="작업"></div>
+      <div class="ws-foot"><span class="muted">작업 폴더</span><button type="button" class="ws-path" id="ws-path" data-act="open-ws" title="탐색기로 열기"></button></div>
+    </section>
+    <section class="card detail" id="detail" aria-live="polite"></section>
+  </main>
+</div>
+
+<div class="modal-wrap" id="modal" hidden>
+  <div class="modal-backdrop" data-act="close"></div>
+  <div class="modal" id="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title"></div>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="/static/home.js?v={{v}}"></script>
+</body>
+</html>

@@ -1,0 +1,108 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<base href="{{base}}">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>SDH 자막 검수</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%237180CB'/%3E%3Cpath d='M8 12h16M8 17h11M8 22h14' stroke='white' stroke-width='2.4' stroke-linecap='round'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="static/app.css?v={{v}}">
+</head>
+<body data-home="{{home}}">
+<div class="app" id="app">
+  <header class="topbar">
+    <div class="brand">
+      <a class="btn btn-text home-link" id="home-link" href="/" hidden title="작업 목록으로 (결정은 이미 저장됨)"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M15 5l-7 7 7 7"/></svg>작업 목록</a>
+      <span class="logo" aria-hidden="true">SDH</span>
+      <h1>SDH 자막 검수</h1>
+      <span class="work-title" id="work-title"></span>
+      <span class="tag-sample" id="sample-tag" hidden title="예시용 후보와 근거입니다 (모델 출력 아님)">예시 데이터</span>
+    </div>
+    <div class="progress" id="progress" aria-live="polite"></div>
+    <div class="top-actions">
+      <button type="button" class="btn" data-act="open-export" data-fmt="vtt">VTT 저장</button>
+      <button type="button" class="btn btn-primary" data-act="open-export" data-fmt="srt">SRT 저장</button>
+    </div>
+    <div class="busy-bar" aria-hidden="true"></div>
+  </header>
+
+  <div class="banner" id="banner" role="alert" hidden></div>
+
+  <main class="main">
+    <section class="left" id="left">
+      <div class="stage is-paused" id="stage">
+        <video id="video" preload="auto" playsinline></video>
+        <img class="stage-still" id="stage-still" alt="" hidden>
+        <div class="stage-layer" id="stage-layer"><div class="subs" id="subs"></div></div>
+        <div class="stage-time tnum" id="stage-time">--:--.-</div>
+        <div class="stage-range tnum" id="stage-range" hidden></div>
+        <button type="button" class="stage-play" id="stage-play" data-act="toggle-play" aria-label="재생">
+          <svg class="i-play" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13l10.5-6.5z"/></svg>
+          <svg class="i-pause" viewBox="0 0 24 24" aria-hidden="true"><path d="M7 5h3.6v14H7zM13.4 5H17v14h-3.6z"/></svg>
+        </button>
+        <div class="stage-msg" id="stage-msg" hidden></div>
+      </div>
+      <section class="card evidence" id="evidence" aria-label="근거"></section>
+    </section>
+
+    <section class="card list-card" aria-labelledby="list-title">
+      <div class="list-head">
+        <h2 id="list-title">후보 목록</h2>
+        <span class="hint">검출한 소리를 지우지 않고 모두 남긴다</span>
+        <span class="list-count tnum" id="list-count"></span>
+      </div>
+      <div class="filters">
+        <div class="chips" id="state-chips" role="group" aria-label="추천으로 거르기"></div>
+        <div class="chips chips-kind" id="kind-chips" role="group" aria-label="종류로 거르기"></div>
+      </div>
+      <div class="rows" id="rows" role="listbox" aria-label="후보"></div>
+      <div class="keys" aria-label="단축키">
+        <span><kbd>↑</kbd><kbd>↓</kbd> 이동</span>
+        <span><kbd>Enter</kbd> 추천대로</span>
+        <span><kbd>I</kbd> 포함</span>
+        <span><kbd>E</kbd> 제외</span>
+        <span><kbd>Space</kbd> 재생</span>
+        <span class="keys-tail">두 번 누르면 고치기</span>
+      </div>
+    </section>
+  </main>
+
+  <section class="timeline" id="timeline" aria-label="타임라인">
+    <div class="tl-bar">
+      <span class="tl-title">타임라인</span>
+      <span class="tl-clock tnum" id="tl-clock"></span>
+      <span class="tl-legend" aria-hidden="true">
+        <i class="lg st-inc"></i>포함 <i class="lg st-exc"></i>제외 <i class="lg st-check"></i>확인 필요
+        <i class="lg st-noroom"></i>배치 확인 필요 <i class="lg-cut"></i>장면 전환
+      </span>
+      <span class="tl-stub" id="tl-stub" hidden>임시 배치 규칙</span>
+      <span class="seg seg-zoom" role="group" aria-label="확대">
+        <button type="button" data-act="zoom" data-zoom="15">15초</button>
+        <button type="button" data-act="zoom" data-zoom="60">60초</button>
+        <button type="button" data-act="zoom" data-zoom="0">전체</button>
+      </span>
+    </div>
+    <div class="tl-body">
+      <div class="tl-labels" aria-hidden="true">
+        <span style="--lane:0">대사 칸</span><span style="--lane:1">화자</span>
+        <span style="--lane:2">효과음</span><span style="--lane:3">음악</span>
+      </div>
+      <div class="tl-scroll" id="tl-scroll">
+        <div class="tl-inner" id="tl-inner">
+          <div class="tl-content" id="tl-content"></div>
+          <div class="tl-head" id="tl-head"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+</div>
+
+<div class="modal-wrap" id="modal" hidden>
+  <div class="modal-backdrop" data-act="close"></div>
+  <div class="modal" id="modal-box" role="dialog" aria-modal="true" aria-labelledby="modal-title"></div>
+</div>
+<div class="toasts" id="toasts" aria-live="polite"></div>
+
+<script src="static/app.js?v={{v}}"></script>
+</body>
+</html>

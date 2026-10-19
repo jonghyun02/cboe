@@ -1,0 +1,30 @@
+# environments and caches
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+
+# run-time state
+.gpu.lock
+*.tmp
+*.tmp.npz
+*.part.wav
+*.part.jpg
+
+# project folders hold copies of audio, model outputs and review decisions of real videos
+work/
+
+# cloned by tools/setup_third_party.py
+third_party/
+
+# large model weights stay outside git (small ones in weights/ are committed)
+weights/bandit_v2/
+weights/pretrainedsed/
+weights/transnetv2/
+weights/qwen25omni3b/
+
+# screenshots of the review screen show frames of the test videos
+docs/ui_shots/
+
+.omc/

@@ -1,0 +1,138 @@
+# -*- coding: utf-8 -*-
+"""Runs the stages of deck 5.1 in order, skipping stages whose output exists.
+
+① 후보 검출 · 근거 수집: ingest → separate → cuts → sed → asr → align → sfx → music
+                         → speaker → screen → dialog_ev   (align uses SED voice activity)
+② 추천 · 에이전트 재확인: recommend → agent
+③ 초안 배치: placement (state.Project.recompute)
+"""
+from __future__ import annotations
+
+import importlib
+import time
+from pathlib import Path
+
+from filelock import FileLock, Timeout
+
+from . import guard
+from .state import Project
+from .util import log, read_json, write_json
+
+STAGES = ["ingest", "separate", "cuts", "sed", "asr", "align", "sfx", "music", "speaker", "screen",
+          "dialog_ev", "recommend", "agent"]
+
+# output file(s) per stage; --force <stage> deletes them first
+OUTPUTS = {
+    "ingest": ["audio/mix_48k.wav", "audio/mix_16k.wav", "script.json"],
+    "separate": [f"audio/{s}_{r}.wav" for s in ("speech", "music", "effects") for r in ("48k", "16k")],
+    "cuts": ["cuts.json"],
+    "asr": ["asr.json"],
+    "align": ["dialogue.json"],
+    "sed": ["sed_effects.npz", "sed_mix.npz", "sed_music.npz", "env.npz"],
+    "sfx": ["sfx.json"],
+    "music": ["music.json"],
+    "speaker": ["speaker.json"],
+    "screen": ["screen.json"],
+    "dialog_ev": ["dialog_ev.json"],
+    "recommend": ["items.json"],
+    "agent": ["agent_done.json", "agent_results.json"],   # not skipped when present: continues the queue
+}
+
+# stage -> stages that read its output. Forcing a stage also clears everything that depends on
+# it: candidate ids are sequence numbers, so results keyed by an old id must not survive.
+USED_BY = {
+    "ingest": ["separate", "cuts", "sed", "asr", "align"],
+    "separate": ["sed", "asr"],
+    "cuts": ["speaker", "screen", "recommend"],
+    "sed": ["sfx", "music", "align"],
+    "asr": ["align"],
+    "align": ["speaker", "dialog_ev", "recommend"],
+    "sfx": ["screen", "dialog_ev", "recommend"],
+    "music": ["dialog_ev", "recommend"],
+    "speaker": ["recommend"],
+    "screen": ["recommend"],
+    "dialog_ev": ["recommend"],
+    # agent results are matched to candidates by fingerprint (kind@onset), so re-deciding or
+    # re-detecting keeps the finished re-checks of unchanged candidates; only --force agent clears them
+    "recommend": [],
+    "agent": [],
+}
+
+
+def dependents(names) -> list[str]:
+    """The given stages and every stage that depends on them, in pipeline order."""
+    todo, seen = list(names), set()
+    while todo:
+        s = todo.pop()
+        if s in seen:
+            continue
+        seen.add(s)
+        todo.extend(USED_BY.get(s, []))
+    return [s for s in STAGES if s in seen]
+
+
+RUN_LOCK = ".run.lock"
+
+
+def busy(work) -> bool:
+    """True while some process runs the pipeline on this work folder."""
+    lock = FileLock(str(Path(work) / RUN_LOCK))
+    try:
+        lock.acquire(timeout=0)
+    except Timeout:
+        return True
+    lock.release()
+    return False
+
+
+def run(work, stages: list[str] | None = None, force: list[str] | tuple = (), cfg: dict | None = None) -> dict:
+    p = Project(work)
+    meta = p.meta
+    guard.check_window(meta.get("video", ""), float(meta.get("t0") or 0.0), float(meta.get("t1") or 0.0),
+                       meta.get("duration"))
+    # one run per work folder: a second GUI, a CLI run or a leftover process would overwrite the same files
+    lock = FileLock(str(p.path(RUN_LOCK)))
+    try:
+        lock.acquire(timeout=2)
+    except Timeout:
+        raise RuntimeError(f"{p.work}: 다른 곳에서 이 작업을 분석하는 중입니다") from None
+    try:
+        return _run(p, stages, force, cfg)
+    finally:
+        lock.release()
+
+
+def _run(p: Project, stages: list[str] | None, force, cfg: dict | None) -> dict:
+    cfg = dict(cfg or {})
+    todo = stages or STAGES
+    for name in list(todo) + [f for f in force if f != "all"]:
+        if name not in STAGES:
+            raise ValueError(f"unknown stage {name}")
+    clear = STAGES if "all" in force else dependents(force)
+    for name in clear:
+        for rel in OUTPUTS.get(name, []):
+            f = p.path(rel)
+            if f.exists():
+                f.unlink()
+    if clear:
+        log.info("cleared outputs of: %s", ", ".join(clear))
+        # a cleared stage must run again even when --stages names only some of them
+        todo = [s for s in STAGES if s in set(todo) | set(clear)] if stages else STAGES
+    report = read_json(p.path("run_log.json"), {}) or {}
+    for name in todo:
+        mod = importlib.import_module(f".stages.{name}", __package__)
+        t = time.time()
+        log.info("== stage %s", name)
+        res = mod.run(p, cfg) or {}
+        res["seconds"] = round(time.time() - t, 1)
+        report[name] = res
+        write_json(p.path("run_log.json"), report)
+        log.info("== stage %s: %s", name, {k: v for k, v in res.items() if not isinstance(v, (list, dict))})
+    if p.path("items.json").exists() and p.path("dialogue.json").exists():
+        t = time.time()
+        log.info("== stage placement")
+        draft = p.recompute()
+        report["placement"] = {**draft.get("summary", {}), "seconds": round(time.time() - t, 1)}
+        write_json(p.path("run_log.json"), report)
+        log.info("== stage placement: %s", report["placement"])
+    return report
