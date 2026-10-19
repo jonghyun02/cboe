@@ -5,8 +5,11 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from cboe import ontology, phrases, script
+from cboe import ontology, paths, phrases, script
 from cboe.stages import align, recommend, sfx
+
+# the class list comes from the PretrainedSED code (tools/setup_third_party.py on a fresh clone)
+needs_psed = pytest.mark.skipif(not paths.PSED_CODE.exists(), reason="PretrainedSED code is not set up")
 
 
 # ------------------------------------------------------------------ 대본 읽기
@@ -82,6 +85,7 @@ def test_align_lines_anchors_and_interpolation(tmp_path):
 
 
 # ------------------------------------------------------------------ 계층
+@needs_psed
 def test_ontology_horn_path():
     o = ontology.get()
     horn = "Vehicle horn, car horn, honking, toot"
@@ -90,6 +94,7 @@ def test_ontology_horn_path():
     assert o.related("Car", horn) and not o.related("Thunder", horn)
 
 
+@needs_psed
 def test_resolve_descends_and_climbs():
     o = ontology.get()
     horn = "Vehicle horn, car horn, honking, toot"
