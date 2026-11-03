@@ -81,7 +81,7 @@ class WindowApi:
             res = self._window.create_file_dialog(webview.FileDialog.FOLDER)
         else:
             types = (("영상 (*.mp4;*.mkv;*.mov;*.avi;*.webm;*.m4v;*.ts;*.wmv)", "모든 파일 (*.*)") if kind == "video"
-                     else ("대본 (*.txt;*.srt;*.vtt;*.csv;*.tsv;*.json)", "모든 파일 (*.*)"))
+                     else ("대본 (*.txt;*.docx;*.srt;*.vtt;*.csv;*.tsv;*.json)", "모든 파일 (*.*)"))
             res = self._window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=False, file_types=types)
         if not res:
             return None

@@ -24,6 +24,45 @@ def test_script_txt(tmp_path):
     assert not d["timed"]
 
 
+DUB_SCRIPT = ["9월 활동 <작품> - 가, 나", "", "—", "역할 [홍길동, 성춘향]", "가: 홍길동", "나: 성춘향", "—",
+              "S#1 [교실]", "(NA)길동: 학교에 온 지 한 달. 이곳은 생각보다", " / 편한 곳이 되었다.",
+              "춘향: 안녕하세요. / 오랜만이에요.", "길동: (물 마시고 뱉는 호)", "춘향 : (호) 네!", "<회상>",
+              "친구1 : 어서 오세요.", "춘향/길동 : 어?!", "\t길동(E): 시너(thinner) 냄새… 1/2만", "S#2 [복도]"]
+
+
+def test_script_dubbing_conventions(tmp_path):
+    f = tmp_path / "s.txt"
+    f.write_text("\n".join(DUB_SCRIPT), encoding="utf-8")
+    d = script.read(f)
+    assert [(ln["speaker"], ln["text"]) for ln in d["lines"]] == [
+        ("길동", "학교에 온 지 한 달. 이곳은 생각보다 편한 곳이 되었다."), ("춘향", "안녕하세요. 오랜만이에요."),
+        ("춘향", "네!"), ("친구1", "어서 오세요."), ("춘향/길동", "어?!"), ("길동", "시너 냄새… 1/2만")]
+    assert d["characters"] == ["길동", "춘향", "친구1"]
+
+
+def _docx(path, paragraphs, table_rows=()):
+    import zipfile
+    from xml.sax.saxutils import escape
+    w = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    para = lambda t: "<w:p>" + "".join(                                      # noqa: E731
+        (f'<w:r><w:t xml:space="preserve">{escape(seg)}</w:t></w:r>' if i == 0 else
+         f'<w:r><w:br/><w:t xml:space="preserve">{escape(seg)}</w:t></w:r>')
+        for i, seg in enumerate(t.split("\n"))) + "</w:p>"
+    tbl = "".join("<w:tr>" + "".join(f"<w:tc>{para(c)}</w:tc>" for c in row) + "</w:tr>" for row in table_rows)
+    body = "".join(para(t) for t in paragraphs) + (f"<w:tbl>{tbl}</w:tbl>" if table_rows else "")
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("[Content_Types].xml", "<Types/>")
+        z.writestr("word/document.xml", f'<w:document xmlns:w="{w}"><w:body>{body}</w:body></w:document>')
+
+
+def test_script_docx_paragraphs_breaks_and_tables(tmp_path):
+    f = tmp_path / "s.docx"
+    _docx(f, DUB_SCRIPT[:9] + ["춘향: 안녕하세요.\n길동: 어."], table_rows=[("춘향", "표 대사예요."), ("S#3 [끝]", "")])
+    d = script.read(f)
+    assert [(ln["speaker"], ln["text"]) for ln in d["lines"]] == [
+        ("길동", "학교에 온 지 한 달. 이곳은 생각보다"), ("춘향", "안녕하세요."), ("길동", "어."), ("춘향", "표 대사예요.")]
+
+
 def test_script_srt_keeps_times_and_names(tmp_path):
     f = tmp_path / "s.srt"
     f.write_text("1\n00:00:01,000 --> 00:00:02,500\n(빌) 아니, 너무 늦었어\n\n2\n00:00:03,000 --> 00:00:04,000\n"

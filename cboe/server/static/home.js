@@ -196,7 +196,7 @@
 
   function introHtml() {
     return `<div class="intro"><h2>이렇게 씁니다</h2><ol>
-      <li><span class="n">1</span><div><b>새 작업</b><span class="muted">영상과 대본을 고른다 · 대본은 한 줄에 <code>이름: 대사</code></span></div></li>
+      <li><span class="n">1</span><div><b>새 작업</b><span class="muted">영상과 대본을 고른다 · 대본은 한 줄에 <code>이름: 대사</code> (txt · docx · srt)</span></div></li>
       <li><span class="n">2</span><div><b>분석</b><span class="muted">음원 분리 · 후보 검출 · 화면 · 화자 · 대사 근거 · 추천 · 에이전트 재확인 · 초안 배치</span></div></li>
       <li><span class="n">3</span><div><b>검수</b><span class="muted">근거를 보고 포함 · 제외를 정하고 문구 · 화자 · 자리를 고친다</span></div></li>
       <li><span class="n">4</span><div><b>내보내기</b><span class="muted">가독성 검사 뒤 SRT · VTT 로 저장</span></div></li>

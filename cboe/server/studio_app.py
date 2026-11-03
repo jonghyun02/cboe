@@ -34,7 +34,7 @@ from ..studio import STAGE_LABELS, JobBusy, JobManager, Workspace, open_folder
 from ..util import NO_WINDOW, log
 from .app import STATIC, LocalOnly, SafeJSONResponse, create_app
 
-SCRIPT_TYPES = {".txt", ".srt", ".vtt", ".csv", ".tsv", ".json"}
+SCRIPT_TYPES = {".txt", ".docx", ".srt", ".vtt", ".csv", ".tsv", ".json"}
 SCRIPT_MAX_BYTES = 20 * 1024 * 1024
 
 RUN_MODES = {"continue": [], "all": ["all"]}     # 이어서 (끝난 단계 건너뜀) / 처음부터 다시
@@ -83,7 +83,7 @@ kind = sys.argv[1]
 if kind == "video":
     p = filedialog.askopenfilename(title="영상 파일 고르기", filetypes=[("영상", "*.mp4 *.mkv *.mov *.avi *.webm *.m4v *.ts *.wmv"), ("모든 파일", "*.*")])
 elif kind == "script":
-    p = filedialog.askopenfilename(title="대본 파일 고르기", filetypes=[("대본", "*.txt *.srt *.vtt *.csv *.tsv *.json"), ("모든 파일", "*.*")])
+    p = filedialog.askopenfilename(title="대본 파일 고르기", filetypes=[("대본", "*.txt *.docx *.srt *.vtt *.csv *.tsv *.json"), ("모든 파일", "*.*")])
 else:
     p = filedialog.askdirectory(title="폴더 고르기")
 sys.stdout.write(p or "")
@@ -289,7 +289,7 @@ def create_studio_app(workspace: Path | None = None) -> LocalOnly:
             if not p.is_file():
                 out["script"] = {"ok": False, "error": "파일이 없습니다"}
             elif p.suffix.lower() not in SCRIPT_TYPES:
-                out["script"] = {"ok": False, "error": "대본은 txt · srt · vtt · csv · tsv · json 파일입니다"}
+                out["script"] = {"ok": False, "error": "대본은 txt · docx · srt · vtt · csv · tsv · json 파일입니다"}
             elif p.stat().st_size > SCRIPT_MAX_BYTES:
                 out["script"] = {"ok": False, "error": "대본 파일이 너무 큽니다"}
             else:
