@@ -16,7 +16,7 @@ import soxr
 
 from .. import paths
 from ..media import write_wav
-from ..util import free_gpu, gpu_lock, log, timed
+from ..util import device, free_gpu, gpu_lock, log, timed
 
 STEMS = ("speech", "music", "effects")
 SR = 48000
@@ -50,9 +50,10 @@ def _load_bandit():
     return model.eval()
 
 
-def overlap_add(model, x: np.ndarray, device: str = "cuda") -> np.ndarray:
+def overlap_add(model, x: np.ndarray, dev: str | None = None) -> np.ndarray:
     """Chunked inference; returns [3, n] in STEMS order."""
     import torch
+    dev = dev or device()
     C, H = int(round(CHUNK_S * SR)), int(round(HOP_S * SR))
     k = C // H
     n = len(x)
@@ -61,7 +62,7 @@ def overlap_add(model, x: np.ndarray, device: str = "cuda") -> np.ndarray:
     total = (n_chunks - 1) * H + C
     pad_end = total - n - front
     xp = np.pad(x, (front, pad_end), mode="reflect" if n > max(front, pad_end) else "constant")
-    win = torch.hann_window(C, periodic=True, device=device) / (k / 2)
+    win = torch.hann_window(C, periodic=True, device=dev) / (k / 2)
     out = np.zeros((3, total), dtype=np.float32)
     xt = torch.from_numpy(xp.astype(np.float32))
     starts = [i * H for i in range(n_chunks)]
@@ -70,7 +71,7 @@ def overlap_add(model, x: np.ndarray, device: str = "cuda") -> np.ndarray:
         for b in range(0, len(starts), BATCH):
             progress("separate", b, len(starts))
             sts = starts[b:b + BATCH]
-            xb = torch.stack([xt[s:s + C] for s in sts]).to(device)
+            xb = torch.stack([xt[s:s + C] for s in sts]).to(dev)
             est = model({"mixture": {"audio": xb[:, None, :]}})["estimates"]
             y = torch.stack([est["speech"]["audio"][:, 0], est["music"]["audio"][:, 0], est["sfx"]["audio"][:, 0]], 1)
             y = (y * win).float().cpu().numpy()
@@ -87,10 +88,11 @@ def run(p, cfg: dict) -> dict:
     x, sr = sf.read(str(adir / "mix_48k.wav"), dtype="float32", always_2d=True)
     x = x.mean(axis=1)
     assert sr == SR
-    with gpu_lock(), timed(f"Bandit v2 separation ({len(x) / SR:.0f}s audio)"):
-        model = _load_bandit().to("cuda")
+    dev = device()
+    with gpu_lock(), timed(f"Bandit v2 separation ({len(x) / SR:.0f}s audio, {dev})"):
+        model = _load_bandit().to(dev)
         try:
-            y = overlap_add(model, x)
+            y = overlap_add(model, x, dev)
         finally:
             del model
             free_gpu()

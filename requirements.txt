@@ -1,5 +1,6 @@
 # CBoE (Windows, Python 3.11, NVIDIA GPU with CUDA 12.8). Exact versions this was tested with:
 # requirements-lock.txt.   uv venv --python 3.11 .venv && uv pip install -r requirements.txt
+# Intel GPU or no GPU: run setup.cmd instead (tools/setup_env.py picks the PyTorch build and the extras).
 --extra-index-url https://download.pytorch.org/whl/cu128
 torch
 torchaudio

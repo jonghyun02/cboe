@@ -51,7 +51,9 @@ def _content(parts) -> list[dict]:
 def _run(cmd: list[str], stdin: bytes, timeout: float, trace: list | None = None,
          require_mcp: str | None = None) -> dict:
     from .util import NO_WINDOW
-    env = {**os.environ, "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "ENABLE_TOOL_SEARCH": "false"}
+    # MCP_TOOL_TIMEOUT: the first describe_sound may wait for the sound model to load (slow GPUs)
+    env = {"MCP_TOOL_TIMEOUT": "600000", **os.environ,
+           "CLAUDE_CODE_DISABLE_AUTO_MEMORY": "1", "ENABLE_TOOL_SEARCH": "false"}
     env.pop("CLAUDECODE", None)            # also runs when the GUI was started from inside Claude Code
     r = subprocess.run(cmd, input=stdin, capture_output=True, timeout=timeout, env=env, creationflags=NO_WINDOW)
     out = r.stdout.decode("utf-8", "replace")

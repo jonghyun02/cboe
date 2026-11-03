@@ -104,6 +104,38 @@ def pick_dialog(kind: str) -> str | None:
     return str(Path(out)) if out else None
 
 
+TORCH_GPU_CODE = r"""
+from cboe.util import device
+import torch
+d = device()
+if d.startswith("xpu"):
+    p = torch.xpu.get_device_properties(0)
+    print(d, "|", f"{p.name}, {p.total_memory // 2**20} MiB")
+elif d.startswith("cuda"):
+    p = torch.cuda.get_device_properties(0)
+    print(d, "|", f"{p.name}, {p.total_memory // 2**20} MiB")
+else:
+    print(d, "|")
+"""
+
+
+def _torch_gpu() -> tuple[str | None, str | None]:
+    """(device, "name, MiB") as the model stages will see it, for a GPU nvidia-smi does not know
+    (Intel Arc / Core Ultra through the torch xpu build). Runs in a child process so the GUI
+    process does not load torch."""
+    py = Path(sys.executable)
+    if py.name.lower() == "pythonw.exe" and py.with_name("python.exe").exists():
+        py = py.with_name("python.exe")
+    try:
+        r = subprocess.run([str(py), "-c", TORCH_GPU_CODE], capture_output=True, text=True, timeout=60,
+                           encoding="utf-8", cwd=str(paths.ROOT), creationflags=NO_WINDOW)
+        line = r.stdout.strip().splitlines()[-1] if r.returncode == 0 and r.stdout.strip() else ""
+    except Exception:
+        return None, None
+    dev, _, gpu = line.partition("|")
+    return (dev.strip() or None), (gpu.strip() or None)
+
+
 def environment() -> dict:
     """환경 점검: GPU, ffmpeg, Claude 로그인, 모델 파일."""
     env = {"python": sys.version.split()[0]}
@@ -113,6 +145,9 @@ def environment() -> dict:
         env["gpu"] = r.stdout.strip().splitlines()[0] if r.returncode == 0 and r.stdout.strip() else None
     except Exception:
         env["gpu"] = None
+    env["device"] = "cuda" if env["gpu"] else None
+    if not env["gpu"]:
+        env["device"], env["gpu"] = _torch_gpu()
     env["ffmpeg"] = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
     llm = {"cli": bool(shutil.which("claude")), "logged_in": False, "method": None}
     if llm["cli"]:

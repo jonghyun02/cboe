@@ -17,7 +17,7 @@ import numpy as np
 import soundfile as sf
 
 from .. import paths
-from ..util import free_gpu, gpu_lock, timed
+from ..util import device, free_gpu, gpu_lock, timed
 
 SR = 16000
 FPS = 25
@@ -59,9 +59,10 @@ def _tri() -> np.ndarray:
     return np.maximum(w, 1e-3).astype(np.float32)
 
 
-def infer(model, x: np.ndarray, device: str = "cuda", batch: int = 16) -> np.ndarray:
+def infer(model, x: np.ndarray, dev: str | None = None, batch: int = 16) -> np.ndarray:
     """Frame scores [n_frames, 447] for mono 16 kHz audio."""
     import torch
+    dev = dev or device()
     n_frames = int(np.ceil(len(x) / SR * FPS))
     starts = list(range(0, max(n_frames - SEG_F, 0) + HOP_F, HOP_F))
     seg = SEG_S * SR
@@ -78,7 +79,7 @@ def infer(model, x: np.ndarray, device: str = "cuda", batch: int = 16) -> np.nda
                 c = torch.nn.functional.pad(c, (0, seg - len(c)))
             chunks.append(c)
         with torch.no_grad():
-            mel = model.mel_forward(torch.stack(chunks).to(device))
+            mel = model.mel_forward(torch.stack(chunks).to(dev))
             y, _ = model(mel)
             pr = torch.sigmoid(y.float()).transpose(1, 2).cpu().numpy()
         if acc is None:
@@ -117,15 +118,16 @@ def run(p, cfg: dict) -> dict:
     out = {}
     if todo:
         names = class_names()
-        with gpu_lock(), timed(f"PretrainedSED on {', '.join(todo)}"):
-            model = build_model().to("cuda")
+        dev = device()
+        with gpu_lock(), timed(f"PretrainedSED on {', '.join(todo)} ({dev})"):
+            model = build_model().to(dev)
             try:
                 from ..util import progress, save_npz
                 for ki, k in enumerate(todo):
                     progress("sed", ki, len(todo), k)
                     x, sr = sf.read(str(p.path("audio") / f"{TRACKS[k]}.wav"), dtype="float32", always_2d=True)
                     assert sr == SR
-                    probs = infer(model, x.mean(axis=1))
+                    probs = infer(model, x.mean(axis=1), dev)
                     save_npz(p.path(f"sed_{k}.npz"), probs=probs.astype(np.float16), fps=FPS,
                              classes=np.array(names), t0=t0)
                     out[k] = int(len(probs))

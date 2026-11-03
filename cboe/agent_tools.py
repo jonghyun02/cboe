@@ -7,7 +7,8 @@
 | 화면과 소리가 안 맞음 | ``look_frames`` (관련 장면 프레임) |
 | 줄거리 의미가 불명확 | ``dialogue_around``, ``search_dialogue``, ``scene_context`` (앞뒤 장면·전체 대사) |
 
-``describe_sound`` runs Qwen2.5-Omni-3B (thinker only, bf16, local GPU; Qwen research
+``describe_sound`` runs Qwen2.5-Omni-3B (thinker only, bf16 — its language model int8 on a GPU
+under 11 GiB — local GPU; Qwen research
 license) on the clip and is serialised with a lock; the other tools read the files the
 pipeline already wrote.
 """
@@ -22,7 +23,23 @@ import numpy as np
 from . import ontology, paths, phrases
 from .media import Media, jpeg_bytes
 from .stages import sed
-from .util import fmt_time, free_gpu, read_json
+from .util import device, fmt_time, free_gpu, log, read_json
+
+
+OMNI_BF16_GIB = 11.0          # GPU memory the bf16 thinker needs with room for the clip
+
+
+def _gpu_gib(dev: str) -> float:
+    """Total memory of the torch device in GiB (inf on the CPU: nothing to save there)."""
+    import torch
+    try:
+        if dev.startswith("cuda"):
+            return torch.cuda.get_device_properties(0).total_memory / 2**30
+        if dev.startswith("xpu"):
+            return torch.xpu.get_device_properties(0).total_memory / 2**30
+    except Exception:
+        pass
+    return float("inf")
 
 
 def _norm(s: str) -> str:
@@ -41,7 +58,8 @@ class Tools:
         self.cuts = (read_json(p.path("cuts.json"), {}) or {}).get("cuts", [])
         self.items = (read_json(p.path("items.json"), {}) or {}).get("items", [])
         self._omni = None
-        self._omni_lock = threading.Lock()
+        self._omni_lock = threading.RLock()                # preload holds it while _describe takes it
+        self._closed = False
         self._frame_lock = threading.Lock()
         self.calls: dict[str, int] = {}
 
@@ -72,8 +90,21 @@ class Tools:
         import torch
         from transformers import Qwen2_5OmniProcessor
         from transformers import Qwen2_5OmniThinkerForConditionalGeneration as Thinker
-        model = Thinker.from_pretrained(str(paths.QWEN_OMNI), dtype=torch.bfloat16, device_map="cuda",
-                                        attn_implementation="sdpa").eval()
+        dev = device()
+        kw = {}
+        if _gpu_gib(dev) < OMNI_BF16_GIB:
+            # the thinker is 8.8 GiB in bf16; on a smaller GPU (8 GB Arc 130V) its language model
+            # goes int8 weight-only while loading (6.2 GiB in all; audio and vision towers, lm_head
+            # stay bf16). Checked on the test clip: laugh / gasp / thunder still told apart.
+            try:
+                from torchao.quantization import Int8WeightOnlyConfig
+                from transformers import TorchAoConfig
+                kw["quantization_config"] = TorchAoConfig(
+                    Int8WeightOnlyConfig(), modules_to_not_convert=["visual", "audio_tower", "lm_head"])
+            except ImportError:
+                pass
+        model = Thinker.from_pretrained(str(paths.QWEN_OMNI), dtype=torch.bfloat16, device_map=dev,
+                                        attn_implementation="sdpa", **kw).eval()
         proc = Qwen2_5OmniProcessor.from_pretrained(str(paths.QWEN_OMNI))
         self._omni = (model, proc)
 
@@ -83,7 +114,14 @@ class Tools:
         end = max(end, start + 0.5)
         name = {"effects": "effects_16k", "mix": "mix_16k"}.get(track, "effects_16k")
         x, sr = self.media.load_audio(name, start, min(end, start + 10.0))
+        ans = self._describe(x)
+        return f"소리 설명 모델(Qwen2.5-Omni-3B, {track} 트랙 {fmt_time(start)}~{fmt_time(end)}): {ans}"
+
+    def _describe(self, x: np.ndarray) -> str:
+        """Qwen2.5-Omni's one-phrase description of a 16 kHz mono clip."""
         with self._omni_lock:
+            if self._closed:                              # a call that waited past the end of the stage
+                raise RuntimeError("the agent stage is over; the sound description model was unloaded")
             if self._omni is None:
                 self._load_omni()
             model, proc = self._omni
@@ -102,13 +140,32 @@ class Tools:
             with torch.no_grad():
                 out = model.generate(**inp, max_new_tokens=40, do_sample=False, eos_token_id=[151645, 151643],
                                      pad_token_id=151643)
-            ans = proc.batch_decode(out[:, inp["input_ids"].shape[1]:], skip_special_tokens=True)[0].strip()
-        return f"소리 설명 모델(Qwen2.5-Omni-3B, {track} 트랙 {fmt_time(start)}~{fmt_time(end)}): {ans}"
+            return proc.batch_decode(out[:, inp["input_ids"].shape[1]:], skip_special_tokens=True)[0].strip()
+
+    def slow_load(self) -> bool:
+        """True where loading the sound model takes longer than a tool call should (int8 path)."""
+        return _gpu_gib(device()) < OMNI_BF16_GIB
+
+    def preload(self) -> None:
+        """Load the sound description model and run it once on silence, so that the agents'
+        first describe_sound does not wait for it (int8 load + first GPU kernels: ~1.5 min on
+        an Arc 130V, longer than a tool call may take)."""
+        try:
+            with self._omni_lock:
+                if self._closed:
+                    return
+                if self._omni is None:
+                    self._load_omni()
+                self._describe(np.zeros(16000, np.float32))
+        except Exception as e:                            # describe_sound will report it when called
+            log.warning("sound description model not preloaded: %s", e)
 
     def close(self):
-        if self._omni is not None:
-            self._omni = None
-            free_gpu()
+        with self._omni_lock:                             # waits for a preload still running
+            self._closed = True
+            if self._omni is not None:
+                self._omni = None
+                free_gpu()
 
     # ----------------------------------------------------------------- 화면
     def look_frames(self, time: float, span: float = 2.0, count: int = 4) -> list:

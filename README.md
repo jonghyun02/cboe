@@ -50,7 +50,7 @@ cd C:\projects\barrier_free\cboe
 | separate | 5.2 음원 분리 | 대사·음악·효과음 3트랙 | Bandit v2 다국어판 |
 | cuts | 5.5 장면 나누기 | 장면 전환 | TransNetV2 |
 | sed | 5.3·5.4 | 효과음·원본·음악 트랙 447종 점수(40ms), 트랙 소리 세기 | PretrainedSED (BEATs) |
-| asr, align | 5.2 대사 트랙 | 받아쓰기 낱말 시각, 대본 줄 정렬(못 맞춘 줄은 목소리 구간에 배치) | faster-whisper large-v3 |
+| asr, align | 5.2 대사 트랙 | 받아쓰기 낱말 시각, 대본 줄 정렬(못 맞춘 줄은 목소리 구간에 배치) | Whisper large-v3 (faster-whisper; 인텔 GPU는 OpenVINO) |
 | sfx | 5.3 효과음 검출 | 소리 첫 프레임, 확실한 만큼 구체적인 종류(AudioSet 계층), 목록 밖 소리 | 규칙 + 계층 |
 | music | 5.4 음악 검출 | 구간, 새 음악, 분위기 7종 비율, 악기, 고조·잦아듦 | PretrainedSED 'Music', AST |
 | speaker | 5.6 화자 근거 | 줄마다 말하는 얼굴이 보이나 | YuNet + LR-ASD |
@@ -63,20 +63,41 @@ cd C:\projects\barrier_free\cboe
 
 ## 다른 PC에 설치
 
-Windows · Python 3.11 · NVIDIA GPU(12GB, CUDA 12.8) · ffmpeg(PATH) · Claude Code CLI 로그인(LLM을 쓸 때).
+Windows 10/11이면 된다. uv·git·ffmpeg가 없으면 `setup.cmd`가 winget으로 깐다(git이 없으면 GitHub의 Code → Download ZIP으로 받아 풀어도 된다).
+GPU는 아래 셋 중 하나면 된다. 가중치까지 약 20GB를 받으니 디스크 여유를 확인한다.
 
 ```
 git clone https://github.com/jonghyun02/cboe.git && cd cboe
-uv venv --python 3.11 .venv
-uv pip install --python .venv\Scripts\python.exe -r requirements.txt     # 시험한 그대로: requirements-lock.txt
-.venv\Scripts\python.exe tools\setup_third_party.py                      # LR-ASD·Bandit v2·PretrainedSED·TransNetV2 코드
-.venv\Scripts\python.exe -m cboe doctor                                   # 빠진 가중치 확인 (weights\ 아래에 둔다)
-powershell -ExecutionPolicy Bypass -File tools\make_shortcut.ps1           # 바탕화면 바로가기
+setup.cmd                # GPU를 보고 맞는 PyTorch를 골라 .venv에 설치 → 외부 코드 → 가중치(체크섬 확인) → doctor
+setup.cmd --shortcut     # + 바탕화면 바로가기
+cboe-gui.cmd             # 실행 (uv·ffmpeg를 방금 깔았으면 새 창에서)
 ```
 
-- 가중치: Bandit v2 다국어판 → `weights\bandit_v2\checkpoint-multi.ckpt`, PretrainedSED → `weights\pretrainedsed\BEATs_strong_1.pt`,
-  TransNetV2 → `weights\transnetv2\transnetv2-pytorch-weights.pth`, Qwen2.5-Omni-3B → `weights\qwen25omni3b`(받는 곳은 각 저장소 README).
-  LR-ASD 가중치는 저장소에 들어 있고, Whisper large-v3·AST는 처음 쓸 때 Hugging Face에서 받는다. 다른 곳에 두려면 `CBOE_<이름>` 환경 변수(`cboe/paths.py`).
+- LLM 근거·재확인 에이전트를 쓰려면 각자 [Claude Code](https://claude.com/claude-code)를 깔고 터미널에서 `claude`로 로그인한다.
+  로그인이 없으면 규칙으로만 분석한다(아래 'LLM 사용과 주의').
+
+| 이 PC의 GPU | PyTorch | 받아쓰기 | 얼굴 찾기(YuNet) | 소리 설명(Qwen2.5-Omni) |
+|---|---|---|---|---|
+| NVIDIA (CUDA 12.8, 12GB 이상) | `cu128` | faster-whisper, 빔 5 | OpenCV (CPU) | bf16 |
+| 인텔 Arc · Core Ultra 내장 Arc (Arc 130V 8GB에서 시험) | `xpu` | 같은 가중치를 OpenVINO로, 그리디 | OpenVINO (GPU) | 언어 모델만 int8 |
+| 없음 | `cpu` | faster-whisper int8 | OpenCV (CPU) | bf16 (매우 느림) |
+
+- 모델 단계는 `cboe/util.py`의 `device()`가 고른 장치(CUDA → XPU → CPU 순)에서 돈다. `doctor` 첫 줄이 고른 장치이고,
+  `CBOE_DEVICE=cpu`처럼 바꿀 수 있다. `setup.cmd --torch cu128|xpu|cpu`는 PyTorch 판을 강제하고, `--no-weights`는 코드·패키지만 깐다.
+- 인텔 GPU에서 달라지는 것 (85초 시험 구간, 원래 방식과 비교):
+  - 받아쓰기는 faster-whisper(CTranslate2)가 인텔 GPU를 못 써서 같은 large-v3 fp16을 OpenVINO로 돌린다. 7~15초(faster-whisper CPU 119초).
+    낱말 시각은 faster-whisper와 대부분 0.02초 안이고, 쉬었다 말한 첫 낱말 보정도 같게 한다. 다만 빔 검색이 아니라 그리디이고 낱말 확률 `p`는 비운다(읽는 곳 없음).
+  - 얼굴 찾기는 OpenCV 5가 GPU 지정을 무시해서 같은 YuNet을 OpenVINO GPU(fp32)로 돌린다. 434프레임 모두 OpenCV와 같은 결과, 프레임당 18ms(CPU 128ms 이상).
+  - 소리 설명 모델은 bf16이면 8.8GB라 8GB GPU에 안 들어가서, 11GB보다 작은 GPU에서는 언어 모델 부분만 int8로 올린다(6.2GB).
+    에이전트 단계가 시작될 때 미리 불러 둔다(Arc 130V 약 1분 반, 그 뒤 호출당 약 10초).
+  - 음원 분리 122초(CPU 590초, 결과 차이 SNR 74dB 이상), 장면 나누기 10초, 효과음 점수 15초. 말하는 얼굴(LR-ASD)은 처음 몇 번 GPU 커널 준비로 30초쯤 더 든다.
+- 가중치(받는 곳·체크섬은 `tools/setup_env.py`): Bandit v2 다국어판 → `weights\bandit_v2\checkpoint-multi.ckpt`(Zenodo), PretrainedSED →
+  `weights\pretrainedsed\BEATs_strong_1.pt`(GitHub 릴리스), TransNetV2 → `weights\transnetv2\transnetv2-pytorch-weights.pth`(공식 TF 가중치를
+  `convert_weights.py`로 바꾼 것과 텐서가 같은 HF 사본), Qwen2.5-Omni-3B → `weights\qwen25omni3b`. LR-ASD 가중치는 저장소에 들어 있고,
+  Whisper·AST는 Hugging Face 캐시에 받는다. 다른 곳에 두려면 `CBOE_<이름>` 환경 변수(`cboe/paths.py`).
+- 손으로 깔 때(NVIDIA): `uv venv --python 3.11 .venv` → `uv pip install --python .venv\Scripts\python.exe -r requirements.txt`(시험한 그대로는
+  `requirements-lock.txt`) → `.venv\Scripts\python.exe tools\setup_third_party.py` → `.venv\Scripts\python.exe -m cboe doctor`.
+- Docker는 쓰지 않는다. Windows의 Docker(WSL2)는 인텔 GPU를 거의 못 쓰고, 데스크톱 창·파일 고르기 창이 컨테이너 안에서 안 뜨며, GPU 종류마다 이미지가 따로 필요하다.
 - 이 PC는 예전 데모 폴더(`barrier_free\demo`)의 코드·가중치를 그대로 쓴다(있으면 그쪽이 먼저).
 - 시험: `.venv\Scripts\python.exe -m pytest` (GPU 없이 도는 단위·서버·GUI 서버 시험).
 

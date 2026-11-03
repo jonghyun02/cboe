@@ -76,6 +76,9 @@ def main(argv=None):
         print(Project(args.work).export(args.format))
     elif args.cmd == "doctor":
         from . import paths
+        from .util import device, device_name
+        dev = device()
+        print(f"device  {dev}" + (f" ({device_name()})" if device_name() else " (no CUDA/XPU GPU: slow)"))
         for k, v in paths.check().items():
             print(f"{'OK ' if v else 'MISSING'} {k}")
     return 0

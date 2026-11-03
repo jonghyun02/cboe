@@ -118,13 +118,15 @@
   function shortGpu(s) {
     const [name, mem] = String(s).split(',').map((x) => x.trim());
     const gb = mem ? Math.round(parseFloat(mem) / 1024) : 0;
-    return `${name.replace(/^NVIDIA\s+/, '').replace(/^GeForce\s+/, '')}${gb ? ` · ${gb}GB` : ''}`;
+    const short = name.replace(/^NVIDIA\s+/, '').replace(/^GeForce\s+/, '').replace(/^Intel\(R\)\s+/, '')
+      .replace(/\(TM\)/g, '').replace(/\s*\(\d+GB\)/, '').replace(/\s+GPU$/, '');
+    return `${short}${gb ? ` · ${gb}GB` : ''}`;
   }
   function renderEnv() {
     const e = S.data.env || {};
     const chip = (cls, text, title) => `<button type="button" class="echip ${cls}" data-act="env" title="${esc(title || '')}"><i></i>${esc(text)}</button>`;
     const out = [];
-    out.push(e.gpu ? chip('ok', shortGpu(e.gpu), e.gpu) : chip('bad', 'GPU 없음', 'CUDA GPU 가 있어야 분석할 수 있습니다'));
+    out.push(e.gpu ? chip('ok', shortGpu(e.gpu), e.gpu) : chip('warn', 'GPU 없음 · CPU', 'NVIDIA(CUDA) · 인텔(XPU) GPU 를 찾지 못해 CPU 로 분석합니다(많이 느림)'));
     if (!e.ffmpeg) out.push(chip('bad', 'ffmpeg 없음', 'ffmpeg · ffprobe 를 PATH 에 두세요'));
     const l = e.llm || {};
     out.push(l.logged_in ? chip('ok', 'Claude 연결됨', '화면 근거 · 대사 근거 · 재확인 에이전트에 씀')
@@ -697,7 +699,7 @@
       <div class="mdl-head"><span class="logo" aria-hidden="true">SDH</span><h3 id="modal-title">환경 점검</h3><span class="spacer"></span>
         <button type="button" class="icon-btn" data-act="close" aria-label="닫기">×</button></div>
       <div class="envlist">
-        ${row(e.gpu ? 'ok' : 'bad', 'GPU', esc(e.gpu || 'CUDA GPU 를 찾지 못했습니다'))}
+        ${row(e.gpu ? 'ok' : 'warn', 'GPU', e.gpu ? `${esc(e.gpu)} · ${esc(e.device || '')}` : 'NVIDIA(CUDA) · 인텔(XPU) GPU 를 찾지 못했습니다 · CPU 로 분석(많이 느림)')}
         ${row(e.ffmpeg ? 'ok' : 'bad', 'ffmpeg', e.ffmpeg ? '있음' : 'PATH 에서 찾지 못했습니다')}
         ${row(l.logged_in ? 'ok' : 'warn', 'Claude', l.logged_in ? `로그인됨 (${esc(l.method || '')}) · 화면 근거 · 대사 근거 · 재확인 에이전트에 씀`
     : l.cli ? '로그인이 필요합니다 · 터미널에서 <code>claude</code> 를 실행해 로그인' : 'Claude Code CLI 를 찾지 못했습니다 · 규칙으로만 분석')}

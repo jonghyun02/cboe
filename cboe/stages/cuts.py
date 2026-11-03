@@ -15,7 +15,7 @@ import numpy as np
 
 from .. import paths
 from ..media import Media
-from ..util import free_gpu, gpu_lock, timed, write_json
+from ..util import device, free_gpu, gpu_lock, timed, write_json
 
 THRESHOLD = 0.5
 
@@ -70,10 +70,11 @@ def run(p, cfg: dict) -> dict:
     with timed("TransNetV2 decode"):
         # decode at the native frame grid: frame i of the clip is shown at t0 + i / fps
         frames = m.frames(m.t0, m.t1, 48, 27)
-    with gpu_lock(), timed(f"TransNetV2 ({len(frames)} frames)"):
-        model = _load("cuda")
+    dev = device()
+    with gpu_lock(), timed(f"TransNetV2 ({len(frames)} frames, {dev})"):
+        model = _load(dev)
         try:
-            pred = predict(model, frames, "cuda")
+            pred = predict(model, frames, dev)
         finally:
             del model
             free_gpu()

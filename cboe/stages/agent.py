@@ -14,6 +14,7 @@ Writes agent/<id>.json (prompt, tool calls, answer), agent_results.json, updates
 """
 from __future__ import annotations
 
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -186,12 +187,17 @@ def run(p, cfg: dict) -> dict:
         # the sound description model stays on the GPU for the whole stage: hold the GPU lock
         from ..util import progress
         with gpu_lock(), ThreadPoolExecutor(max_workers=max(1, int(cfg.get("jobs", 3)))) as ex:
-            for k, (iid, res) in enumerate(ex.map(one, queue), 1):
-                progress("agent", k, len(queue), iid)
-                if res.get("status") == "done":
-                    results[iid] = res
-                log.info("agent %s: %s (%s)", iid, res.get("summary", "")[:60], ",".join(res.get("tools", [])))
-                write_json(p.path("agent_results.json"), {"items": results, "tool_calls": dict(tools.calls)})
+            try:
+                if tools.slow_load():                     # ready before the first call
+                    threading.Thread(target=tools.preload, daemon=True).start()
+                for k, (iid, res) in enumerate(ex.map(one, queue), 1):
+                    progress("agent", k, len(queue), iid)
+                    if res.get("status") == "done":
+                        results[iid] = res
+                    log.info("agent %s: %s (%s)", iid, res.get("summary", "")[:60], ",".join(res.get("tools", [])))
+                    write_json(p.path("agent_results.json"), {"items": results, "tool_calls": dict(tools.calls)})
+            finally:
+                tools.close()                             # still holding the GPU lock (waits for a preload)
     finally:
         tools.close()
         server.should_exit = True

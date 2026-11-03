@@ -21,7 +21,7 @@ import numpy as np
 import soundfile as sf
 
 from .. import paths, phrases
-from ..util import free_gpu, gpu_lock, log, timed, write_json
+from ..util import device, free_gpu, gpu_lock, log, timed, write_json
 from . import sed
 
 T_ON, T_OFF = 0.30, 0.15
@@ -93,7 +93,8 @@ def _ast_windows(x: np.ndarray, sr: int, starts: list[float]) -> tuple[np.ndarra
     import torch
     from transformers import ASTFeatureExtractor, ASTForAudioClassification
     fe = ASTFeatureExtractor.from_pretrained(paths.AST_MODEL)
-    model = ASTForAudioClassification.from_pretrained(paths.AST_MODEL).to("cuda").eval()
+    dev = device()
+    model = ASTForAudioClassification.from_pretrained(paths.AST_MODEL).to(dev).eval()
     labels = [model.config.id2label[i] for i in range(model.config.num_labels)]
     n = int(WIN_S * sr)
     out = []
@@ -109,7 +110,7 @@ def _ast_windows(x: np.ndarray, sr: int, starts: list[float]) -> tuple[np.ndarra
                 chunk.append(seg)
             inp = fe(chunk, sampling_rate=sr, return_tensors="pt")
             with torch.no_grad():
-                logits = model(input_values=inp["input_values"].to("cuda")).logits
+                logits = model(input_values=inp["input_values"].to(dev)).logits
             out.append(torch.sigmoid(logits.float()).cpu().numpy())
     finally:
         del model

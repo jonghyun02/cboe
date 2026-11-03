@@ -2,7 +2,8 @@
 """화자 근거 (5.6): for every dialogue line, is the speaking face on screen?
 
 Per line, a clip [start - 0.5 s, start + 2.0 s] at 25 fps:
-1. 얼굴 찾기: YuNet (OpenCV FaceDetectorYN, opencv_zoo 2023mar, score >= 0.6) on every frame.
+1. 얼굴 찾기: YuNet (OpenCV FaceDetectorYN, opencv_zoo 2023mar, score >= 0.6) on every frame;
+   on an Intel GPU the same network and decoding through OpenVINO (``OVYuNet``).
 2. 따라가며 묶기: IoU tracking inside each shot (LR-ASD demo values: IoU 0.5, 10 missed
    frames, tracks longer than 10 frames), boxes interpolated over missed frames.
 3. 말하는 얼굴: LR-ASD (IJCV 2025, MIT, TalkSet fine-tuned weights) with the repo's
@@ -27,7 +28,7 @@ import numpy as np
 
 from .. import paths
 from ..media import Media
-from ..util import free_gpu, gpu_lock, log, read_json, timed, write_json
+from ..util import device, free_gpu, gpu_lock, log, read_json, timed, write_json
 
 FPS = 25
 PRE, POST, WIN = 0.5, 2.0, 1.0
@@ -55,7 +56,75 @@ def _load_lrasd():
             ms[k[6:]].copy_(v)
         elif k.startswith("lossAV.") and k[7:] in hs:
             hs[k[7:]].copy_(v)
-    return model.cuda().eval(), head.cuda().eval()
+    dev = device()
+    return model.to(dev).eval(), head.to(dev).eval()
+
+
+class OVYuNet:
+    """YuNet through OpenVINO on an Intel GPU, computing what OpenCV's FaceDetectorYN computes
+    (OpenCV 5's DNN engine ignores GPU targets): the frame padded to a multiple of 32, the same
+    decoding of the 8/16/32 strides, score = sqrt(cls * obj), cv2.dnn.NMSBoxes on int boxes.
+    fp32 on the GPU: 434/434 frames of the test clip gave the same faces as OpenCV (0.000 px),
+    18 ms a 1080p frame against 128-233 ms on the CPU. The NPU (9 ms) is fp16 only and changed
+    the face count on 2 frames, so it is not used."""
+
+    def __init__(self, w: int, h: int, device: str = "GPU"):
+        import openvino as ov
+        from openvino.preprocess import PrePostProcessor
+        self.pw, self.ph = ((w - 1) // 32 + 1) * 32, ((h - 1) // 32 + 1) * 32
+        core = ov.Core()
+        m = core.read_model(str(paths.YUNET))
+        m.reshape({"input": [1, 3, self.ph, self.pw]})
+        ppp = PrePostProcessor(m)                         # uint8 BGR HWC -> float NCHW on the device
+        ppp.input().tensor().set_element_type(ov.Type.u8).set_layout(ov.Layout("NHWC"))
+        ppp.input().model().set_layout(ov.Layout("NCHW"))
+        ppp.input().preprocess().convert_element_type(ov.Type.f32)
+        m = ppp.build()
+        self.names = [o.get_any_name() for o in m.outputs]
+        self.req = core.compile_model(m, device, {"INFERENCE_PRECISION_HINT": "f32"}).create_infer_request()
+
+    def detect(self, bgr: np.ndarray):
+        """Rows [x, y, w, h, 5 landmarks (x, y), score] like FaceDetectorYN.detect()[1], or None."""
+        h, w = bgr.shape[:2]
+        pad = cv2.copyMakeBorder(bgr, 0, self.ph - h, 0, self.pw - w, cv2.BORDER_CONSTANT, value=0)
+        res = self.req.infer({0: pad[None]})
+        out = {n: res[i] for i, n in enumerate(self.names)}
+        faces = []
+        for st in (8, 16, 32):
+            cols = self.pw // st
+            score = np.sqrt(np.clip(out[f"cls_{st}"].reshape(-1), 0, 1) * np.clip(out[f"obj_{st}"].reshape(-1), 0, 1))
+            keep = np.nonzero(score >= SCORE_THR)[0]
+            r, c = (keep // cols).astype(np.float32), (keep % cols).astype(np.float32)
+            bb, kp = out[f"bbox_{st}"].reshape(-1, 4)[keep], out[f"kps_{st}"].reshape(-1, 10)[keep].copy()
+            bw, bh = np.exp(bb[:, 2]) * st, np.exp(bb[:, 3]) * st
+            kp[:, 0::2] = (kp[:, 0::2] + c[:, None]) * st
+            kp[:, 1::2] = (kp[:, 1::2] + r[:, None]) * st
+            faces.append(np.column_stack([(c + bb[:, 0]) * st - bw / 2, (r + bb[:, 1]) * st - bh / 2,
+                                          bw, bh, kp, score[keep]]).astype(np.float32))
+        faces = np.concatenate(faces)
+        if len(faces) > 1:
+            idx = cv2.dnn.NMSBoxes([(int(f[0]), int(f[1]), int(f[2]), int(f[3])) for f in faces],
+                                   faces[:, 14].tolist(), SCORE_THR, 0.3, top_k=50)
+            faces = faces[np.array(idx, dtype=int).reshape(-1)]
+        return faces if len(faces) else None
+
+
+class _CVYuNet:
+    def __init__(self, w: int, h: int):
+        self.det = cv2.FaceDetectorYN.create(str(paths.YUNET), "", (w, h), SCORE_THR, 0.3, 50)
+
+    def detect(self, bgr: np.ndarray):
+        return self.det.detect(bgr)[1]
+
+
+def face_detector(w: int, h: int):
+    """OpenVINO on the Intel GPU when the model stages run on one (xpu), else OpenCV on the CPU."""
+    if device().startswith("xpu"):
+        try:
+            return OVYuNet(w, h)
+        except Exception as e:                            # no openvino / no GPU plugin
+            log.warning("YuNet on the Intel GPU failed (%s); using OpenCV on the CPU", e)
+    return _CVYuNet(w, h)
 
 
 def _iou(a, b) -> float:
@@ -121,13 +190,14 @@ def asd_scores(model, head, faces: np.ndarray, mfcc: np.ndarray) -> np.ndarray:
         return np.full(len(faces), -9.0)
     a = mfcc[:int(round(length * 100))]
     v = faces[:int(round(length * FPS))]
+    dev = next(model.parameters()).device
     allsc = []
     with torch.no_grad():
         for d in DURATIONS:
             sc = []
             for i in range(int(math.ceil(length / d))):
-                ia = torch.FloatTensor(a[i * d * 100:(i + 1) * d * 100]).unsqueeze(0).cuda()
-                iv = torch.FloatTensor(v[i * d * FPS:(i + 1) * d * FPS]).unsqueeze(0).cuda()
+                ia = torch.FloatTensor(a[i * d * 100:(i + 1) * d * 100]).unsqueeze(0).to(dev)
+                iv = torch.FloatTensor(v[i * d * FPS:(i + 1) * d * FPS]).unsqueeze(0).to(dev)
                 if ia.shape[1] < 4 or iv.shape[1] < 1:
                     continue
                 out = model.forward_audio_visual_backend(model.forward_audio_frontend(ia), model.forward_visual_frontend(iv))
@@ -163,11 +233,11 @@ def run(p, cfg: dict) -> dict:
     lines = (read_json(p.path("dialogue.json"), {}) or {}).get("lines", [])
     cuts = (read_json(p.path("cuts.json"), {}) or {}).get("cuts", [])
     W, H = m.width, m.height
-    det = cv2.FaceDetectorYN.create(str(paths.YUNET), "", (W, H), SCORE_THR, 0.3, 50)
     mix, sr = sf.read(str(p.path("audio") / "mix_16k.wav"), dtype="int16", always_2d=True)
     mix = mix[:, 0]
     out = []
     with gpu_lock(), timed(f"YuNet + LR-ASD on {len(lines)} lines"):
+        det = face_detector(W, H)
         model, head = _load_lrasd()
         try:
             from ..util import progress
@@ -191,7 +261,7 @@ def run(p, cfg: dict) -> dict:
                 dets = []
                 for f, fr in enumerate(frames):
                     bgr = cv2.cvtColor(fr, cv2.COLOR_RGB2BGR)
-                    _, faces = det.detect(bgr)
+                    faces = det.detect(bgr)
                     cur = []
                     for fc in (faces if faces is not None else []):
                         x, y, w, h = [float(v) for v in fc[:4]]

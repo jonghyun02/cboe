@@ -66,9 +66,37 @@ def write_json(path, obj, indent: int | None = 1) -> Path:
 
 @contextlib.contextmanager
 def gpu_lock(timeout: float = -1):
-    """Serialize GPU-heavy work across processes (12 GB card)."""
+    """Serialize GPU-heavy work across processes (one model on the GPU at a time)."""
     with FileLock(str(GPU_LOCK), timeout=timeout):
         yield
+
+
+def device() -> str:
+    """Torch device for the model stages: ``CBOE_DEVICE`` if set, else the first of
+    cuda (NVIDIA), xpu (Intel Arc / Core Ultra GPU, torch ``+xpu`` build), cpu."""
+    env = os.environ.get("CBOE_DEVICE")
+    if env:
+        return env
+    import torch
+    if torch.cuda.is_available():
+        return "cuda"
+    if hasattr(torch, "xpu") and torch.xpu.is_available():
+        return "xpu"
+    return "cpu"
+
+
+def device_name() -> str | None:
+    """Human-readable name of the accelerator ``device()`` picks (None on cpu)."""
+    import torch
+    dev = device()
+    try:
+        if dev.startswith("cuda"):
+            return torch.cuda.get_device_name(0)
+        if dev.startswith("xpu"):
+            return torch.xpu.get_device_name(0)
+    except Exception:
+        pass
+    return None
 
 
 def free_gpu() -> None:
@@ -79,6 +107,8 @@ def free_gpu() -> None:
         gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+        if hasattr(torch, "xpu") and torch.xpu.is_available():
+            torch.xpu.empty_cache()
     except Exception:
         pass
 

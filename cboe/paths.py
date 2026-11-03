@@ -51,8 +51,11 @@ LRASD_WEIGHTS = _p("LRASD_WEIGHTS", TP / "LR-ASD" / "weight" / "finetuning_TalkS
 # 음악 분위기·악기: AST fine-tuned on AudioSet (527 classes), BSD-3-Clause
 AST_MODEL = os.environ.get("CBOE_AST_MODEL", "MIT/ast-finetuned-audioset-10-10-0.4593")
 
-# 받아쓰기: faster-whisper large-v3 (MIT)
+# 받아쓰기: faster-whisper large-v3 (MIT); on an Intel GPU the same weights in OpenVINO form
+# (stages/asr.py OVWhisper). Either is a Hugging Face repo (downloaded on first use) or a folder.
 WHISPER_MODEL = os.environ.get("CBOE_WHISPER_MODEL", "large-v3")
+WHISPER_OV_MODEL = os.environ.get("CBOE_WHISPER_OV_MODEL", "OpenVINO/whisper-large-v3-fp16-ov")
+WHISPER_OV_REVISION = os.environ.get("CBOE_WHISPER_OV_REVISION", "220761e60602a5ca694c409d5f424563b75d6820")
 
 # 소리 설명 모델 (에이전트 도구): Qwen2.5-Omni-3B (Qwen research license, 비상업)
 QWEN_OMNI = _p("QWEN_OMNI", BF / "weights" / "qwen25omni3b", W / "qwen25omni3b")
