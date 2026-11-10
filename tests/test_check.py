@@ -234,6 +234,25 @@ def test_two_frames_depend_on_the_frame_rate():
     assert check.run({"cells": cells, "fps": 60.0})["fps_assumed"] is False
 
 
+def test_a_frame_rate_a_hair_off_a_whole_rate_counts_its_limits_at_that_rate():
+    # 5th round check (verify:e4): at ffprobe's 24.00001 (a 24 fps video) the checker took 5/6 s for
+    # 21 frames, a gap of 12 frames for one under half a second and 14 units in 24 frames for more
+    # than 14 a second, while the TTML header of the same draft says 24 (style.nominal_fps)
+    def cells_at(fps):
+        k = round(10.0 * fps)
+
+        def t(f):
+            return round((k + f) / fps, 3)
+        return [cell("가", t(0), t(20), "C1"), cell("가나다라마바사아자차카타파하", t(32), t(56), "C2")]
+    for fps in (24.00001, 24.0, 23.9999):
+        assert check.run(cells_at(fps), fps=fps)["violations"] == [], fps
+    # a rate of its own (29999/1251) counts at itself, as before: 20 frames are 5/6 s, 19 are not
+    off = 29999 / 1251
+    assert check.run(cells_at(off), fps=off)["violations"] == []
+    short = [dict(cells_at(off)[0], end=round((round(10.0 * off) + 19) / off, 3))]
+    assert [v["code"] for v in check.run(short, fps=off)["violations"]] == ["min_duration"]
+
+
 def test_order_and_cells_that_cannot_be_written():
     cells = [cell("하나", 10.0, 11.0, "C1"), cell("둘", 5.0, 6.0, "C2"), cell("  ", 20.0, 21.0, "C3"),
              cell("넷", None, 31.0, "C4"), cell("다섯", 40.0, 40.0, "C5"), {"start": 50.0, "end": 51.0, "lines": ["여섯"]}]

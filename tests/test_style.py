@@ -33,6 +33,20 @@ def test_profiles_and_guide_numbers():
     assert style.DEFAULT_FPS == 24.0
 
 
+def test_the_rate_frames_are_counted_at_is_one_helper_for_placement_the_checker_and_the_header():
+    # 5th round check (verify:e4): ffprobe's 24.00001 is a 24 fps video (the TTML header says 24)
+    from cboe import export
+    assert style.nominal_fps(24.00001) == 24.0 and style.nominal_fps(30.00001486621153) == 30.0
+    assert style.nominal_fps(23.9999) == 24.0 and style.nominal_fps(60.00002) == 60.0
+    assert style.nominal_fps(23.976) == style.nominal_fps(24000 / 1001) == 24000 / 1001
+    assert style.nominal_fps(29.97003) == 30000 / 1001
+    for own in (29999 / 1251, 23.98, 12.5, 25.0):                    # rates of their own stay as they are
+        assert style.nominal_fps(own) == own
+    assert export.RATE_TOLERANCE == style.RATE_TOLERANCE
+    assert placement._P(24.00001).min_f == placement._P(24.0).min_f == 20
+    assert placement._P(24.00001).fps == 24.00001                    # the frame grid stays the video's own
+
+
 def test_placement_takes_its_numbers_from_style():
     assert placement.DEFAULTS == dict(style.get().settings(), kiwi=True)
     assert style.get("children").settings()["cps"] == 11.0 and style.get().settings()["profile"] == "adult"

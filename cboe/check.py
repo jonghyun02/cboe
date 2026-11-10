@@ -11,7 +11,8 @@ whether that clause is an obligation (``must``) or a recommendation (``should``)
 
 ``run(source, fps=None, cuts=None, profile=None)`` returns::
 
-    {"ok": no must-level violation, "profile", "fps", "fps_assumed": no frame rate was given (24 is used),
+    {"ok": no must-level violation, "profile", "fps", "fps_assumed": no frame rate was given (24 is used;
+     the limits in frames are counted at the rate ``fps`` stands for, ``style.nominal_fps``),
      "cut_checks": whether shot changes were given, "cells": n,
      "violations": [{"cell", "index", "start", "code", "clause", "level": "must" | "should",
                      "message", "line"?: index of the line, "text"?: the line or what was found,
@@ -506,10 +507,13 @@ def run(source, fps=None, cuts=None, profile=None) -> dict:
     assumed = not (f and f > 0)
     f = f if f and f > 0 else style.DEFAULT_FPS
     numbers = dict(st.settings(), min_dur=style.seconds_text(st.min_dur))
-    min_f = math.ceil(st.min_dur * f - 1e-6)
-    max_f = math.floor(st.max_dur * f + 1e-6)
-    flash_f = math.ceil(st.flash_dur * f - 1e-6)
-    half_f = math.floor(st.half * f + 0.5)
+    # the limits in frames at the rate ``f`` stands for (24.00001 from ffprobe is 24: 5/6 s is 20
+    # frames, as placement and the TTML header count it); times become frames at ``f`` itself
+    rate = style.nominal_fps(f)
+    min_f = math.ceil(st.min_dur * rate - 1e-6)
+    max_f = math.floor(st.max_dur * rate + 1e-6)
+    flash_f = math.ceil(st.flash_dur * rate - 1e-6)
+    half_f = math.floor(st.half * rate + 0.5)
     gap = st.gap_frames
 
     ids = [str(c.get("id") or f"#{k + 1}") for k, c in enumerate(cells)]
@@ -546,7 +550,7 @@ def run(source, fps=None, cuts=None, profile=None) -> dict:
                 break
         if len(chars) > st.max_lines:
             add("line_count", k)
-        if dur <= 0 or sum(chars) * f / dur > st.cps + 1e-6:
+        if dur <= 0 or sum(chars) * rate / dur > st.cps + 1e-6:
             add("reading_speed", k)
         if dur < min_f:                               # one breach of GR 1, however short the cell is
             few = dur < flash_f
@@ -578,7 +582,7 @@ def run(source, fps=None, cuts=None, profile=None) -> dict:
             add("overlap", a, **extra)
         elif g < gap:
             add("frame_gap", a, **extra)
-        elif gap < g < st.half * f - 1e-9:
+        elif gap < g < st.half * rate - 1e-9:
             add("short_gap_cut" if cuts_in(fe[a], fs[b]) else "short_gap", a, **extra)
 
     if cut_f:

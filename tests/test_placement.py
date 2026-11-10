@@ -674,6 +674,20 @@ def test_other_frame_rates_keep_two_frames_and_half_seconds():
         assert abs(a["start"] * fps - round(a["start"] * fps)) < 0.06
 
 
+def test_a_frame_rate_a_hair_off_a_whole_rate_counts_its_limits_at_that_rate():
+    # 5th round check (verify:e4): at ffprobe's 24.00001 (a 24 fps video) 5/6 s was 21 frames, one more
+    # than the TTML header's 24 gives; the limits are counted at the rate it stands for (style.nominal_fps)
+    for fps, want in ((24.00001, 20), (24.0, 20), (30.00001486621153, 25), (30.0, 25), (29999 / 1251, 20)):
+        d = place([L("L1", "악", 10.0, 10.2)], [], [], fps)
+        c = d["cells"][0]
+        assert round(c["end"] * fps) - round(c["start"] * fps) == want and c["check"]["violations"] == [], fps
+        assert d["fps"] == fps and c["start"] == round(round(10.0 * fps) / fps, 3)   # the grid is the video's own
+        # a line right behind it (the same speaker): its cell holds 5/6 s and no more, with no violation
+        nxt = round((round(10.0 * fps) + want + 2) / fps, 3)
+        d = place([L("L1", "악", 10.0, 10.2, speaker="A"), L("L2", "응 그래", nxt, nxt + 1.0, speaker="A")], [], [], fps)
+        assert [round((x["end"] - x["start"]) * fps) for x in d["cells"][:1]] == [want] and d["summary"]["violations"] == 0
+
+
 # --------------------------------------------------------------------------- labels and notes (II.6-II.8, II.10)
 
 def test_speaker_label_is_name_then_extra_then_language():

@@ -40,7 +40,9 @@ Pure Python and deterministic; the only library is Kiwi inside textutil.wrap (op
 Limits and notation come from ``cboe.style`` (``settings`` = ``style.get(profile).settings()``):
 16 units a line (II.2, textutil.units), 2 lines (II.4), 14 units/s or 11 for children (II.3),
 5/6 s to 7 s (General Requirements 1), 2 frames between cells, and a gap under half a second is
-closed to 2 frames (TG5).
+closed to 2 frames (TG5). These limits are counted in frames at the rate ``fps`` stands for
+(``style.nominal_fps``: ffprobe's 24.00001 is 24, so 5/6 s is 20 frames, as the checker and the TTML
+header count it; 29999/1251 is a rate of its own); times are frames of ``fps`` as given.
 
 Dialogue cells. One cell per script line. In front of it ``[이름/출처·말투/언어] `` (II.8: the name
 when ``show_name``, then ``label_extra``, the language last; "에루/마야카" = both speak ->
@@ -176,7 +178,10 @@ class _P:
         s = dict(DEFAULTS)
         s.update({k: v for k, v in (settings or {}).items() if v is not None})
         fps = _num(fps) or 0.0
-        self.fps = f = fps if fps > 0 else 25.0
+        self.fps = fps if fps > 0 else 25.0              # the frame grid: time <-> frame
+        # the limits in frames are counted at the rate this one stands for (style.nominal_fps:
+        # ffprobe's 24.00001 is 24, so 5/6 s is 20 frames as in the checker and the TTML header)
+        self.rate = f = style.nominal_fps(self.fps)
         self.profile = s["profile"]
         self.max_units = float(s["max_units"])
         self.max_lines = int(s["max_lines"])
@@ -204,10 +209,10 @@ class _P:
 
     def need(self, u: float) -> int:
         """Frames needed to read ``u`` units at the reading speed limit."""
-        return int(math.ceil(u / self.cps * self.fps - 1e-6)) if u > 0 else 0
+        return int(math.ceil(u / self.cps * self.rate - 1e-6)) if u > 0 else 0
 
     def cps_of(self, u: float, dur_f: int) -> float:
-        return u * self.fps / dur_f if dur_f > 0 else INF
+        return u * self.rate / dur_f if dur_f > 0 else INF
 
     def too_fast(self, u: float, dur_f: int) -> bool:
         return self.cps_of(u, dur_f) > self.cps + 1e-6
@@ -980,7 +985,7 @@ def _sound_len(sp: dict, text: str, start: int, P: _P) -> int:
         if sp["e"] is not None:
             end = min(end, sp["e"] + P.tail)
         return min(max(end - start, P.min_f), P.max_f)
-    d = int(round((units(text) / P.cps + P.label_extra) * P.fps))
+    d = int(round((units(text) / P.cps + P.label_extra) * P.rate))
     return min(max(d, P.min_f), P.max_f)
 
 

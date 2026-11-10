@@ -149,6 +149,30 @@ def test_a_rate_a_hair_off_a_whole_or_ntsc_rate_is_that_rate(tmp_path, fps, rate
     assert check.run(path, fps=fps)["violations"] == [] and check.run(path)["violations"] == []
 
 
+@pytest.mark.parametrize("fps, five_sixths", [(24.00001, 20), (30.00001486621153, 25), (24.0, 20),
+                                              (29999 / 1251, 20), (23.976, 20)])
+def test_a_draft_and_its_ttml_read_at_the_header_rate_get_the_same_check(tmp_path, fps, five_sixths):
+    # 5th round check (verify:e4): at 24.00001 placement and the checker counted 5/6 s as 21 frames and
+    # the header says 24 (20 frames): a cell held to 20 frames was a violation in the review and none
+    # in the file. All three count at style.nominal_fps now; a rate of its own (29999/1251) as before
+    from cboe.placement import place
+    k = round(10.0 * fps)
+    held = round((k + five_sixths + 2) / fps, 3)                     # 5/6 s after L1, and 2 frames
+    lines = [{"id": "L1", "speaker": "A", "text": "악", "start": 10.0, "end": 10.2},
+             {"id": "L2", "speaker": "A", "text": "그래 알았어", "start": held, "end": held + 1.0},
+             {"id": "L3", "speaker": "B", "text": "가나다라마바사", "start": held + 2.0, "end": held + 2.3},
+             {"id": "L4", "speaker": "A", "text": "응", "start": held + 2.85, "end": held + 3.0}]
+    d = place(lines, [], [], fps)
+    first = d["cells"][0]
+    assert round(first["end"] * fps) - round(first["start"] * fps) == five_sixths
+    path = export.write(d["cells"], tmp_path / "a.ttml", "ttml", fps=fps)["path"]
+
+    def found(res):
+        return sorted((v["index"], v["code"]) for v in res["violations"])
+    assert found(check.run({"cells": d["cells"], "fps": fps})) == found(check.run(path))
+    assert [v for v in check.run(path)["violations"] if v["level"] == "must"] == []
+
+
 def test_characters_xml_cannot_hold_are_left_out():
     text = export.to_ttml([cell("C1", 1.0, 2.0, ["가\x02나\x1f", "\x0b다￾"])], 24, title="제\x00목")
     root = parse(text)                                        # still well-formed

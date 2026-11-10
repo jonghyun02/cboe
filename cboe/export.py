@@ -33,7 +33,7 @@ import re
 from fractions import Fraction
 from pathlib import Path
 
-from . import check
+from . import check, style
 
 FORMATS = ("srt", "vtt", "ttml")
 MEDIA_TYPES = {"srt": "application/x-subrip", "vtt": "text/vtt; charset=utf-8",
@@ -129,17 +129,11 @@ def _rounded(fps: float) -> bool:
     return abs(fps * 1000 - round(fps * 1000)) < 1e-6
 
 
-# How close (relative) a rate has to be to a whole or an NTSC rate to be taken as that rate. ffprobe's
-# avg_frame_rate is frames over duration and wobbles a little: a 30 fps video gave 30.00001486621153
-# (5e-7 off), which the header must not write as 31 x 22198001/22937923 (4th round check). 29999/1251
-# (23.98002, 1.7e-4 off 23.976 and 8e-4 off 24) is a rate of its own and stays as it is. Over two
-# hours 1e-5 is under a tenth of a second, and the frames of the file still read back to the
-# draft's (``_ttml_frames``).
-RATE_TOLERANCE = 1e-5
-
-
-def _near(fps: float, rate: float) -> bool:
-    return abs(fps - rate) <= RATE_TOLERANCE * rate
+# How close (relative) a rate has to be to a whole or an NTSC rate to be taken as that rate: the one
+# number of ``style`` (``style.nominal_fps``), which placement and the checker count frames with
+# too. The frames of the file still read back to the draft's (``_ttml_frames``).
+RATE_TOLERANCE = style.RATE_TOLERANCE
+_near = style.near_rate
 
 
 def frame_rate(fps: float) -> tuple[int, str | None]:
@@ -195,12 +189,12 @@ def _ttml_frames(cells: list[dict], fps: float, per: float, profile=None) -> lis
     few draft frames no TTML frame reads back to (the coarser grid skips one every few thousand
     frames) the neighbour is taken that keeps the gap and the duration on the same side of the
     guide's limits. A time off the draft's grid is rounded at ``per`` (within half a frame)."""
-    from . import style as _style
-    st = _style.get(profile)
-    min_f = math.ceil(st.min_dur * fps - 1e-6)
-    max_f = math.floor(st.max_dur * fps + 1e-6)
-    flash_f = math.ceil(st.flash_dur * fps - 1e-6)
-    half = st.half * fps
+    st = style.get(profile)
+    rate = style.nominal_fps(fps)                     # the limits in frames, as the checker counts them
+    min_f = math.ceil(st.min_dur * rate - 1e-6)
+    max_f = math.floor(st.max_dur * rate + 1e-6)
+    flash_f = math.ceil(st.flash_dur * rate - 1e-6)
+    half = st.half * rate
     r = fps / per                                     # draft frames per TTML frame
 
     def draft_frame(t: float):
@@ -220,7 +214,7 @@ def _ttml_frames(cells: list[dict], fps: float, per: float, profile=None) -> lis
         return [lo, lo + 1]
 
     def dur_class(n: int, u: float):
-        return (n < flash_f, n < min_f, n > max_f, n <= 0 or u * fps / n > st.cps + 1e-6)
+        return (n < flash_f, n < min_f, n > max_f, n <= 0 or u * rate / n > st.cps + 1e-6)
 
     from .textutil import units as _units
     frames: list[tuple[int, int]] = []

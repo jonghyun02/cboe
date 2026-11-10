@@ -38,6 +38,33 @@ GAP_FRAMES = 2        # TG 5 "Subtitles must have a minimum of 2 frames between 
 HALF = 0.5            # TG "half a second" (0.5초 = 24fps 12프레임, 30fps 15프레임, 60fps 30프레임)
 DEFAULT_FPS = 24.0    # TG "These guidelines are written for content in 24 fps" (이 지침은 24fps 기준으로 적었다)
 
+# How close (relative) a frame rate has to be to a whole rate or an NTSC rate (whole x 1000/1001)
+# to be taken as that rate. ffprobe's avg_frame_rate is frames over duration and wobbles a little:
+# a 30 fps video gave 30.00001486621153 (5e-7 off), which the TTML header must not write as
+# 31 x 22198001/22937923 (4th round check), and 24.00001 counted 5/6 s as 21 frames, one more than
+# at 24 (5th round check). 29999/1251 (23.98002, 1.7e-4 off 23.976 and 8e-4 off 24) is a rate of its
+# own and stays as it is. Over two hours 1e-5 is under a tenth of a second.
+RATE_TOLERANCE = 1e-5
+
+
+def near_rate(fps: float, rate: float) -> bool:
+    """Whether ``fps`` is within ``RATE_TOLERANCE`` of ``rate``."""
+    return abs(fps - rate) <= RATE_TOLERANCE * rate
+
+
+def nominal_fps(fps) -> float:
+    """The frame rate the limits are counted at (5/6 s, 7 s, half a second, the reading speed in
+    frames): the whole or NTSC rate ``fps`` lies within ``RATE_TOLERANCE`` of (24.00001 -> 24,
+    30.000015 -> 30, 23.976 -> 24000/1001), else ``fps`` itself (29999/1251 stays). Placement, the
+    checker and the TTML writer (``export.frame_rate``, the header) all go by it, so that a cell of
+    20 frames is 5/6 s in each of them. The frame grid (time <-> frame) stays at ``fps``."""
+    f = float(fps)
+    whole = max(1, round(f))
+    for rate in (float(whole), whole * 1000 / 1001):
+        if near_rate(f, rate):
+            return rate
+    return f
+
 # II.3 "Adult programs: Up to 14 characters per second / Children's programs: Up to 11 characters
 # per second" (성인 프로그램 초당 14자까지, 어린이 프로그램 초당 11자까지)
 PROFILES = {"adult": {"cps": 14.0, "label": "성인"}, "children": {"cps": 11.0, "label": "어린이"}}
