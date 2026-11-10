@@ -13,7 +13,10 @@ lines  : DialogueLine dicts (id, speaker, text, start, end, words[{w,s,e}]) plus
          ``scene_id`` (the script scene), ``person`` (who speaks: two lines of one person never
          share a hyphen cell, whatever label they show; default ``name`` or ``speaker``; a line of
          a subtitle script with no name has "#" + its turn, "#1-1" and "#1-2" for the two "- "
-         lines of one cell: two people, and the "#…" is never shown),
+         lines of one cell: two people, and the "#…" is never shown), ``turn`` (a row of a
+         subtitle cell, "<cell>-<row>": a "#" line is another person than the other row of its
+         own cell only, never than a line of another cell, named or not, which may be the same
+         person),
          ``breaks`` (the writer's cuts: eojeol numbers 1..n-1 a new cell starts at) and ``keep``
          (the writer's "one cell": no sound splits it; ignored, and said in ``check.notes``, when
          the line does not fit one cell).
@@ -57,9 +60,19 @@ cut, or half a second before it when it starts 9-11 frames (at 24 fps) before it
 a cut before the line could not be used.
 Out-time = last word + 0.5 s, raised to 5/6 s and to 14 units/s where there is room, never later
 than 7 s or 2 frames before the next cell (TG1, TG3). This covers memo 5.2's name rule: a name that
-pushes the cell over 14 units/s makes it longer. Two short lines of different speakers share one
-hyphen cell ("- [빌] …" / "- [세바스찬] …", I.6, TG6) only when the first cannot get 5/6 s alone,
-neither line's speech plus half a second reaches 5/6 s, and each fits one line.
+pushes the cell over 14 units/s makes it longer. A line that cannot get 5/6 s alone because the
+next line starts too soon shares one hyphen cell with it ("- [빌] …" / "- [세바스찬] …", I.6; TG 6
+"merging with previous or subsequent subtitles is encouraged in order to borrow time" = 앞뒤 자막과
+합쳐 시간을 빌리는 것을 권한다) when the two are whole lines of two known speakers (``person``) and
+of one scene, each fits one line (I.6 "Text in each line in a dual speaker subtitle must be a
+contained sentence" = 두 화자 자막의 줄마다 완결된 문장) and the two are spoken within 7 s, and
+① neither line's speech plus half a second reaches 5/6 s (the rule before the 6th round, which
+also pairs a guessed line with a heard one); or, both heard or both guessed, ② the two are the rows
+of one cell of a subtitle script (they came in one cell); or ③ the cell of the two gets 5/6 s and
+the reading time of both before the next cell (before, a second line that was not short left the
+first a cell under 5/6 s, GR 1). A row of a subtitle cell that cannot get 5/6 s before the next
+line and cannot share a cell with it goes back to the other row of its cell before it (②). A line
+whose time is a guess is drawn to a heard line by ① only: else it gives way or gets no cell (below).
 
 Lines that overlap (_untangle). When a line starts while the line before is still being spoken
 and so close that the cell before cannot be read (5/6 s and the reading speed), the cell before
@@ -464,7 +477,7 @@ def _dialogue_parts(ln: dict, P: _P, order: int = 0, others=None) -> list[dict]:
                       "speaker": ln.get("person") or ln.get("name") or ln.get("speaker"), "whole": len(ranges) == 1,
                       "cont": cont, "sung": sung, "guess": guess, "order": order, "pos": ln.get("pos"),
                       "scene": ln.get("scene_id"), "timing": ln.get("timing"), "keep": keep,
-                      "breaks": bool(cuts), "notes": list(dict.fromkeys(notes))})
+                      "turn": ln.get("turn"), "breaks": bool(cuts), "notes": list(dict.fromkeys(notes))})
     for p, q in zip(parts, parts[1:]):           # one speaker: a piece is over where the next one begins
         if p["e"] > q["t"]:                      # (word times of the ASR may overlap by a few frames)
             p["e"] = max(p["t"], q["t"])
@@ -490,32 +503,73 @@ def _snap_in(s: int, e: int, prev, cuts: list[int], P: _P, w0: int) -> int:
     return s
 
 
-def _pair_short(cells: list[_Cell], P: _P) -> list[_Cell]:
-    """Two short lines of different speakers in one hyphen cell (module doc)."""
+def _pair_short(cells: list[_Cell], P: _P, w1=None) -> list[_Cell]:
+    """A line too short to be read alone and the line after it, of another speaker, in one hyphen
+    cell (module doc, ``_can_pair``); a row of a subtitle cell that cannot be paired so goes back
+    to the other row of its cell before it (``_back_to_row``)."""
     out, i = [], 0
     while i < len(cells):
         a = cells[i]
         b = cells[i + 1] if i + 1 < len(cells) else None
         c = cells[i + 2] if i + 2 < len(cells) else None
-        if b is not None and _can_pair(a, b, c, P):
+        if b is not None and _can_pair(a, b, c, P, w1):
             a.set([a.parts[0], b.parts[0]], "hyphen", P)
             out.append(a)
             i += 2
+        elif out and b is not None and _back_to_row(out[-1], a, b, P):
+            out[-1].set([out[-1].parts[0], a.parts[0]], "hyphen", P)
+            i += 1
         else:
             out.append(a)
             i += 1
     return out
 
 
+def _back_to_row(p: _Cell, a: _Cell, b: _Cell, P: _P) -> bool:
+    """② of ``_can_pair`` the other way: ``a`` cannot get 5/6 s before ``b`` and cannot share a
+    cell with it, and ``p`` before it is the other row of its subtitle cell (both heard or both
+    guessed): the two go back into the one cell they came in, from the in-time of ``p``."""
+    if b.start - P.gap - a.start >= P.min_f or not _two_speakers(p, a, P):
+        return False
+    pp, pa = p.parts[0], a.parts[0]
+    return bool(pp.get("guess")) == bool(pa.get("guess")) and _one_cell(pp, pa)
+
+
+def _turn_cell(p: dict):
+    """The subtitle cell a row of a subtitle script comes from ("1" of its turn "1-2"), or None."""
+    return str(p.get("turn") or "").strip().partition("-")[0] or None
+
+
+def _one_cell(pa: dict, pb: dict) -> bool:
+    """Whether ``pa`` and ``pb`` are rows of one cell of a subtitle script (their turns name it)."""
+    ca = _turn_cell(pa)
+    return ca is not None and ca == _turn_cell(pb)
+
+
+def _other_people(pa: dict, pb: dict) -> bool:
+    """Whether the lines of ``pa`` and ``pb`` are known to be spoken by two different people. A
+    row nobody is named for ("#<cell>-<row>", ``place``) is another person than the other row of
+    its own cell only: the hyphen of that cell said so (I.6 "two characters speak in one
+    subtitle" = 두 인물이 한 자막에서 말함), but a row of another cell, named or not, may be the
+    same person, so the two are never taken for two speakers. Named lines as they are."""
+    a, b = pa.get("speaker"), pb.get("speaker")
+    if not a or not b or a == b:
+        return False
+    if str(a).startswith("#") or str(b).startswith("#"):
+        return _one_cell(pa, pb)
+    return True
+
+
 def _two_speakers(a: _Cell, b: _Cell, P: _P) -> bool:
     """Whether ``a`` and ``b`` can be the two lines of one hyphen cell (I.6): two whole script
-    lines ("a contained sentence" each) of different, known speakers, one line each, within 7 s."""
+    lines ("a contained sentence" each) of different, known speakers (``_other_people``), one line
+    each, within 7 s."""
     if a.mode != "plain" or b.mode != "plain":
         return False
     pa, pb = a.parts[0], b.parts[0]
     if not (pa["whole"] and pb["whole"]):
         return False
-    if not pa.get("speaker") or not pb.get("speaker") or pa["speaker"] == pb["speaker"]:
+    if not _other_people(pa, pb):
         return False
     if pa.get("scene") and pb.get("scene") and pa["scene"] != pb["scene"]:
         return False                                 # one cell never spans a scene change (TG 4)
@@ -524,14 +578,31 @@ def _two_speakers(a: _Cell, b: _Cell, P: _P) -> bool:
     return max(pa["e"], pb["e"]) - a.start <= P.max_f
 
 
-def _can_pair(a: _Cell, b: _Cell, c, P: _P) -> bool:
+def _can_pair(a: _Cell, b: _Cell, c, P: _P, w1=None) -> bool:
+    """Whether ``a`` and the line ``b`` after it share one hyphen cell (module doc): two speakers
+    (``_two_speakers``), ``a`` cannot get 5/6 s alone because ``b`` starts too soon, and
+    ① neither line's speech plus half a second reaches 5/6 s (the rule before the 6th round, also
+    for a line whose time is a guess beside a heard one); or, both heard or both guessed,
+    ② they are the two rows of one cell of a subtitle script (that cell held them together); or
+    ③ the cell of the two still gets 5/6 s and the reading time of both lines before ``c``, the cell
+    after ``b`` (and the window end ``w1``): GR 1 (5/6 s, a must) is kept by TG 6 "merging with
+    previous or subsequent subtitles is encouraged in order to borrow time" (앞뒤 자막과 합쳐 시간을
+    빌리는 것을 권한다) where a hyphen cell can hold the two."""
     if not _two_speakers(a, b, P):
         return False
     pa, pb = a.parts[0], b.parts[0]
     if b.start - P.gap - a.start >= P.min_f:             # the first line can get 5/6 s alone
         return False
     nat_b = min(pb["e"] + P.tail, (c.start - P.gap) if c is not None else INF) - b.start
-    return not (pa["e"] + P.tail - a.start >= P.min_f or nat_b >= P.min_f)
+    if not (pa["e"] + P.tail - a.start >= P.min_f or nat_b >= P.min_f):
+        return True                                      # ① both short
+    if bool(pa.get("guess")) != bool(pb.get("guess")):
+        return False         # a guessed line beside a heard one: it gives way or gets no cell (_make_room)
+    if _one_cell(pa, pb):
+        return True                                      # ②
+    room = min((c.start - P.gap) if c is not None else INF, a.start + P.max_f,
+               w1 if w1 is not None else INF) - a.start
+    return room >= max(P.min_f, P.need(units(_hyphen_line(pa)) + units(_hyphen_line(pb))))   # ③
 
 
 # lines that overlap in time (module doc "Lines that overlap")
@@ -870,7 +941,7 @@ def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> tuple[li
         cells.append(c)
         prev = c
     cells = _untangle(cells, P, w0, w1)                  # overlapping lines: never a one-frame cell
-    cells = _pair_short(cells, P)
+    cells = _pair_short(cells, P, w1)
     _dialogue_outs(cells, P, w1, _scene_caps(cells, cuts, P))
     dropped, moved = _make_room(cells, P, w0, w1)        # a guessed line squeezed between two others
     if moved or dropped or any(c.end - c.start < P.min_f for c in cells):

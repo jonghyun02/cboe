@@ -279,8 +279,20 @@ def test_two_short_lines_of_different_speakers_share_a_hyphen_cell():
     assert len(run(same)["cells"]) == 2                                # same speaker: no
     renamed = [dict(lines[0]), dict(lines[1], name="빌")]              # the writer's name counts
     assert len(run(renamed)["cells"]) == 2
+    # 6th round: the second line need not be short. Before, this L1 was left a cell of 9 frames
+    # ('5/6초 미만', GR 1) because L2's speech plus half a second reached 5/6 s; one hyphen cell
+    # holds both and is read in time (TG 6 "merging ... is encouraged in order to borrow time")
     longer = [lines[0], L("L2", "응 알았어 지금 갈게", 10.45, 11.6, speaker="세바스찬")]
-    assert len(run(longer)["cells"]) == 2                              # second line is not short
+    c = one(run(longer), "L1")
+    assert c["refs"] == ["L1", "L2"] and c["lines"] == ["- [빌] 뭐?", "- 응 알았어 지금 갈게"]
+    assert c["check"]["violations"] == []
+    # a second line too long for one hyphen line: no hyphen cell (I.6 one speaker a line)
+    wide = [lines[0], L("L2", "응 알았어 지금 바로 그쪽으로 갈게", 10.45, 11.6, speaker="세바스찬")]
+    assert [x["refs"] for x in run(wide)["cells"]] == [["L1"], ["L2"]]
+    # a cell of the two that could not be read before the next line starts: as before, no hyphen cell
+    tight = [lines[0], L("L2", "알았어 지금 곧장 갈게 기다려", 10.45, 10.95, speaker="세바스찬"),
+             L("L3", "그래", 11.4, 11.6, speaker="빌")]                  # 20 units in 31 frames: 15.5 a second
+    assert [x["refs"] for x in run(tight)["cells"]] == [["L1"], ["L2"], ["L3"]]
 
 
 def test_two_nameless_turns_of_a_subtitle_script_share_a_hyphen_cell_without_labels():
@@ -300,11 +312,102 @@ def test_two_nameless_turns_of_a_subtitle_script_share_a_hyphen_cell_without_lab
         assert [v for v in check.run(d)["violations"] if v["level"] == "must"] == []
     one_person = [lines[0], dict(lines[1], person="#1-1"), lines[2]]  # one turn twice: no hyphen cell
     assert [x["refs"] for x in run(one_person)["cells"]] == [["L1"], ["L2"], ["L3"]]
-    # lines that overlap: ① of the untangling makes the same hyphen cell
-    a = L("L1", "오늘은 어디 갔었어?", 10.0, 11.6, person="#1-1")
-    b = L("L2", "그냥 집에 있었어", 10.5, 12.0, person="#1-2")
+    # lines that overlap: ① of the untangling makes the same hyphen cell (the turns come with the
+    # persons, as state.placement_inputs gives them: 6th round, a '#' person is another speaker
+    # than the other row of its own cell only)
+    a = L("L1", "오늘은 어디 갔었어?", 10.0, 11.6, person="#1-1", turn="1-1")
+    b = L("L2", "그냥 집에 있었어", 10.5, 12.0, person="#1-2", turn="1-2")
     c = one(run([a, b]), "L1")
     assert c["lines"] == ["- 오늘은 어디 갔었어?", "- 그냥 집에 있었어"] and c["check"]["violations"] == []
+
+
+# a subtitle file as the script (made-up text): read, aligned, laid out as the review page does
+
+def _srt_project(tmp, srt, asr):
+    from cboe import script
+    from cboe.stages import align
+    from cboe.state import Project
+    from cboe.util import write_json
+    tmp.mkdir(parents=True, exist_ok=True)
+    f = tmp / "subs.srt"
+    f.write_text(srt, encoding="utf-8")
+    write_json(tmp / "project.json", {"title": "t", "t0": 0.0, "t1": 120.0, "duration": 120.0, "fps": 24.0})
+    write_json(tmp / "script.json", script.read(f))
+    write_json(tmp / "asr.json", {"words": [{"w": w, "s": s, "e": e} for w, s, e in asr],
+                                  "vad": [[s, e] for _, s, e in asr]})
+    align.run(Project(tmp), {})
+    write_json(tmp / "items.json", {"items": []})
+    write_json(tmp / "cuts.json", {"cuts": []})
+    return Project(tmp)
+
+
+def _srt_cells(p):
+    d = p.recompute()
+    return [c["lines"] for c in d["cells"]], d["summary"]["violations"]
+
+
+ROWS = ("1\n00:01:20,000 --> 00:01:21,375\n- 어디 가니?\n- 학교\n\n"
+        "2\n00:01:25,000 --> 00:01:27,000\n그럼 이따 봐\n")
+ROWS_ASR = [("어디", 80.0, 80.15), ("가니?", 80.15, 80.3), ("학교", 80.6, 80.9), ("그럼", 85.0, 85.3),
+            ("이따", 85.3, 85.6), ("봐", 85.6, 85.9)]
+
+
+def test_the_rows_of_one_subtitle_cell_share_it_when_the_first_cannot_stand_alone(tmp_path):
+    # 5th-round check (reverify:e1): the first row could not get 5/6 s before the second and the
+    # second row's speech plus half a second was exactly 5/6 s, so the two stayed apart and the first
+    # cell went out at half a second ('5/6초 미만', GR 1); rows of one cell were one cell (②)
+    assert _srt_cells(_srt_project(tmp_path / "a", ROWS, ROWS_ASR)) == ([["- 어디 가니?", "- 학교"], ["그럼 이따 봐"]], 0)
+    named = ROWS.replace("- 어디 가니?", "- [가람] 어디 가니?").replace("- 학교", "- [나래] 학교")
+    cells, violations = _srt_cells(_srt_project(tmp_path / "b", named, ROWS_ASR))
+    assert len(cells) == 2 and len(cells[0]) == 2 and violations == 0
+    # one row named, the other not: still the two rows of one cell
+    mixed = ROWS.replace("- 어디 가니?", "- [가람] 어디 가니?")
+    cells, violations = _srt_cells(_srt_project(tmp_path / "c", mixed, ROWS_ASR))
+    assert len(cells) == 2 and [x.lstrip("- ").split("] ")[-1] for x in cells[0]] == ["어디 가니?", "학교"]
+    assert violations == 0
+
+
+CROSS = ("1\n00:01:19,000 --> 00:01:20,500\n- 오늘 점심에 뭐 먹었어?\n- 국수\n\n"
+         "2\n00:01:20,700 --> 00:01:23,000\n- 맛있었어?\n- 그냥 좀 그랬어\n\n"
+         "3\n00:01:30,000 --> 00:01:32,000\n이제 자자\n")
+CROSS_ASR = [("오늘", 79.0, 79.3), ("점심에", 79.3, 79.5), ("뭐", 79.5, 79.7), ("먹었어?", 79.7, 80.0),
+             ("국수", 80.1, 80.3), ("맛있었어?", 80.7, 80.9), ("그냥", 82.4, 82.6), ("좀", 82.6, 82.8),
+             ("그랬어", 82.8, 83.0)]
+
+
+def test_rows_of_two_subtitle_cells_never_share_a_hyphen_cell(tmp_path):
+    # 5th-round check (reverify:e1): the nameless rows "#1-2" and "#2-1" (or "#1-2" and a named line
+    # of the next cell) were taken for two known speakers and put in one hyphen cell; they may be one
+    # person (I.6: a hyphen cell is two speakers). The short '국수' goes back to its own cell instead.
+    want = [["- 오늘 점심에 뭐 먹었어?", "- 국수"], ["맛있었어?"], ["그냥 좀 그랬어"], ["이제 자자"]]
+    p = _srt_project(tmp_path / "a", CROSS, CROSS_ASR)
+    assert _srt_cells(p) == (want, 0)
+    row = next(ln["id"] for ln in p.dialogue() if ln["text"] == "맛있었어?")
+    p.set_line(row, start=80.7, end=80.9)                            # the writer sets the time
+    assert _srt_cells(p) == (want, 0)
+    named_next = CROSS.replace("- 맛있었어?\n- 그냥 좀 그랬어", "[가람] 맛있었어?")
+    cells, violations = _srt_cells(_srt_project(tmp_path / "b", named_next, CROSS_ASR[:6]))
+    assert ["- 국수", "- 맛있었어?"] not in cells and ["맛있었어?"] in cells and violations == 0
+
+
+def test_placement_keeps_nameless_rows_of_two_cells_apart_short_or_spoken_over():
+    def row(lid, words, turn):
+        return L(lid, " ".join(w for w, _, _ in words), words[0][1], words[-1][2], timing="asr",
+                 words=[{"w": w, "s": s, "e": e} for w, s, e in words], person="#" + turn, turn=turn)
+    head = row("L1", [("오늘", 79.0, 79.3), ("점심에", 79.3, 79.5), ("뭐", 79.5, 79.7), ("먹었어?", 79.7, 80.0)], "1-1")
+    tail = row("L4", [("그냥", 82.5, 82.7), ("좀", 82.7, 82.9), ("그랬어", 82.9, 83.2)], "2-2")
+    for b, c in (([("국수", 80.1, 80.3)], [("맛있었어?", 80.7, 80.9)]),                     # both short
+                 ([("국수", 80.1, 80.4), ("먹었지", 80.4, 80.9)], [("맛있었어?", 80.6, 80.8)])):  # spoken over
+        d = place([head, row("L2", b, "1-2"), row("L3", c, "2-1"), tail], [], [], 24.0, window=(0.0, 120.0))
+        assert all(set(x["refs"]) != {"L2", "L3"} for x in d["cells"])
+    # a named line of another cell is no other speaker for a nameless row either (it may be that one)
+    named = dict(row("L3", [("맛있었어?", 80.7, 80.9)], "2-1"), person="가람", name="가람", turn=None)
+    d = place([head, row("L2", [("국수", 80.1, 80.3)], "1-2"), named], [], [], 24.0, window=(0.0, 120.0))
+    assert all(set(x["refs"]) != {"L2", "L3"} for x in d["cells"])
+    # two named lines of two cells are two known people, as before
+    two = [dict(x, person=n, name=n) for x, n in ((row("L2", [("국수", 80.1, 80.3)], "1-2"), "나래"),
+                                                 (row("L3", [("맛있었어?", 80.5, 80.7)], "2-1"), "가람"))]
+    assert place(two, [], [], 24.0)["cells"][0]["refs"] == ["L2", "L3"]
 
 
 # --------------------------------------------------------------------------- sound timing (memo 5.2)
@@ -906,7 +1009,9 @@ def test_two_lines_of_different_scenes_never_share_a_hyphen_cell():
              L("L2", "응", 10.45, 10.6, speaker="세바스찬", name="세바스찬", show=True, scene_id="SC002"),
              L("L3", "그래 가자", 11.1, 12.0, speaker="빌", scene_id="SC002")]
     d = run(lines)
-    assert one(d, "L1")["refs"] == ["L1"] and one(d, "L2")["refs"] == ["L2"]
+    # L1 and L2 never share a cell. L2 and L3 are of one scene: since the 6th round they do (before,
+    # L2 was left 13 frames, '5/6초 미만', because L3 was not short)
+    assert one(d, "L1")["refs"] == ["L1"] and one(d, "L2")["refs"] == ["L2", "L3"]
     together = run([dict(ln, scene_id="SC001") for ln in lines])
     assert one(together, "L1")["refs"] == ["L1", "L2"]
 
