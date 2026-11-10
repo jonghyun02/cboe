@@ -825,13 +825,36 @@ def test_the_last_cell_of_a_scene_does_not_run_over_the_scene_change():
     assert one(plain, "L1")["end"] >= sec(F(cut) + 12)                # no scenes: half a second into the next shot
     same = run([dict(a, scene_id="SC001"), dict(b, scene_id="SC001")], cuts=[cut])
     assert one(same, "L1")["end"] == one(plain, "L1")["end"]           # a shot change inside one scene: as before
+    longer = L("L1", "그러니까 오늘은 여기까지만 하자", 10.0, 10.9, speaker="A", timing="asr")
+    cut2 = 11.0
+    assert one(run([longer, b], cuts=[cut2]), "L1")["end"] > cut2      # without scenes it reads on over the cut
+    d = run([dict(longer, scene_id="SC001"), dict(b, scene_id="SC002")], cuts=[cut2])
+    assert one(d, "L1")["end"] == sec(F(cut2) - 2)                     # TG 4: never over the scene change
+    assert "notes" not in one(d, "L1")["check"] and one(d, "L2") == one(run([longer, b], cuts=[cut2]), "L2")
+    # ending before the change would leave it under 5/6 s: it goes over as without scenes, and says so
     d = run([dict(a, scene_id="SC001"), dict(b, scene_id="SC002")], cuts=[cut])
-    assert one(d, "L1")["end"] == sec(F(cut) - 2)                      # TG 4: never over the scene change
-    assert one(d, "L2") == one(plain, "L2")
+    c = one(d, "L1")
+    assert c["end"] == one(plain, "L1")["end"] and nframes(c["start"], c["end"]) >= MIN_F
+    assert c["check"]["notes"] == ["장면이 바뀌는 화면 전환을 넘음 · 그 앞에서 끝내면 5/6초가 안 됨"]
     # the speech goes on over the cut (it starts before it and belongs to the next scene): allowed
     over = L("L1", "가자 어서 가자", 10.0, 10.9, speaker="A", timing="asr", scene_id="SC001")
     d = run([over, dict(b, scene_id="SC002")], cuts=[cut])
-    assert one(d, "L1")["end"] > cut
+    assert one(d, "L1")["end"] > cut and "notes" not in one(d, "L1")["check"]
+
+
+def test_a_cell_that_starts_on_the_scene_change_keeps_its_five_sixths():
+    # L2 is spoken over L1 and waits for it (③): its cell starts on the shot change itself, which is
+    # no scene change it could cross; it gets its 5/6 s as without scenes (no one-frame cell)
+    def lines(scenes):
+        sc = (lambda k: {"scene_id": k}) if scenes else (lambda k: {})
+        return [L("L1", "오늘은 정말로 그러니까 우리 같이 가자고 했잖아", 10.0, 12.0, speaker="A", timing="asr", **sc("SC001")),
+                L("L2", "알았어", 10.3, 10.6, speaker="B", timing="asr", **sc("SC001")),
+                L("L3", "다음 장면의 말", 15.0, 16.0, speaker="C", timing="asr", **sc("SC002"))]
+    cut = sec(F(10.0) + MIN_F + 2)                                      # where L2 waits to
+    plain, d = run(lines(False), cuts=[cut]), run(lines(True), cuts=[cut])
+    c = one(d, "L2")
+    assert c["start"] == cut and (c["start"], c["end"]) == (one(plain, "L2")["start"], one(plain, "L2")["end"])
+    assert nframes(c["start"], c["end"]) >= MIN_F and "flash" not in c["flags"]
 
 
 def test_closing_a_small_gap_stops_at_the_scene_change():
@@ -907,6 +930,15 @@ def test_a_speaker_label_is_not_left_alone_on_the_first_line():
     assert one(run([longer]), "L1")["lines"] == ["[가나다라마바사아자차]", "고마웠어요 정말로"]
 
 
+@pytest.mark.parametrize("text, first", [("잠깐만요, 지금 그러니까", "[하늘/영어] 잠깐만요"),
+                                         ("저기요, 혹시 여기가 맞나요", "[하늘/영어] 저기요")])
+def test_a_comma_after_the_first_word_does_not_leave_the_label_alone(text, first):
+    # the comma goes at the end of the first line (I.13): the same words, so the label keeps its word
+    d = run([L("L1", text, 10.0, 13.0, name="하늘", show=True, language="영어", timing="asr")])
+    lines = one(d, "L1")["lines"]
+    assert lines[0] == first and bare(" ".join(lines)) == bare(f"[하늘/영어] {text}")
+
+
 def test_a_guessed_line_squeezed_between_two_heard_lines_gets_no_cell():
     a = L("L1", "그래서 내가 말했잖아", 10.0, 11.6, speaker="A", timing="asr")
     g = L("L2", "그게 무슨 소리야 지금 당장 설명해 봐", 11.75, 11.9, speaker="B", timing="voice", status="unheard")
@@ -927,3 +959,35 @@ def test_a_guessed_line_squeezed_between_two_heard_lines_gets_no_cell():
     c = one(d, "L2")
     assert c["start"] < 12.9 and nframes(c["start"], c["end"]) >= MIN_F and c["flags"] == ["timing_estimated"]
     assert nframes(c["end"], one(d, "L3")["start"]) >= 2 and d["no_room"] == []
+
+
+LONG_GUESS = ("그러니까 내가 어제 시장에 갔는데 거기서 오랜만에 옛날 친구를 만나서 같이 밥도 먹고 "
+              "차도 마시고 한참을 이야기하다가 늦게 들어왔어")      # made up; four cells or so
+
+
+def test_a_long_guessed_line_is_spread_over_the_gap_it_has():
+    # its pieces are squeezed against each other (a guessed 2.2 s for 66 units), not between other
+    # lines: there are almost ten seconds before the next line, so the pieces are laid out there
+    a = L("L1", "어디 갔다 왔어", 0.0, 2.0, speaker="A", timing="asr")
+    g = L("L2", LONG_GUESS, 2.2, 4.4, speaker="B", timing="even", status="unheard")
+    b = L("L3", "그랬구나", 12.0, 13.0, speaker="A", timing="asr")
+    d = run([a, g, b])
+    cs = cells_of(d, "L2")
+    assert d["no_room"] == [] and len(cs) >= 3
+    assert all(nframes(c["start"], c["end"]) >= MIN_F and c["flags"] == ["timing_estimated"] for c in cs)
+    assert all(c["check"]["cps"] <= 14 for c in cs)                     # room for the reading time too
+    assert bare(" ".join(x for c in cs for x in c["lines"])) == bare(LONG_GUESS)
+    assert cs[0]["start"] == sec(F(2.2)) and one(d, "L3")["start"] == sec(F(12.0))
+
+
+def test_a_long_guessed_line_without_room_for_its_cells_goes_to_no_room_with_the_real_gap():
+    a = L("L1", "어디 갔다 왔어", 0.0, 2.0, speaker="A", timing="asr")
+    g = L("L2", LONG_GUESS, 2.2, 4.4, speaker="B", timing="even", status="unheard")
+    b = L("L3", "그랬구나", 4.6, 5.6, speaker="A", timing="asr")
+    d = place([a, g, b], [], [], FPS)                                  # no_room has a line: no sound invariants
+    assert cells_of(d, "L2") == [] and [c["refs"] for c in d["cells"]] == [["L1"], ["L3"]]
+    (nr,) = d["no_room"]
+    k = int(re.search(r"칸 (\d+)개", nr["reason"]).group(1))
+    gap = float(re.search(r"빈틈 ([\d.]+)초", nr["reason"]).group(1))
+    assert nr["line"] == "L2" and k >= 3 and gap < k * 5 / 6
+    assert gap >= 4.6 - 2.0 - 0.2                                       # the gap between L1 and L3, not between its own pieces

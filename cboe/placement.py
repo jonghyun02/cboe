@@ -66,15 +66,17 @@ else right behind the reading time of the other; ③ else the later one waits un
 has had 5/6 s (when it still gets 5/6 s itself) and both cells carry the flag "overlap".
 A cell from a line whose time is a guess carries "timing_estimated" (so does a cell of a sound whose
 onset is a guess); a cell shorter than a quarter of a second carries "flash", so that it never goes
-out unnoticed. A line whose time is a guess (not one matched by the ASR) that is left less than
-5/6 s between the lines around it is first moved inside that gap; when the gap is shorter than
-5/6 s it gets no cell and goes to ``no_room`` (the writer decides: a guessed line is no reason to
-show a few frames of text, 감사 2-m1).
+out unnoticed. A line whose time is a guess (not one matched by the ASR) with a piece left less
+than 5/6 s is first laid out again inside the gap between the cells of the other lines around it
+(its pieces in order, each with its reading time when the gap holds that, else 5/6 s); when the
+gap cannot hold its pieces it gets no cell and goes to ``no_room`` (the writer decides: a guessed
+line is no reason to show a few frames of text, 감사 2-m1).
 
 Scenes (TG 4 "Subtitles may not cross scene changes"): two lines of different ``scene_id`` never
 share a hyphen cell, and the last cell of a scene never runs (longer out-time, closed gap) over a
 shot change between it and the first line of the next scene — unless its speech goes on over that
-cut. Lines without ``scene_id`` are not affected.
+cut, or ending before it would leave the cell under 5/6 s (the cell then says so in
+``check.notes``). A cut the cell starts on is no limit. Lines without ``scene_id`` are not affected.
 Writer's cuts: ``breaks`` replaces the automatic cut points of the line (a piece that does not fit
 is cut further and the cell says so in ``check.notes``). A line wrapped right after its label
 ("[김철수]" alone on the first line) is wrapped again with the first word kept next to the label,
@@ -187,7 +189,7 @@ class _P:
         lines = wrap(text, self.max_units, self.max_lines, kiwi=self.kiwi, tidy=style.tidy_line)
         if len(lines) > 1 and _LABELS_ONLY.fullmatch(lines[0].strip()):
             alt = self._label_kept(text)
-            if alt and " ".join(alt).split() == " ".join(lines).split():     # no word cut in two
+            if alt and _words(alt) == _words(lines):       # no word cut in two
                 return alt
         return lines
 
@@ -216,6 +218,12 @@ def _num(x):
     except (TypeError, ValueError):
         return None
     return v if math.isfinite(v) else None
+
+
+def _words(lines) -> list[str]:
+    """The words of displayed lines without the period or comma that tidying takes off a line end
+    ('잠깐만요,' at the end of a line is '잠깐만요'), to compare two wrappings of one text."""
+    return [w.rstrip(".,") for w in " ".join(lines).split()]
 
 
 # --------------------------------------------------------------------------- cells
@@ -586,21 +594,34 @@ def _scene_of(c: _Cell):
     return scenes.pop() if len(scenes) == 1 else None
 
 
-def _scene_caps(cells: list[_Cell], cuts: list[int], P: _P) -> dict:
-    """The latest out-time of the last cell of a scene (module doc "Scenes"): 2 frames before the
-    first shot change after its speech that comes before the next scene's first cell. Keyed by
-    ``id(cell)``; only for lines that carry a ``scene_id``."""
+def _scene_ends(cells: list[_Cell], cuts: list[int]):
+    """(last cell of a scene, the scene change): the first shot change after both its speech and
+    its in-time that comes before the next scene's first cell. Only lines with a ``scene_id``. A
+    cut the speech goes over is no scene change for it (TG 4), nor is one the cell starts on or
+    after (it waited there for the cell before)."""
     import bisect
-    caps = {}
     dl = sorted((c for c in cells if c.dialogue()), key=lambda c: (c.start, c.seq))
     for a, b in zip(dl, dl[1:]):
         sa, sb = _scene_of(a), _scene_of(b)
         if not sa or not sb or sa == sb:
             continue
-        k = bisect.bisect_right(cuts, a.speech_end())        # a cut the speech goes over is no limit
+        k = bisect.bisect_right(cuts, max(a.speech_end(), a.start))
         if k < len(cuts) and cuts[k] <= b.start:
-            caps[id(a)] = max(cuts[k] - P.gap, a.start + 1)
-    return caps
+            yield a, cuts[k]
+
+
+def _scene_caps(cells: list[_Cell], cuts: list[int], P: _P) -> dict:
+    """The latest out-time of the last cell of a scene (module doc "Scenes"): 2 frames before the
+    scene change (``_scene_ends``), keyed by ``id(cell)``. No cap when that would leave the cell
+    under 5/6 s (it then goes over the change, and says so: ``_scene_notes``)."""
+    return {id(a): x - P.gap for a, x in _scene_ends(cells, cuts) if x - P.gap >= a.start + P.min_f}
+
+
+def _scene_notes(cells: list[_Cell], cuts: list[int], P: _P) -> dict:
+    """The last cells of a scene that go over the scene change because ending before it would leave
+    them under 5/6 s: {id(cell): [note]} for ``check.notes``."""
+    return {id(a): [f"장면이 바뀌는 화면 전환을 넘음 · 그 앞에서 끝내면 {P.min_text}초가 안 됨"]
+            for a, x in _scene_ends(cells, cuts) if a.end > x and x - P.gap < a.start + P.min_f}
 
 
 def _guess_only(c: _Cell) -> bool:
@@ -610,11 +631,32 @@ def _guess_only(c: _Cell) -> bool:
             and d[0].get("timing") != "asr")
 
 
-def _make_room(cells: list[_Cell], P: _P, w0: int, w1) -> list[dict]:
-    """A guessed line left under 5/6 s between the cells around it (module doc): moved inside the
-    gap (the cell before may shrink to its floor), or — when the gap is shorter than 5/6 s — no
-    cell at all; returned as ``no_room`` entries. Ends are set again by the caller."""
-    dropped = []
+def _lay_out(run: list[_Cell], lo: int, hi, P: _P):
+    """In-times for the pieces ``run`` of one guessed line inside lo..hi, in order, each as near its
+    guessed time as it can be: every piece gets its reading time when the gap holds that, else at
+    least 5/6 s; with 2 frames between them. (starts, lengths) or None when the gap is too short."""
+    for need in (lambda x: max(P.min_f, P.need(x.units)), lambda x: P.min_f):
+        r = [need(x) for x in run]
+        rest = sum(r) + (len(run) - 1) * P.gap
+        if hi - lo < rest:
+            continue
+        starts, t = [], lo
+        for x, rx in zip(run, r):
+            s = min(max(x.start, t), hi - rest)        # leaves room for this piece and the ones after it
+            starts.append(s)
+            rest -= rx + P.gap
+            t = s + rx + P.gap
+        return starts, r
+    return None
+
+
+def _make_room(cells: list[_Cell], P: _P, w0: int, w1) -> tuple[list[dict], bool]:
+    """A guessed line with a piece left under 5/6 s (module doc): the pieces of the line that sit
+    together between two cells of other lines are laid out again inside that gap (``_lay_out``;
+    the cell before may shrink to its floor); when the gap cannot hold them the line gets no cell
+    at all (``no_room`` entries, with the gap between the other lines). Returns (no_room entries,
+    whether a cell moved); ends are set again by the caller."""
+    dropped, moved = [], False
     _sorted(cells)
     i = 0
     while i < len(cells):
@@ -622,30 +664,49 @@ def _make_room(cells: list[_Cell], P: _P, w0: int, w1) -> list[dict]:
         if c.end - c.start >= P.min_f or not _guess_only(c):
             i += 1
             continue
-        prev = cells[i - 1] if i > 0 else None
-        nxt = cells[i + 1] if i + 1 < len(cells) else None
-        lo = max(w0, _floor(prev, P) + P.gap) if prev is not None else w0
-        hi = min(nxt.start - P.gap if nxt is not None else INF, w1 if w1 is not None else INF)
-        if hi - lo >= P.min_f:
-            _shift(c, min(max(c.start, lo), hi - P.min_f) - c.start)
-            if prev is not None and prev.end > c.start - P.gap:
-                prev.end = c.start - P.gap
-            i += 1
-            continue
         lid = c.dialogue()[0]["id"]
-        mine = [x for x in cells if any(p["kind"] == "dialogue" and p["id"] == lid for p in x.parts)]
+
+        def of_line(x, lid=lid):
+            return any(p["kind"] == "dialogue" and p["id"] == lid for p in x.parts)
+        mine = [x for x in cells if of_line(x)]
         if not all(_guess_only(x) for x in mine):    # a piece shares a cell with another line: leave it
             i += 1
             continue
+        a, b = i, i                                  # the pieces of this line next to this one
+        while a > 0 and of_line(cells[a - 1]):
+            a -= 1
+        while b + 1 < len(cells) and of_line(cells[b + 1]):
+            b += 1
+        run = cells[a:b + 1]
+        prev = cells[a - 1] if a > 0 else None
+        nxt = cells[b + 1] if b + 1 < len(cells) else None
+        lo = max(w0, _floor(prev, P) + P.gap) if prev is not None else w0
+        hi = min(nxt.start - P.gap if nxt is not None else INF, w1 if w1 is not None else INF)
+        plan = _lay_out(run, lo, hi, P)
+        if plan is not None:
+            starts, r = plan
+            for x, s in zip(run, starts):
+                _shift(x, s - x.start)
+            for j, x in enumerate(run):              # for now; the caller sets the ends again
+                x.end = run[j + 1].start - P.gap if j + 1 < len(run) else x.start + r[j]
+            if prev is not None and prev.end > run[0].start - P.gap:
+                prev.end = run[0].start - P.gap
+            moved = True
+            i = b + 1
+            continue
         first = min(x.parts[0]["t"] for x in mine)
+        k = len(run)
+        gap = max(0, hi - lo) / P.fps
+        want = (k * P.min_f + (k - 1) * P.gap) / P.fps
         dropped.append({"item": lid, "line": lid, "t": P.sec(first), "kind": "dialogue",
                         "text": " ".join(x.parts[0]["text"] for x in sorted(mine, key=lambda x: x.start)),
-                        "reason": f"시각 추정 대사 · 앞뒤 칸 사이 빈틈 {max(0, hi - lo) / P.fps:.2f}초 "
-                                  f"({P.min_text}초 미만)"})
+                        "reason": (f"시각 추정 대사 · 앞뒤 칸 사이 빈틈 {gap:.2f}초 ({P.min_text}초 미만)" if k == 1 else
+                                   f"시각 추정 대사 · 칸 {k}개 · 앞뒤 칸 사이 빈틈 {gap:.2f}초 "
+                                   f"(칸마다 {P.min_text}초면 {want:.2f}초 필요)")})
         for x in mine:
             cells.remove(x)
-        i = max(0, i - 1)
-    return dropped
+        i = max(0, a - 1)
+    return dropped, moved
 
 
 def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> tuple[list[_Cell], list[dict]]:
@@ -669,8 +730,8 @@ def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> tuple[li
     cells = _untangle(cells, P, w0, w1)                  # overlapping lines: never a one-frame cell
     cells = _pair_short(cells, P)
     _dialogue_outs(cells, P, w1, _scene_caps(cells, cuts, P))
-    dropped = _make_room(cells, P, w0, w1)               # a guessed line squeezed between two others
-    if any(c.end - c.start < P.min_f for c in cells) or dropped:
+    dropped, moved = _make_room(cells, P, w0, w1)        # a guessed line squeezed between two others
+    if moved or dropped or any(c.end - c.start < P.min_f for c in cells):
         _sorted(cells)
         _dialogue_outs(cells, P, w1, _scene_caps(cells, cuts, P))
     return cells, dropped
@@ -980,7 +1041,10 @@ def _adjust_ends(cells: list[_Cell], cuts: list[int], P: _P, w1) -> None:
 
 # --------------------------------------------------------------------------- output
 
-def _out(cells: list[_Cell], cuts: list[int], P: _P) -> list[dict]:
+def _out(cells: list[_Cell], cuts: list[int], P: _P, more_notes=None) -> list[dict]:
+    """The cells as draft.json writes them. ``more_notes``: {id(cell): [note]} besides the notes of
+    the parts (``_scene_notes``)."""
+    more_notes = more_notes or {}
     out = []
     for i, c in enumerate(cells):
         nxt = cells[i + 1] if i + 1 < len(cells) else None
@@ -1016,8 +1080,8 @@ def _out(cells: list[_Cell], cuts: list[int], P: _P) -> list[dict]:
         check = {"chars": chars, "n_lines": len(c.lines), "cps": round(cps, 2) if cps < INF else None,
                  "dur": round(dur_f / P.fps, 3), "gap_next": round(gap_f / P.fps, 3) if gap_f is not None else None,
                  "violations": viol}
-        notes = list(dict.fromkeys(n for p in c.parts for n in p.get("notes") or ()))
-        if notes:                                    # what became of a writer's choice (breaks, keep)
+        notes = list(dict.fromkeys([n for p in c.parts for n in p.get("notes") or ()] + more_notes.get(id(c), [])))
+        if notes:                                    # what became of a writer's choice (breaks, keep), a scene change
             check["notes"] = notes
         out.append({"id": f"C{i + 1:04d}", "start": P.sec(c.start), "end": P.sec(c.end), "lines": list(c.lines),
                     "refs": refs, "kind": c.kind(),
@@ -1064,7 +1128,7 @@ def place(lines, sounds, cuts, fps, window=(0.0, None), settings=None) -> dict:
     for a, b in zip(cells, cells[1:]):              # last guard: never overlap the next cell
         if b.start - a.end < P.gap:
             a.end = max(a.start + 1, b.start - P.gap)
-    out = _out(cells, cut_f, P)
+    out = _out(cells, cut_f, P, _scene_notes(cells, cut_f, P))
     n_viol = sum(1 for c in out if c["check"]["violations"])
     placed = sum(1 for c in cells for p in c.sounds())
 
