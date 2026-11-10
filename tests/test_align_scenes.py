@@ -460,6 +460,66 @@ def test_extras_leave_out_interjections_and_hint_echoes(tmp_path, doc):
     assert [(x["text"], x.get("short", False)) for x in d["extras"]] == [("타파하 코토포 무부수", False), ("쿄쿄", True)]
 
 
+def test_asr_noise_shapes():
+    assert align.noise_shape(["감사합니다."]) == "greeting"
+    assert align.noise_shape(["수고하셨습니다.", "수고하셨습니다."]) == "greeting"
+    assert align.noise_shape(["시청해", "주셔서", "감사합니다."]) == "credit"
+    assert align.noise_shape(["한글자막", "by", "가나다"]) == "credit"
+    assert align.noise_shape(["구독과", "좋아요"]) == "credit"
+    assert align.noise_shape(["타파", "타파", "타파"]) == "repeat"
+    assert align.noise_shape(["감사합니다", "가람씨"]) is None             # thanks someone: a real line
+    assert align.noise_shape(["타파하", "코토포"]) is None and align.noise_shape(["."]) is None
+    assert align.noise_shape(["baby", "코토포"]) is None                  # 'by' only as a word of its own
+
+
+class _Scores:
+    def __init__(self, **sc):
+        self.sc = sc
+
+    def scores(self, a, b):
+        return dict(self.sc)
+
+
+def test_no_voice_under_asr_words():
+    w = [{"w": "감사합니다.", "s": 1.0, "e": 1.5}]
+    assert align.no_voice(w, _Scores(speech=0.01, music=0.52, vad=0.8)) == {"speech": 0.01, "music": 0.52, "vad": 0.8}
+    assert align.no_voice(w, _Scores(speech=0.33, music=0.55, vad=0.8))      # a song's voice under music
+    assert align.no_voice(w, _Scores(speech=0.33, music=0.2, vad=0.8)) is None
+    assert align.no_voice(w, _Scores(speech=0.5, music=0.6, vad=0.8)) is None  # speech over music
+    assert align.no_voice(w, _Scores(vad=0.1)) == {"vad": 0.1}               # no SED files: the VAD
+    assert align.no_voice(w, _Scores(vad=0.8)) is None
+    assert align.no_voice([{**w[0], "p": 0.2}]) == {"p": 0.2}                 # the ASR's own word probability
+    assert align.no_voice([{**w[0], "p": 0.9}]) is None and align.no_voice(w) is None
+
+
+def test_asr_noise_over_music_is_kept_but_suspect(tmp_path, doc):
+    small = {**doc, "lines": [ln for ln in doc["lines"] if ln["scene_id"] in ("SC001", "SC002", "SC003")],
+             "scenes": doc["scenes"][:3]}
+    film = film_of(small)
+    film.insert(3, ("N1", "감사합니다.", 1))                 # over music, nobody speaking
+    film.insert(7, ("N2", "감사합니다.", 2))                 # someone says it
+    film.insert(10, ("N3", "타파하 코토포 무부수", 2))       # an ad-lib over the same music
+    words, vad, truth, t_end = speak(film)
+    names = sorted(set(align.VOICE) | set(align.VOCAL_FX) | {"Music"})
+    n = int(t_end * 25) + 25
+    probs = np.zeros((n, len(names)), np.float16)
+    probs[:, names.index("Speech")] = 0.6
+    for uid in ("N1", "N3"):
+        a, b = (int(x * 25) for x in truth[uid])
+        probs[a:b + 1, names.index("Speech")] = 0.02
+        probs[a:b + 1, names.index("Music")] = 0.7
+    for track in ("mix", "effects"):
+        np.savez(tmp_path / f"sed_{track}.npz", probs=probs, classes=np.array(names), t0=0.0, fps=25.0)
+    np.savez(tmp_path / "env.npz", speech=np.full(n, -80.0), effects=np.full(n, -80.0), hop=0.04)
+    d, _, _ = run(tmp_path, small, words, vad, t_end)
+    got = {(x["text"], x["start"]): x for x in d["extras"]}
+    assert len(got) == 3
+    noise = got[("감사합니다.", truth["N1"][0])]
+    assert noise["suspect"] == "greeting" and noise["suspect_by"]["music"] >= 0.5
+    assert "suspect" not in got[("감사합니다.", truth["N2"][0])]
+    assert "suspect" not in got[("타파하 코토포 무부수", truth["N3"][0])]       # not the shape: kept as it is
+
+
 def test_voice_scores_are_read_once(tmp_path, doc, monkeypatch):
     """감사 1-09: the score files were read again for every run of unaligned lines."""
     from cboe.stages import sed

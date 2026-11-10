@@ -46,8 +46,12 @@ the word-level differences and ``hints`` ["spelling"] when they look like spelli
 ASR words that no aligned line uses are ``extras`` (speech that is in no script line, 감사 1-04).
 The unheard lines of a found scene stay near its matched lines (``_place_scenes``).
 
+An extra shaped like the ASR model's own noise ('감사합니다' alone, a subtitle credit, one word over
+and over) with no voice under it is ``suspect`` (kept, for the screen to fold: ``noise_shape``,
+``no_voice``).
+
 dialogue.json {"mode", "extras": [{"id", "start", "end", "text", "words", "scene_id",
-"overlaps", "short"}], "lines": [...]}; scenes.json {"scenes": [{"id", "number", "heading",
+"overlaps", "short", "suspect", "suspect_by"}], "lines": [...]}; scenes.json {"scenes": [{"id", "number", "heading",
 "start", "end" (the matched lines), "span" (every line with a time, when wider), "status",
 "score", "how", "lines", "guess", "note"}]}.
 """
@@ -112,6 +116,22 @@ EXTRA_GAP = 0.8       # s of silence that ends a group of ASR words that are in 
 # groups made only of these (and vocalisations) are not kept as speech that is in no script line
 INTERJECTIONS = {"네", "예", "응", "야", "얘", "어머", "어머나", "아이고", "에이", "참", "뭐", "자", "음", "흠", "헐", "엥"}
 EXTRA_SHORT = 2       # a group of this many letters or fewer is marked "short" (a word fragment, mostly)
+# 받아쓰기 헛소리: what the ASR model (Whisper) writes where nobody speaks — over music or silence:
+# a greeting said alone, a subtitle or channel credit, one phrase over and over. A group of
+# speech in no script line that has this shape and no voice under it is kept (a real '감사합니다'
+# is said too) but marked ``suspect`` so the screen can fold it. No voice: the words' mean
+# probability ``p`` below NOISE_P (faster-whisper; the OpenVINO model gives none), or over the
+# span the mix's SED voice score below NOISE_SPEECH, or below NOISE_SPEECH_UNDER_MUSIC while SED
+# Music is NOISE_MUSIC or more (a song's singing scores as some voice), or — without SED files —
+# asr.json's VAD covering less than NOISE_VAD of it. Silero VAD on the separated dialogue track
+# covers these words too (a song's voice leaks there), so it is no test when SED is there.
+# 써니 앞 30분 / 빙과 21분 aligned lines: SED voice 1 % quantile 0.15 / 0.16; voice < 0.4 under
+# music >= 0.5: 1 of 140 / 13 of 255 lines (BGM under speech is common in animation); VAD 1 %
+# quantile 0.40 / 0.47. NOISE_P is not measured (no work folder has word probabilities).
+NOISE_GREETINGS = {"감사합니다", "고맙습니다", "감사해요", "고마워요", "감사드립니다", "안녕하세요", "안녕히계세요",
+                   "안녕히가세요", "수고하셨습니다", "수고하세요", "시청해주셔서감사합니다", "다음영상에서만나요"}
+NOISE_CREDIT = re.compile(r"자막|구독|시청|좋아요와|알림\s*설정|(?<![A-Za-z])by(?![A-Za-z])", re.I)
+NOISE_P, NOISE_SPEECH, NOISE_SPEECH_UNDER_MUSIC, NOISE_MUSIC, NOISE_VAD = 0.5, 0.15, 0.4, 0.5, 0.3
 
 
 def is_vocalisation(text: str) -> bool:
@@ -226,6 +246,8 @@ class Voice:
             from .sed import load_env
             probs, names, t0 = sed_load(self.p, "mix")
             s.update(t0=t0, v=probs[:, [names.index(c) for c in VOICE if c in names]].max(axis=1))
+            if "Music" in names:
+                s["music"] = probs[:, names.index("Music")].copy()
             fx, _, _ = sed_load(self.p, "effects")
             vfx = np.maximum(fx[:, [names.index(c) for c in VOCAL_FX]].max(axis=1),
                              probs[:, [names.index(c) for c in VOCAL_FX]].max(axis=1))
@@ -269,6 +291,20 @@ class Voice:
             if y > a and x < b:
                 regs.append([max(x, a), min(y, b), 0.5, "speech"])
         return merge_regions(regs)
+
+    def scores(self, a: float, b: float) -> dict:
+        """Mean scores over (a, b): "speech" (SED voice classes of the mix), "music" (SED Music
+        of the mix), "vad" (the share of the span asr.json's VAD covers). A score whose file is
+        missing is left out ("vad" is always there; 0.0 without VAD)."""
+        s, out = self._load(), {}
+        b = max(b, a + 1.0 / self.FPS)
+        for key in ("v", "music"):
+            if key in s:
+                f0 = min(max(int((a - s["t0"]) * self.FPS), 0), max(len(s[key]) - 1, 0))
+                f1 = max(min(int(math.ceil((b - s["t0"]) * self.FPS)), len(s[key])), f0 + 1)
+                out["speech" if key == "v" else key] = float(np.mean(s[key][f0:f1])) if len(s[key]) else 0.0
+        out["vad"] = min(1.0, sum(max(0.0, min(b, y) - max(a, x)) for x, y in s["vad"]) / (b - a))
+        return out
 
 
 def _voice_regions(p, a: float, b: float) -> list[tuple[float, float, float, str]]:
@@ -1097,11 +1133,47 @@ def _gap_scene(gaps, m: float):
     return None
 
 
-def _extras(out: list[dict], words: list[dict], heard_g: dict, hotwords, gaps=()) -> list[dict]:
+def noise_shape(toks: list[str]) -> str | None:
+    """'credit' | 'greeting' | 'repeat' when ASR words have the shape of what the ASR model
+    writes where nobody speaks: a subtitle or channel credit (NOISE_CREDIT), a greeting alone
+    or the same greeting over and over (NOISE_GREETINGS), one word said again and again; None
+    otherwise."""
+    keys = [k for k in ("".join(norm_chars(t)) for t in toks) if k]
+    if not keys:
+        return None
+    if NOISE_CREDIT.search(" ".join(toks)):
+        return "credit"
+    joined = "".join(keys)
+    if any(len(joined) % len(g) == 0 and joined == g * (len(joined) // len(g)) for g in NOISE_GREETINGS):
+        return "greeting"
+    if len(keys) > 1 and len(set(keys)) == 1:
+        return "repeat"
+    return None
+
+
+def no_voice(ws: list[dict], voice=None) -> dict | None:
+    """The scores that tell nobody speaks under the ASR words ``ws`` — {"p" (mean word
+    probability, when the ASR gave one), "speech", "music" (SED of the mix), "vad"} rounded — or
+    None when a voice is there or nothing tells (see NOISE_*)."""
+    ps = [float(w["p"]) for w in ws if w.get("p") is not None]
+    sc = dict(voice.scores(float(ws[0]["s"]), float(ws[-1]["e"]))) if voice is not None else {}
+    if ps:
+        sc["p"] = sum(ps) / len(ps)
+    weak = (bool(ps) and sc["p"] < NOISE_P) or \
+        ("speech" in sc and (sc["speech"] < NOISE_SPEECH or
+                             (sc["speech"] < NOISE_SPEECH_UNDER_MUSIC and sc.get("music", 0.0) >= NOISE_MUSIC))) or \
+        (voice is not None and "speech" not in sc and sc.get("vad", 1.0) < NOISE_VAD)
+    return {k: round(v, 2) for k, v in sc.items()} if weak else None
+
+
+def _extras(out: list[dict], words: list[dict], heard_g: dict, hotwords, gaps=(), voice=None) -> list[dict]:
     """ASR words no aligned line uses, grouped where they follow each other (gap < EXTRA_GAP s,
     or a sentence end). Dropped: groups made only of interjections and vocalisations, and groups
     that only repeat the ASR hint names (``asr.hint_echo``). A group of EXTRA_SHORT letters or
-    fewer is marked ``short``. Words over a foreign line (placed on voice) are that line's."""
+    fewer is marked ``short``. Words over a foreign line (placed on voice) are that line's. A
+    group shaped like the ASR model's own noise (``noise_shape``) with no voice under it
+    (``no_voice``, ``voice``: a ``Voice``) is marked ``suspect`` (the shape) with the scores
+    that tell it (``suspect_by``) — kept, for the screen to fold."""
     from .asr import hint_echo
     used: set[int] = set()
     for i, ks in heard_g.items():
@@ -1163,6 +1235,10 @@ def _extras(out: list[dict], words: list[dict], heard_g: dict, hotwords, gaps=()
         ov = [t[3] for t in timed if t[4] == UNHEARD and t[0] < e and t[1] > s]
         if ov:
             row["overlaps"] = ov
+        shape = noise_shape(toks)
+        why = no_voice(ws, voice) if shape else None
+        if why is not None:
+            row["suspect"], row["suspect_by"] = shape, why
         extras.append(row)
     return extras
 
@@ -1204,7 +1280,7 @@ def run(p, cfg: dict) -> dict:
             _place_unaligned(voice, seq, t_lo, t_hi)
             mode = "aligned"
         _finish(lines, words, heard_g, script.get("characters"))
-        extras = _extras(lines, words, heard_g, hotwords, gaps)
+        extras = _extras(lines, words, heard_g, hotwords, gaps, voice)
     write_json(p.path("dialogue.json"), {"mode": mode, "extras": extras, "lines": lines})
     rows = _scene_rows(script, lines, info) if script and script.get("lines") else []
     write_json(p.path("scenes.json"), {"scenes": rows})
