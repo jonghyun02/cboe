@@ -122,7 +122,7 @@ import math
 import re
 
 from . import style
-from .textutil import EPS, end_bonus, fits, units, wrap
+from .textutil import EPS, end_bonus, fits, note_left_alone, units, wrap
 
 INF = float("inf")
 ESTIMATED = ("voice", "even")               # dialogue.json ``timing`` of a line whose time is a guess
@@ -198,13 +198,17 @@ class _P:
         m = _LABELS_HEAD.match(t)
         if not m or m.end() >= len(t):
             return None
-        rest = t[m.end():].split(" ", 1)
-        glued = (t[:m.end()] + rest[0]).replace(" ", _JOIN) + (" " + rest[1] if len(rest) > 1 else "")
+        words = t[m.end():].split(" ")
+        # the opening note of a sung line is no word of its own: it stays by its lyric (II.7 "Add a
+        # space between the music note and the preceding or subsequent text" = 음표와 앞뒤 글 사이에
+        # 빈칸), so the label keeps the note and the first word of the lyric, never the note alone
+        k = 2 if words[0] == style.NOTE and len(words) > 1 else 1
+        glued = (t[:m.end()] + " ".join(words[:k])).replace(" ", _JOIN) + "".join(" " + w for w in words[k:])
         lines = wrap(glued, self.max_units, self.max_lines, kiwi=self.kiwi,
                      tidy=lambda s: style.tidy_line(s.replace(_JOIN, " ")))
         lines = [x.replace(_JOIN, " ") for x in lines]
         ok = (lines and len(lines) <= self.max_lines and all(units(x) <= self.max_units + EPS for x in lines)
-              and not _LABELS_ONLY.fullmatch(lines[0].strip()))
+              and not _LABELS_ONLY.fullmatch(lines[0].strip()) and not note_left_alone(lines))
         return lines if ok else None
 
     def fits(self, text: str) -> bool:

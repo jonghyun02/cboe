@@ -939,6 +939,16 @@ def test_a_comma_after_the_first_word_does_not_leave_the_label_alone(text, first
     assert lines[0] == first and bare(" ".join(lines)) == bare(f"[하늘/영어] {text}")
 
 
+def test_a_label_kept_off_a_line_of_its_own_takes_the_note_with_its_lyric():
+    # a sung line: the word next to the label is the opening note, which may not stay behind without
+    # its lyric (II.7): the label keeps the note and the first word of the lyric together
+    sung = L("L1", "그리워했었는데 너를", 10.0, 13.0, name="세바스찬", show=True, sung=True)
+    assert one(run([sung]), "L1")["lines"] == ["[세바스찬] ♪ 그리워했었는데", "너를 ♪"]
+    # no room for the lyric's first word beside the label: the label alone, never '[이름] ♪' / '가사 ♪'
+    wide = L("L1", "기다리고있었죠", 10.0, 13.0, name="세바스찬", show=True, sung=True, language="영어")
+    assert one(run([wide]), "L1")["lines"] == ["[세바스찬/영어]", "♪ 기다리고있었죠 ♪"]
+
+
 def test_a_guessed_line_squeezed_between_two_heard_lines_gets_no_cell():
     a = L("L1", "그래서 내가 말했잖아", 10.0, 11.6, speaker="A", timing="asr")
     g = L("L2", "그게 무슨 소리야 지금 당장 설명해 봐", 11.75, 11.9, speaker="B", timing="voice", status="unheard")
