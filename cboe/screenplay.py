@@ -836,17 +836,29 @@ SOURCE_TAGS = {
 MEDIUM_SOURCES = ("broadcast", "radio")
 # written without parentheses these still are no names (single letters could be: a character "M")
 BARE_SOURCE_CUES = frozenset(("소리", "목소리", "내레이션", "나레이션", "해설", "NA", "NAR", "VO", "OS"))
+# a sound the voice makes: a noun or a sound word (한숨, 폭소, 키득), or laughing and crying
 VOCAL_RE = re.compile(
-    r"한숨|웃음|깔깔|낄낄|킥킥|키득|큭큭|폭소|실소|울음|엉엉|흑흑|훌쩍|흐느|오열|통곡|기침|콜록|쿨럭|켁켁|재채기|에취|"
-    r"딸꾹|트림|비명|신음|끙끙|탄식|탄성|환호|하품|숨소리|숨을\s*(?:몰아|내쉬|들이|고르|헐떡)|헉헉|헐떡|가쁜\s*숨|"
+    r"한숨|웃음|깔깔|낄낄|킥킥|킬킬|키득|큭큭|폭소|실소|피식|울음|엉엉|흑흑|훌쩍|흐느|오열|통곡|울부짖|기침|콜록|쿨럭|켁켁|"
+    r"재채기|에취|딸꾹|트림|비명|신음|끙끙|탄식|탄성|환호|하품|숨소리|숨을\s*(?:몰아|내쉬|들이|고르|헐떡)|헉헉|헐떡|가쁜\s*숨|"
     r"심호흡|콧방귀|쯧쯧|혀를\s*차|"
     r"침을\s*삼키|꿀꺽|휘파람|코를\s*골|코골이|킁킁|"
-    r"(?:^|\s)(?:웃으며|웃으면서|웃고|웃는|웃다가|웃더니|웃자|울며|울면서|우는|울다가|울더니)")
+    r"(?:^|\s)(?:웃(?:다|는|고|으|어|었|자|더)|운다|우는|울(?:다|고|며|면|어|었|자|더))")
+# a smile on the face makes no sound (씨익·빙그레: 소리 없이 웃는 모양)
+SILENT_SMILE_RE = re.compile(r"쓴\s*웃음|웃음을?\s*(?:짓|띠|머금)|미소|씨익|씩\s*웃|빙그레|빙긋|방긋|싱긋|생긋|벙긋")
+# said while making that sound (웃으며, 웃다가 심각, 한숨 쉬며, 웃는 얼굴로): the manner of the words
+MANNER_END = re.compile(r"(?:며|면서|면서도|다가|듯|듯이|채|채로|로)$")
+VOICE_MANNER_RE = re.compile(r"(?:목소리|말투|어조|억양|톤)(?:로|으로)?$|(?:소리|투)로$")      # 웃음 섞인 목소리
+# whose sound it is when not the speaker's: a group (학생들 폭소, 다들 웃는다) or X의 웃음
+GROUP_WORDS = frozenset(("일동", "모두", "모두들", "다들", "전원", "다같이", "주위", "주변", "관객", "청중", "객석",
+                         "방청석", "방청객", "일행", "무리"))
+_PARTICLE = re.compile(r"(?<=\S)(?:이|가|은|는|도)$")
+SUBJECT_RE = re.compile(r"(\S{2,}?)(?:이|가)")          # 아기가 울음을 터뜨린다: the one right before the sound
+ADVERBS = frozenset(("같이", "많이", "깊이", "높이", "굳이", "길이", "곧이", "일찍이", "나란히"))
 DELIVERY_RE = re.compile(
     r"혼잣말|혼자말|중얼|웅얼|구시렁|궁시렁|투덜|속삭|귓속말|소곤|나직|나지막|작게|조용히|낮게|큰\s*소리|소리치|"
     r"소리\s*지르|소리를\s*지르|소리\s*높여|목청|버럭|외치|외친|고함|절규|악을\s*쓰|호통|윽박|목소리|말투|어조|억양|"
     r"톤으로|사투리|방언|발음|혀\s*짧|더듬|울먹|떨리는|다급|급하게|빠르게|천천히|또박또박|속사포|힘겹게|힘없이|힘주어|"
-    r"단호|퉁명|쏘아|비꼬|빈정|비아냥|능청|너스레|애원|읍소|타이르|달래|다그치|흉내|성대모사|랩|읊|낭독|낭송|선창|구호|"
+    r"단호|퉁명|쏘아|비꼬|비웃|빈정|비아냥|능청|너스레|애원|읍소|타이르|달래|다그치|흉내|성대모사|랩|읊|낭독|낭송|선창|구호|"
     r"취한|취해|잠꼬대|잠결|반말|존댓말")
 TO_RE = re.compile(r"(?:에게|한테|께|더러)$|[을를]\s*향해$")
 _TOKEN_SPLIT = re.compile(r"\s*[,，、·]\s*")
@@ -856,9 +868,38 @@ def _tag_key(token: str) -> str:
     return re.sub(r"[\s.·]", "", token).upper()
 
 
+def vocal_kind(t: str) -> tuple[str, str | None] | None:
+    """Whether a direction is about a sound of the voice: (``vocal``, whose) when it names the
+    sound itself (``한숨``, ``폭소``, ``울음을 터뜨린다``, ``한숨을 내쉬더니 …``), (``delivery``,
+    None) when the words are said while making it (``웃으며``, ``웃다가 심각``, ``한숨 쉬며``,
+    ``웃는 얼굴로``), None when it is no sound (``쓴웃음``, ``미소``). ``whose`` is None for the
+    speaker's own sound, or the others who make it: ``학생들 폭소`` -> 학생들, ``한경의 웃음`` -> 한경."""
+    m = VOCAL_RE.search(t)
+    if not m or SILENT_SMILE_RE.search(t):
+        return None
+    words = [(w.start(), w.end(), w.group()) for w in re.finditer(r"\S+", t)]
+    at = next(k for k, (a, b, _) in enumerate(words) if b > m.start() + (t[m.start()] == " "))
+    if any(MANNER_END.search(w) for _, _, w in words[at:at + 2]) or VOICE_MANNER_RE.search(t):
+        return "delivery", None
+    whose = None
+    for k, (_, _, w) in enumerate(words):
+        if k == at:
+            continue
+        core = _PARTICLE.sub("", w)
+        subject = SUBJECT_RE.fullmatch(w) if k + 1 == at and w not in ADVERBS else None
+        if core in GROUP_WORDS or (core.endswith("들") and len(core) >= 2):
+            whose = core                                     # 학생들 폭소, 키득거리는 학생들, 다들 웃는다
+        elif k + 1 == at and w.endswith("의") and len(w) > 1:
+            whose = w[:-1]                                   # 한경의 웃음
+        elif subject:
+            whose = subject.group(1)                         # 아기가 울음을 터뜨린다
+    return "vocal", whose
+
+
 def direction_type(token: str) -> tuple[str, object]:
     """Kind of one direction and its value: (``language``, name or None for Korean),
-    (``sung``, True), (``source``, key), (``vocal``|``delivery``|``to``|``action``, None)."""
+    (``sung``, True), (``source``, key), (``vocal``, whose sound — None for the speaker's
+    own, see ``vocal_kind``), (``delivery``|``to``|``action``, None)."""
     t = clean(token)
     if t in LANG_ABBR:
         return "language", LANG_ABBR[t]
@@ -874,8 +915,9 @@ def direction_type(token: str) -> tuple[str, object]:
         return "source", SOURCE_TAGS[_tag_key(t)]
     if TO_RE.search(t):
         return "to", None
-    if VOCAL_RE.search(t):
-        return "vocal", None
+    voice = vocal_kind(t)
+    if voice:
+        return voice
     if DELIVERY_RE.search(t):
         return "delivery", None
     return "action", None
@@ -919,9 +961,9 @@ def parse_cue(cue: str) -> dict:
             out["language"] = value
         elif kind == "sung":
             out["sung"] = True
-        elif kind in ("delivery", "vocal"):
+        elif kind == "delivery" or (kind == "vocal" and not value):      # a sound of others is not this speaker's
             out[kind].append(clean(token))
-        else:
+        elif kind != "vocal":
             return False
         return True
 
@@ -988,28 +1030,41 @@ def annotate(raw: str, cue: dict | None = None) -> list[dict]:
         if not LETTER_RE.search(text):
             if out:                                   # directions after the last words stay with them
                 out[-1]["raw"] = clean(out[-1]["raw"] + " " + raw[a:b])
-                _add_directions(out[-1], p["dirs"])
+                _add_directions(out[-1], p["dirs"], cue.get("name"))
             continue
         line = {"raw": clean(raw[a:b]), "text": text, "language": p["language"], "sung": p["sung"],
                 "source": cue.get("source"), "delivery": list(cue.get("delivery") or []),
                 "vocal": list(cue.get("vocal") or []), "directions": []}
-        _add_directions(line, p["dirs"])
+        _add_directions(line, p["dirs"], cue.get("name"))
         out.append(line)
     return out
 
 
-def _add_directions(line: dict, dirs: list[dict]) -> None:
+def _public(d: dict, speaker: str | None = None) -> dict:
+    """A direction as stored: ``{"text", "type"}``, and ``by`` for a sound that others make
+    (``학생들 폭소`` in someone's line: not the speaker's sound)."""
+    out = {"text": d["text"], "type": d["type"]}
+    by = d["_value"] if d["type"] == "vocal" else None
+    if by and re.sub(r"\s+", "", by) not in {re.sub(r"\s+", "", n) for n in (speaker or "").split("/")}:
+        out["by"] = by
+    return out
+
+
+def _add_directions(line: dict, dirs: list[dict], speaker: str | None = None) -> None:
+    """Directions into a line: ``vocal`` lists the speaker's own sounds only — a sound made
+    by others stays in ``directions`` with its ``by``."""
     for d in dirs:
-        line["directions"].append({"text": d["text"], "type": d["type"]})
+        pub = _public(d, speaker)
+        line["directions"].append(pub)
         if d["type"] == "source" and not line["source"]:
             line["source"] = d["_value"]
-        elif d["type"] in ("delivery", "vocal"):
+        elif d["type"] in ("delivery", "vocal") and "by" not in pub:
             line[d["type"]].append(d["text"])
 
 
-def public_directions(raw: str) -> list[dict]:
-    """All directions written in ``raw`` as ``[{"text", "type"}]``."""
-    return [{"text": d["text"], "type": d["type"]} for m in PAREN_RE.finditer(raw) for d in directions_of(m.group(1))]
+def public_directions(raw: str, speaker: str | None = None) -> list[dict]:
+    """All directions written in ``raw`` as ``[{"text", "type", "by"?}]``."""
+    return [_public(d, speaker) for m in PAREN_RE.finditer(raw) for d in directions_of(m.group(1))]
 
 
 # ====================================================================== the document
@@ -1064,7 +1119,7 @@ class Builder:
         if not parts:
             if LETTER_RE.search(raw) or cue["raw"]:
                 self._element("action", clean(raw), item, speaker=cue["name"], cue=cue["raw"],
-                              directions=public_directions(raw))
+                              directions=public_directions(raw, cue["name"]))
             return []
         self._person(cue)
         out = []
@@ -1091,7 +1146,7 @@ class Builder:
             ln = self.lines[-1]
             ln["raw"] = clean(ln["raw"] + " " + more)
             ln["text"] = clean(ln["text"] + " " + spoken(more))
-            ln["directions"].extend(public_directions(more))
+            ln["directions"].extend(public_directions(more, ln["speaker"]))
             return True
         del self.lines[n_lines:], self.elements[n_elements:]
         self.dialogue(None, clean(raw + " " + more), item, cue, **extra)
@@ -1105,7 +1160,7 @@ class Builder:
         line = {"id": lid, "speaker": cue["name"], "text": text, "raw": text, "scene_id": self.scene_id,
                 "element_id": None, "language": cue["language"], "sung": cue["sung"], "source": cue["source"],
                 "delivery": list(cue["delivery"]), "vocal": list(cue["vocal"]),
-                "directions": public_directions(text), **extra}
+                "directions": public_directions(text, cue["name"]), **extra}
         self.lines.append(line)
         self._last = None
         return line

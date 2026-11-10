@@ -88,6 +88,43 @@ def test_a_name_with_a_space_is_one_person():
     assert doc["people"][0]["cues"] == ["봉 기사", "봉기사"]
 
 
+def test_a_sound_of_the_voice_or_the_manner_of_the_words():
+    kind = sp.direction_type
+    for sound in ("한숨", "통곡", "폭소", "비명", "키득", "피식", "울음을 터뜨린다", "한숨을 내쉬더니 돌아선다", "큰 웃음소리",
+                  "비명 소리", "운다", "사레 들려 켁켁"):
+        assert kind(sound) == ("vocal", None), sound
+    for manner in ("웃으며", "웃다가 심각", "깔깔 웃으며", "한숨 쉬며", "흐느끼며", "울면서", "웃는 얼굴로",
+                   "웃음 섞인 목소리로", "웃음 참으며", "비웃으며"):
+        assert kind(manner) == ("delivery", None), manner
+    for silent in ("쓴웃음", "씨익 웃는다", "미소", "울린다", "울컥"):        # no sound of the voice
+        assert kind(silent)[0] not in ("vocal", "delivery"), silent
+    # a sound that others make is a sound, but whose it is goes with it
+    assert kind("학생들 폭소") == ("vocal", "학생들") and kind("키득거리는 아이들") == ("vocal", "아이들")
+    assert kind("다들 웃는다") == ("vocal", "다들") and kind("일동 웃음") == ("vocal", "일동")
+    assert kind("한경의 웃음") == ("vocal", "한경") and kind("아기가 울음을 터뜨린다") == ("vocal", "아기")
+    assert kind("같이 웃는다") == ("vocal", None)                            # an adverb is nobody
+
+
+def test_the_sound_of_others_stays_in_the_directions_only():
+    rows = ["1. 교실 - 낮",
+            "선생      (학생들 폭소) 조용히! (한숨) 다시 하자.",
+            "나래      (웃으며) 네. (키득)",
+            "학생들    (폭소) 네에!",
+            "선생      (한경의 웃음) 한경이 웃었니?",
+            "나래      (학생들 키득) ……"]
+    doc = sp.build(sp.classify_plain(rows))
+    a, b, c, d = doc["lines"]
+    assert a["vocal"] == ["한숨"] and a["directions"] == [
+        {"text": "학생들 폭소", "type": "vocal", "by": "학생들"}, {"text": "한숨", "type": "vocal"}]
+    assert (b["delivery"], b["vocal"]) == (["웃으며"], ["키득"])
+    assert c["vocal"] == ["폭소"] and "by" not in c["directions"][0]           # the students' own line
+    assert d["vocal"] == [] and d["directions"][0]["by"] == "한경"
+    silent = doc["elements"][-1]                                             # no words: kept as an action
+    assert silent["speaker"] == "나래" and silent["directions"] == [{"text": "학생들 키득", "type": "vocal", "by": "학생들"}]
+    # a group named as the speaker owns the sound in its own cell
+    assert sp.annotate("(학생들 폭소) 네에!", sp.parse_cue("학생들"))[0]["vocal"] == ["학생들 폭소"]
+
+
 def L(page, y0, x0, text, bold=False):
     return {"page": page, "y0": float(y0), "x0": float(x0), "x1": float(x0 + 10 * len(text)), "text": text,
             "bold": bold, "size": 10.0, "space_end": False, "lead": 0}

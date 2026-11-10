@@ -461,7 +461,9 @@ def test_direction_types():
     assert [kinds[t][1] for t in ("V.O", "E", "소리", "전화", "무전", "뉴스", "속마음")] == [
         "offscreen", "offscreen", "offscreen", "phone", "radio", "broadcast", "inner"]
     assert all(kinds[t][0] == "delivery" for t in ("혼잣말로", "버럭", "속삭이며", "떨리는 목소리로", "북한 억양"))
-    assert all(kinds[t][0] == "vocal" for t in ("한숨", "웃으며", "기침", "비명을 지르며"))
+    assert all(kinds[t] == ("vocal", None) for t in ("한숨", "기침"))
+    # said while laughing or screaming is the manner of the words, not a sound of its own
+    assert all(kinds[t] == ("delivery", None) for t in ("웃으며", "비명을 지르며"))
     assert kinds["나래에게"][0] == kinds["문 쪽을 향해"][0] == "to"
     for t in ("돌아보며", "긴장", "일어나며", "바람 불어", "노래를 끄며", "전화를 받으며", "TV를 끈다", "숨을 죽이고"):
         assert kinds[t] == ("action", None), t

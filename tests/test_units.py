@@ -130,7 +130,7 @@ def test_script_reading_fixes(tmp_path):
     assert got[-1] == ("미나", "가자.") and len(got) == 12
     assert d["characters"] == ["미나", "준호", "남자2"]              # no '어느 겨울', '배역', '지금 시간은 3', 'http'
     assert [ln["source"] for ln in d["lines"][8:10]] == ["offscreen", "offscreen"]
-    assert d["lines"][1]["directions"] == [{"text": "웃으며", "type": "vocal"}, {"text": "나간다", "type": "action"}]
+    assert d["lines"][1]["directions"] == [{"text": "웃으며", "type": "delivery"}, {"text": "나간다", "type": "action"}]
     assert [(s["number"], s["place"]) for s in d["scenes"]] == [("1", None), ("2", "복도")]      # '#1' is a scene heading
     assert [ln["scene_id"] for ln in d["lines"]] == ["SC001"] * 11 + ["SC002"]
     assert [(e["type"], e["text"]) for e in d["elements"][:4]] == [
