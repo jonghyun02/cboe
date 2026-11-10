@@ -541,3 +541,62 @@ def test_work_list_counts_like_the_review_screen(tmp_path):
     assert [it["id"] for it in eff if it.get("line_excluded")] == ["P0001"]
     s = Workspace(tmp_path / "ws").summary("w1")
     assert s["total"] == 2 and s["counts"] == {"speaker": 1, "sfx": 1}
+
+
+# ------------------------------------------------------------------ 5차: 내린 작업의 재생용 영상 일꾼
+def test_dropping_a_review_app_ends_its_playback_worker_and_frame_reader(tmp_path, monkeypatch):
+    """A review app the studio drops (a run ended, delete) ends its playback-video worker — with
+    the ffmpeg making review.mp4, which kept the work folder open so that delete failed with
+    WinError 5 — and its frame reader. A stand-in worker; no ffmpeg."""
+    from cboe.server import app as app_mod
+    made = []
+
+    class Worker:
+        def __init__(self, work, meta=None, wait=5.0):
+            self.work, self.started, self.closed = Path(work), 0, 0
+            made.append(self)
+
+        def start(self):
+            self.started += 1
+            return self
+
+        def status(self):
+            return {"state": "closed" if self.closed else "building", "t0": 0.0, "progress": 0.1, "note": None}
+
+        def file(self):
+            return None
+
+        def request_build(self):
+            return self.status()
+
+        def close(self, timeout=5.0):
+            self.closed += 1
+
+    class Grabber:
+        closed = 0
+
+        def close(self):
+            Grabber.closed += 1
+
+    monkeypatch.setattr(app_mod.proxy, "Worker", Worker)
+    root = tmp_path / "ws"
+    w = root / "p1"
+    w.mkdir(parents=True)
+    for name, data in (("project.json", {"title": "지어낸 작업", "t0": 0.0, "t1": 60.0, "fps": 24.0}),
+                       ("dialogue.json", {"lines": []}), ("items.json", {"items": []})):
+        (w / name).write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+    ws = Workspace(root)
+    apps = studio_app.ProjectApps(ws)
+    a1 = apps.get("p1")
+    a1.state.review._grabber = Grabber()
+    assert len(made) == 1 and made[0].started == 1 and made[0].closed == 0
+    apps.drop("p1")
+    assert "p1" not in apps.apps
+    assert made[0].closed == 1 and Grabber.closed == 1          # the worker (and its ffmpeg) ended too
+    apps.drop("p1")                                             # nothing open: nothing to end
+    assert made[0].closed == 1
+    a2 = apps.get("p1")                                         # opened again: a new worker
+    assert a2 is not a1 and len(made) == 2 and made[1].closed == 0
+    apps.drop("p1")
+    assert made[1].closed == 1
+    assert ws.trash("p1").parent == root / ".trash"

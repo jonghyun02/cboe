@@ -212,11 +212,14 @@ class ProjectApps:
             return app
 
     def drop(self, pid: str) -> None:
+        """Forget the review app of ``pid`` and end what it runs (``ReviewService.close``): the
+        playback-video worker with the ffmpeg making review.mp4, and the frame reader. A dropped
+        app is never closed by a lifespan (it is not mounted), and its ffmpeg would hold the work
+        folder until this process ends (moving it to the trash fails, WinError 5)."""
         with self.lock:
             app = self.apps.pop(pid, None)
-        grabber = app.state.review._grabber if app is not None else None
-        if grabber is not None:
-            grabber.close()
+        if app is not None:
+            app.state.review.close()
 
 
 class Studio:
