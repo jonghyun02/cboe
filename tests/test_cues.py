@@ -289,6 +289,17 @@ def test_the_doors_onomatopoeia_before_the_door_or_one_word_off_its_verb_is_the_
     assert "wind" in wind["families"]                  # the word beside it names a sound of its own
 
 
+def test_a_long_run_of_onomatopoeia_beside_a_door_is_read_at_once():
+    """'문이 아주 탕탕탕…야': a long run the door words do not follow is not tried again split in
+    every way (the door pattern takes the run whole) — read in well under a second."""
+    import time
+    for text in ("문이 아주 " + "탕" * 40 + "야", "문이 " + "탕" * 40 + " 아주 야", "문이 바람 소리와 함께 " + "탕" * 40 + "야"):
+        t = time.perf_counter()
+        cues.sfx_cue(text)
+        assert time.perf_counter() - t < 1.0
+    assert cues.sfx_cue("문이 아주 쾅쾅쾅 닫힌다.")["phrase"] == "[쾅쾅쾅 - 문]"
+
+
 @pytest.mark.parametrize("text", [
     "책상을 툭 친다.",                    # a manner word, not written as a sound
     "텅 빈 거리.",

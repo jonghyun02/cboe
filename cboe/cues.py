@@ -105,7 +105,10 @@ OFFSCREEN = re.compile(r"멀리서|먼\s*곳에서|밖에서|바깥에서|어디
 NOT_DOORS = ("주문", "질문", "논문", "신문", "의문", "명문", "공문", "본문", "영문", "한문", "작문", "예문", "부문", "자문")
 _DOOR = rf"(?<![{''.join(w[0] for w in NOT_DOORS)}])문"
 _DOOR_VERB = r"(?:닫|열|여닫|연다|연(?![가-힣]))"
-_ONO_WORD = rf"(?:{_ALT(ONO_STRONG + ONO_WEAK)})+"            # a word of the table's onomatopoeia ('쾅쾅')
+# a word of the table's onomatopoeia ('쾅쾅'), taken whole: possessive, so a long '탕탕탕…' is not
+# split again in every way when the words after it do not follow (exponential); a word read
+# otherwise only by splitting it so is lost ('삐삐익' = '삐' + '삐익', not '삐삐' + '익')
+_ONO_WORD = rf"(?:{_ALT(ONO_STRONG + ONO_WEAK)})++"
 # what may follow the door's own sound before '소리' or the verb: '끼익거리며', '끼익대는', '끼익하는'
 _ONO_TAIL = r"(?:(?:거리|대)(?:며|고|는)|하는|이는)?"
 
@@ -210,7 +213,7 @@ def _inside_families(fam, word: str) -> tuple:
     return tuple(f for f in fam if f in MANNER_FAMILIES)
 
 
-_ONO_RUN = re.compile(_ONO_WORD)
+_ONO_RUN = re.compile(rf"(?:{_ALT(ONO_STRONG + ONO_WEAK)})+")
 
 
 def _door_sound(word: str) -> bool:
