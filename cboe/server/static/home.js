@@ -95,7 +95,7 @@
   };
   // deck 5.1 전체 처리 흐름
   const GROUPS = [
-    { title: '① 후보 검출 · 근거 수집', stages: ['ingest', 'script', 'separate', 'cuts', 'sed', 'asr', 'align', 'sfx', 'music', 'speaker', 'screen', 'dialog_ev'] },
+    { title: '① 후보 검출 · 근거 수집', stages: ['ingest', 'script', 'separate', 'cuts', 'sed', 'asr', 'align', 'cues', 'sfx', 'music', 'speaker', 'screen', 'dialog_ev'] },
     { title: '② 추천 · 에이전트 재확인', stages: ['recommend', 'agent'] },
     { title: '③ 초안 배치', stages: ['placement'] },
   ];
