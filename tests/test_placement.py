@@ -557,6 +557,9 @@ ROW = "내가 어제 도서관에 갔는데 그런 상황은 아니었어"
 
 
 def test_position_4_split_in_the_middle():
+    # the piece before the sound is spoken 2.3 s, more than INTERRUPT_LEAD: the sound would show that
+    # long before it is heard in its cell (II.9's order, test_a_sound_that_interrupts_…), so it goes with
+    # the later piece, which starts at the sound, as before the 6th round
     d = run([L("L1", ROW, 70.0, 74.0)], [S("S1", 72.3, "[첨벙]")])
     a, b = cells_of(d, "L1")
     assert a["refs"] == ["L1"] and b["refs"] == ["S1", "L1"]
@@ -568,10 +571,23 @@ def test_position_4_split_in_the_middle():
 
 
 def test_position_4_not_when_a_part_would_be_too_short():
-    d = run([L("L1", ROW, 70.0, 74.0)], [S("S1", 70.6, "[첨벙]")])
+    # the only word boundary near the sound is 0.3 s into the line: the piece before it gets no 5/6 s
+    # in either order (with the sound from the in-time, or alone up to the sound), so no_room
+    text = "응 그러니까 내일 다시 오면 돼"                              # made up
+    times = [(70.0, 70.3), (70.3, 71.2), (71.2, 71.6), (71.6, 72.0), (72.0, 72.4), (72.4, 72.8)]
+    d = run([L("L1", text, 70.0, 72.8, words=W(text, times), timing="asr")], [S("S1", 70.6, "[첨벙]")])
     assert len(cells_of(d, "L1")) == 1 and not cells_of(d, "S1")
     (r,) = d["no_room"]
-    assert r["reason"].startswith("나누면 앞 칸 5/6초 미만")
+    assert r["reason"] == f"나누면 앞 칸 5/6초 미만 · 빈틈이 소리 {(F(72.8) + 2 - F(70.6)) / FPS:.2f}초 뒤"
+    assert "hint" not in r          # ending the line at the sound would leave it under 5/6 s (a must)
+    # 6th round: a piece 0.6 s long before the sound gets its 5/6 s in the guide's order, the later
+    # piece waiting for it at most half a second after its first word (before: no_room)
+    d = run([L("L1", ROW, 70.0, 74.0)], [S("S1", 70.6, "[첨벙]")])
+    a, b = cells_of(d, "L1")
+    assert a["lines"] == ["- 내가", "- [첨벙]"] and a["refs"] == ["L1", "S1"] and b["refs"] == ["L1"]
+    first_word = F(70.0 + 4.0 / 7)                                     # '어제', even word times
+    assert 0 < F(b["start"]) - first_word <= 12 and nframes(a["start"], a["end"]) >= MIN_F
+    assert a["check"]["violations"] == [] and b["check"]["violations"] == [] and d["no_room"] == []
 
 
 def test_dialogue_words_are_never_changed_by_sounds():
@@ -628,7 +644,11 @@ def test_no_room_reports_the_gap_after_the_sound():
     assert not cells_of(d, "S1")
     (r,) = d["no_room"]
     assert r["item"] == "S1" and r["t"] == 101.3 and r["text"] == "[쿵]"
-    assert r["reason"] == f"소리 뒤 빈틈 {13 / FPS:.2f}초" == "소리 뒤 빈틈 0.54초"
+    # 6th round: and what one change of one cell makes room (audit 7-07): the 5/6 s of the sound want
+    # 20 frames where there are 13, so the line after it 7 frames later
+    assert r["reason"] == f"소리 뒤 빈틈 {13 / FPS:.2f}초 · 뒤 대사 칸을 {7 / FPS:.2f}초 늦추면 들어감"
+    assert r["reason"] == "소리 뒤 빈틈 0.54초 · 뒤 대사 칸을 0.29초 늦추면 들어감"
+    assert r["hint"] == {"cell": one(d, "L2")["id"], "line": "L2", "by": round(7 / FPS, 3), "how": "move_later"}
     assert d["summary"]["no_room"] == 1
 
 
@@ -642,8 +662,11 @@ def test_never_into_a_cell_that_already_has_two_lines():
     d = run([L("L2", "가나다라마 바사아자차 카타파하가 나다", b0, b0 + 1.5)], [S("S1", 110.0, "[쿵]")])
     assert one(d, "L2")["refs"] == ["L2"] and len(one(d, "L2")["lines"]) == 2
     (r,) = d["no_room"]
-    assert r["reason"] == f"대사 칸이 이미 두 줄 · 소리 뒤 빈틈 {10 / FPS:.2f}초"
-    assert r["reason"] == "대사 칸이 이미 두 줄 · 소리 뒤 빈틈 0.42초"
+    # no cut of the two lines leaves a first cell of 5/6 s (9 and 18 frames before the next word), so
+    # the cell is not cut again (test_a_sound_at_a_cell_of_two_lines_…); the line could start 10 frames later
+    assert r["reason"] == f"대사 칸이 이미 두 줄 · 소리 뒤 빈틈 {10 / FPS:.2f}초 · 뒤 대사 칸을 {10 / FPS:.2f}초 늦추면 들어감"
+    assert r["reason"] == "대사 칸이 이미 두 줄 · 소리 뒤 빈틈 0.42초 · 뒤 대사 칸을 0.42초 늦추면 들어감"
+    assert r["hint"] == {"cell": "C0001", "line": "L2", "by": round(10 / FPS, 3), "how": "move_later"}
 
 
 def test_one_sound_per_dialogue_cell():
@@ -930,7 +953,8 @@ def test_a_top_position_goes_with_the_cell_whatever_shares_it():
     assert c["lines"] == ["[한숨] 나도 갈래"] and c["pos"] == "top"
     assert one(run([line], [S("S1", 10.0, "[쿵]")]), "L1")["pos"] == "bottom"
     cs = cells_of(run([L("L1", TEXT7, 10.0, 13.0, timing="asr")], [top(S("S1", 11.6, "[쾅]"))]), "L1")
-    assert [(c["pos"], "S1" in c["refs"]) for c in cs] == [("bottom", False), ("top", True)]     # ④ the part with it
+    # ④ the part with it: the part before the sound (II.9's order, 6th round; before, the part after it)
+    assert [(c["pos"], "S1" in c["refs"]) for c in cs] == [("top", True), ("bottom", False)]
     pair = [L("L1", "뭐?", 10.0, 10.2, speaker="빌"), L("L2", "응", 10.45, 10.6, speaker="세바스찬", pos="top")]
     c = one(run(pair), "L1")
     assert c["refs"] == ["L1", "L2"] and c["lines"] == ["- 뭐?", "- 응"] and c["pos"] == "top"
@@ -1226,7 +1250,10 @@ def test_a_speaker_label_is_not_left_alone_on_the_first_line():
     assert c["lines"] == ["[가나다라마바] 오늘은", "정말 고마웠어"]
     noted = L("L1", "오늘은 정말 고마웠어", 10.0, 12.0, name="가나다라마바", show=True)
     d = run([noted], [S("S1", 10.0, "[한숨]", src="L1")])                 # ③ the speaker's own sound in front
-    assert not re.fullmatch(r"(\[[^\]]*\]\s?)+", one(d, "L1")["lines"][0])
+    # 6th round: the cell of two lines is cut in two for the sound (before: the sound had no room)
+    first = cells_of(d, "L1")[0]
+    assert first["refs"] == ["L1", "S1"] and not re.fullmatch(r"(\[[^\]]*\]\s?)+", first["lines"][0])
+    assert " ".join(first["lines"]).startswith("[가나다라마바] [한숨] 오늘은")
     # only when the 16 units leave no other way: a label of 11 units and a first word of 5
     longer = L("L1", "고마웠어요 정말로", 10.0, 12.0, name="가나다라마바사아자차", show=True)
     assert one(run([longer]), "L1")["lines"] == ["[가나다라마바사아자차]", "고마웠어요 정말로"]
@@ -1578,3 +1605,136 @@ def test_a_dialogue_character_like_the_old_marker_does_not_change_the_line_break
         a, b = P.wrap(text.format("‧")), P.wrap(text.format("·"))
         assert [x.replace("‧", "·") for x in a] == b
         assert not re.fullmatch(r"\[[^\]]*\]", a[0])                     # the label is not alone either way
+
+
+# --------------------------------------------------------------------------- 6th round: sounds (made-up text)
+
+TWO = "어제 우리 동네 빵집에서 새로 나온 케이크를 샀어"          # 27 units: one cell of two lines
+
+
+def test_a_sound_at_a_cell_of_two_lines_cuts_it_into_two_cells_of_one_line():
+    # audit 2-05, 4-m2: '대사 칸이 이미 두 줄' was the end of it, with three seconds free after the line;
+    # now the cell is cut at a word boundary into two cells of one line, the sound shares the first
+    line = L("L1", TWO, 20.0, 23.0, timing="asr")              # even word times: '새로' at 21.5
+    d = run([line, L("L2", "맛있겠다", 30.0, 30.8)], [S("S1", 20.1, "[쿵]")])
+    a, b = cells_of(d, "L1")
+    assert a["lines"] == ["- 어제 우리 동네 빵집에서", "- [쿵]"] and a["refs"] == ["L1", "S1"]   # heard order
+    assert b["lines"] == ["새로 나온 케이크를 샀어"] and b["refs"] == ["L1"]
+    assert a["start"] == sec(F(20.0)) and b["start"] == sec(F(21.5)) and nframes(a["end"], b["start"]) == 2
+    assert d["no_room"] == [] and a["check"]["violations"] == [] and b["check"]["violations"] == []
+    assert all(nframes(c["start"], c["end"]) >= MIN_F and c["check"]["cps"] <= 14 for c in (a, b))
+    assert bare(" ".join(a["lines"][:1] + b["lines"]).replace("- ", "")) == bare(TWO)   # the words as they were
+    # a sound just before it: the sound first, the name stays on the first piece
+    d = run([dict(line, name="하늘", show_name=True)], [S("S1", 19.8, "[쿵]")])
+    a, b = cells_of(d, "L1")
+    assert a["lines"] == ["- [쿵]", "- [하늘] 어제 우리 동네 빵집에서"] and a["start"] == sec(F(19.8))
+    assert b["lines"] == ["새로 나온 케이크를 샀어"]
+    # the writer's "one cell" (keep) is never cut: no room, as before
+    d = run([dict(line, keep=True), L("L2", "맛있겠다", 30.0, 30.8)], [S("S1", 20.1, "[쿵]")])
+    assert one(d, "L1")["lines"] == ["어제 우리 동네 빵집에서", "새로 나온 케이크를 샀어"] and not cells_of(d, "S1")
+    (r,) = d["no_room"]
+    assert r["reason"].split(" · ")[0] == "대사 칸이 이미 두 줄"
+
+
+DENSE = [L("L1", "그래서 어떻게 됐는데 정말로", 40.0, 43.0, timing="asr", keep=True),
+         L("L2", "진짜야", 43.2, 44.0, timing="asr")]
+
+
+def test_a_long_sound_without_room_at_its_onset_takes_the_next_gap_while_it_is_heard():
+    # audit 2-05: music that goes on finds no cell at its onset (in a line the writer keeps in one
+    # cell, 0.2 s before the next line); the first gap that opens after it while it is still heard
+    t2 = max(F(44.0), F(43.2) + MIN_F) + 2                     # 2 frames after the floor of L2 (5/6 s)
+    d = run(DENSE, [S("M1", 42.0, "[잔잔한 음악]", kind="music", t1=60.0)])
+    m = one(d, "M1")
+    assert m["refs"] == ["M1"] and m["start"] == sec(t2) and nframes(m["start"], m["end"]) == round(3 * FPS)
+    assert m["check"]["notes"] == [f"음악 시작 {(t2 - F(42.0)) / FPS:.2f}초 뒤"] == ["음악 시작 2.13초 뒤"]
+    assert m["check"]["violations"] == [] and nframes(one(d, "L2")["end"], m["start"]) == 2 and d["no_room"] == []
+    s = one(run(DENSE, [S("S1", 42.0, "[빗소리]", t1=50.0)]), "S1")             # any sound heard that long
+    assert s["start"] == sec(t2) and s["check"]["notes"] == [f"소리 시작 {(t2 - F(42.0)) / FPS:.2f}초 뒤"]
+    # a short sound keeps the half second of ⑤; no later than 3 s after the onset; the sound still heard
+    # for 5/6 s in the cell; not a sound whose onset is a guess, nor one the writer moved
+    for snd in (S("S1", 42.0, "[쿵]", t1=42.5), S("S2", 42.0, "[쿵]", t1=43.9),
+                S("M1", (t2 - round(3 * FPS) - 1) / FPS, "[잔잔한 음악]", kind="music", t1=60.0),
+                S("M1", 42.0, "[잔잔한 음악]", kind="music", t1=(t2 + MIN_F - 1) / FPS),
+                dict(S("M1", 42.0, "[잔잔한 음악]", kind="music", t1=60.0), estimated=True),
+                S("M1", 41.0, "[잔잔한 음악]", kind="music", t1=59.0, move=42.0)):
+        d = run(DENSE, [snd])
+        assert not cells_of(d, snd["id"]) and [r["item"] for r in d["no_room"]] == [snd["id"]], snd
+    m = one(run(DENSE, [S("M1", 42.0, "[잔잔한 음악]", kind="music", t1=(t2 + MIN_F) / FPS)]), "M1")
+    assert m["start"] == sec(t2)                                        # just 5/6 s of it left: still
+
+
+def test_a_sound_without_room_says_what_change_of_one_cell_makes_room():
+    # audit 7-07: "이 칸을 이만큼 줄이면 들어감". The cell before ends earlier (keeping its 5/6 s and
+    # reading speed, not its speech) ...
+    lines = [L("L1", "그건 정말 아니라고 생각해", 100.0, 102.0, keep=True, timing="asr"),
+             L("L2", "알았어", 106.0, 106.6)]
+    d = run(lines, [S("S1", 101.4, "[쿵]")])
+    (r,) = d["no_room"]
+    by = F(102.0) + 12 - (F(101.4) - 2)                         # its end (speech + 0.5 s) to 2 frames before the sound
+    assert r["hint"] == {"cell": "C0001", "line": "L1", "by": round(by / FPS, 3), "how": "end_earlier"}
+    assert r["reason"] == ("작가가 한 칸에 두기로 정한 대사 · 빈틈이 소리 "
+                           f"{(F(102.0) + 2 - F(101.4)) / FPS:.2f}초 뒤 · 앞 대사 칸을 {by / FPS:.2f}초 줄이면 들어감")
+    assert F(101.4) - 2 - F(100.0) >= MIN_F                            # what is left of it is still a cell
+    # ... or the cell after starts later (at most half a second): and then the sound has its cell
+    d = _crowded(101.3, S("S1", 101.3, "[쿵]"))
+    h = d["no_room"][0]["hint"]
+    assert (h["cell"], h["line"], h["how"]) == ("C0002", "L2", "move_later")
+    nxt = (F(101.3) + 15 + round(h["by"] * FPS)) / FPS
+    d = run([L("L1", "안녕하세요", 100.0, 101.0), L("L2", "네", nxt, nxt + 0.5)], [S("S1", 101.3, "[쿵]")])
+    assert one(d, "S1")["start"] == sec(F(101.3)) and d["no_room"] == []
+    # none when one change is not enough: both sides in the way, or a cell left under 5/6 s
+    d = run([lines[0], L("L2", "알았어", 102.2, 102.8)], [S("S1", 101.4, "[쿵]")])
+    (r,) = d["no_room"]
+    assert "hint" not in r and not r["reason"].endswith("들어감")
+    d = run(lines, [S("S1", 100.6, "[쿵]")])
+    (r,) = d["no_room"]
+    assert "hint" not in r and not r["reason"].endswith("들어감")
+    # a guessed line without room: the gap between the cells around it made long enough for 5/6 s
+    a = L("L1", "그래서 내가 말했잖아", 10.0, 11.6, speaker="A", timing="asr")
+    g = L("L2", "그래 알았어", 11.75, 11.9, speaker="B", timing="voice", status="unheard")
+    b = L("L3", "됐어 그만해", 12.2, 13.2, speaker="A", timing="asr")
+    d = place([a, g, b], [], [], FPS)
+    (r,) = d["no_room"]
+    end = F(one(d, "L3")["start"]) - 2 - MIN_F - 2              # L1 ends here: 5/6 s and 2 frames each side
+    by = F(one(d, "L1")["end"]) - end
+    assert r["hint"] == {"cell": one(d, "L1")["id"], "line": "L1", "by": round(by / FPS, 3), "how": "end_earlier"}
+    assert r["reason"].startswith("시각 추정 대사 · 앞뒤 칸 사이 빈틈 0.46초 (5/6초 미만) · 앞 대사 칸을 ")
+    assert end - F(one(d, "L1")["start"]) >= MIN_F
+
+
+GUIDE = "내가 어제 봤는데 그런 상황은 아니었어"                      # II.9's example, made into one line
+GUIDE_T = [(10.0, 10.3), (10.3, 10.6), (10.6, 11.1), (11.8, 12.1), (12.1, 12.5), (12.5, 13.0)]   # stops 0.7 s
+
+
+def test_a_sound_that_interrupts_the_dialogue_goes_with_the_piece_before_it():
+    # II.9 "Sound effects which interrupt dialogue should be treated as follows, ideally following the
+    # order of the original audio": "- 내가 어제 봤는데…" / "- [첨벙!]", then "그런 상황은 아니었어"
+    line = L("L1", GUIDE, 10.0, 13.0, words=W(GUIDE, GUIDE_T), timing="asr")
+    d = run([line], [S("S1", 11.3, "[첨벙!]")])
+    a, b = cells_of(d, "L1")
+    assert a["lines"] == ["- 내가 어제 봤는데…", "- [첨벙!]"] and a["refs"] == ["L1", "S1"] and a["kind"] == "mixed"
+    assert b["lines"] == ["그런 상황은 아니었어"] and b["refs"] == ["L1"]
+    assert a["start"] == sec(F(10.0)) and b["start"] == sec(F(11.8)) and nframes(a["end"], b["start"]) == 2
+    assert a["check"]["violations"] == [] and b["check"]["violations"] == [] and d["no_room"] == []
+    # "…" only where the speech stops for the sound (0.7 s here): not when the words run on, nor after
+    # punctuation of its own (the words are never changed)
+    on = [(10.0, 10.3), (10.3, 10.6), (10.6, 11.25), (11.3, 12.1), (12.1, 12.5), (12.5, 13.0)]
+    a = cells_of(run([L("L1", GUIDE, 10.0, 13.0, words=W(GUIDE, on), timing="asr")], [S("S1", 11.27, "[첨벙!]")]), "L1")[0]
+    assert a["lines"] == ["- 내가 어제 봤는데", "- [첨벙!]"]
+    asked = "내가 정말 봤어? 그런 상황은 아니었어"
+    a = cells_of(run([L("L1", asked, 10.0, 13.0, words=W(asked, GUIDE_T), timing="asr")], [S("S1", 11.3, "[첨벙!]")]), "L1")[0]
+    assert a["lines"] == ["- 내가 정말 봤어?", "- [첨벙!]"]
+    # the speaker's own sound: no hyphen, in front of the words it comes before (II.5), as before
+    d = run([line], [S("S1", 11.3, "[재채기]", src="L1")])
+    a, b = cells_of(d, "L1")
+    assert a["lines"] == ["내가 어제 봤는데"] and b["lines"] == ["[재채기] 그런 상황은 아니었어"]
+    assert b["refs"] == ["L1", "S1"] and b["start"] == sec(F(11.3))
+    # a piece before the sound too long for one hyphen line: the order before the 6th round
+    long_ = "그러니까 내가 어제 분명히 봤는데 그런 상황은 아니었어"
+    lt = [(9.5, 9.9), (9.9, 10.2), (10.2, 10.5), (10.5, 10.8), (10.8, 11.1), (11.8, 12.1), (12.1, 12.5), (12.5, 13.0)]
+    d = run([L("L1", long_, 9.5, 13.0, words=W(long_, lt), timing="asr")], [S("S1", 11.3, "[첨벙!]")])
+    a, b = cells_of(d, "L1")
+    assert a["refs"] == ["L1"] and " ".join(a["lines"]) == "그러니까 내가 어제 분명히 봤는데"
+    assert b["lines"] == ["- [첨벙!]", "- 그런 상황은 아니었어"] and b["start"] == sec(F(11.3))
+    assert a["check"]["violations"] == [] and b["check"]["violations"] == []

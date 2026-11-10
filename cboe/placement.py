@@ -29,7 +29,8 @@ cuts   : shot-change times (s).
 returns: {"cells": [{"id", "start", "end", "lines": [str], "refs": [ids], "kind",
                      "pos": "bottom" | "top", "flags": ["timing_estimated", "overlap", "flash"],
                      "check": {"chars": [..], "n_lines", "cps", "dur", "gap_next", "violations": [..]}}],
-          "no_room": [{"item", "t", "text", "reason"}]  (a dialogue line: also "line" and kind "dialogue"),
+          "no_room": [{"item", "t", "text", "reason"}]  (a dialogue line: also "line" and kind "dialogue";
+                     "hint" {"cell", "line", "by", "how"} where one change of one cell makes room, ⑤),
           "summary": {"cells", "violations", "no_room", "timing_estimated", "overlap", "flash", ...},
           "fps": fps, "profile": "adult" | "children", "notation": style.NOTATION}
 
@@ -152,15 +153,44 @@ Positions (memo 5.3), sounds in time order:
    order (two sounds of a sound-only cell too, II.5);
  ③ the same, sound made by the speaker (source_line is that line): no hyphen,
    "[지수] [재채기] 나도야!" on one line, or on two when it does not fit one (II.5);
- ④ more than 0.5 s after the start of a dialogue cell while its speech goes on: the cell is split at
-   the word boundary nearest the sound (at most 0.5 s from it) and the sound joins the later part,
-   which starts at the sound (BBC 5.5, II.9); both parts at least 5/6 s;
+ ④ more than 0.5 s after the start of a dialogue cell while its speech goes on (a sound that
+   interrupts the dialogue): the cell is split at the word boundary nearest the sound (at most 0.5 s
+   from it; a sound in the pause between two words is at that boundary). The sound joins the part
+   before it, in the order of the audio (II.9 "Sound effects which interrupt dialogue should be
+   treated as follows, ideally following the order of the original audio" = 대사를 끊는 효과음은 될
+   수 있으면 원래 소리의 순서대로: "- 내가 어제 봤는데…" / "- [첨벙!]", then "그런 상황은 아니었어"):
+   that cell from the in-time of the dialogue cell, the later part from its first word (2 frames
+   after the sound when the sound comes later; at ⑤-2 up to half a second later, for the 5/6 s of
+   the cell before). Only when the words of the sound show at most ``INTERRUPT_LEAD`` (2 s) before
+   it is heard, the part before fits one hyphen line and both cells get 5/6 s and their reading time;
+   "…" ends the part before only where the speech stops for the sound (``INTERRUPT_PAUSE``, 0.5 s
+   between the two words; I.4 "an abrupt interruption") and it has no punctuation of its own, never
+   on every cut piece (audit 1-11). Otherwise, and always for a sound the speaker made (③'s form,
+   no hyphen: "[재채기] 그런 상황은 아니었어"), the sound joins the later part, which starts at the
+   sound (BBC 5.5), both parts at least 5/6 s: the order before the 6th round;
  ⑤ over a limit, in order: short phrase -> longer cell end into the gap after it -> an own cell in a
-   gap that starts at most 0.5 s after the sound -> ``no_room`` with the reason ("소리 뒤 빈틈 0.42초").
-One sound per dialogue cell, never into a cell that already has two lines, the words of the
-dialogue are never changed (only line breaks and the display punctuation), and every sound ends up
-in a cell or in ``no_room``. A sound phrase of an older work folder ('♬ 무서운 음악') is written in
-today's notation ('[무서운 음악]').
+   gap that starts at most 0.5 s after the sound -> a dialogue cell of two lines on screen at the
+   sound (or starting within 0.5 s after it; one line of the script, not kept in one cell by the
+   writer) cut at a word boundary into two cells of one line each, each with 5/6 s and its reading
+   time, the sound then sharing one of them (②, ③) or getting its own cell (①, ⑤-3), never a third
+   cut (TG 6 "You may need to re-segment and re-time subtitles and their neighbouring subtitles";
+   audit 2-05, 4-m2; ``_resplit``) -> a sound heard ``LONG_SOUND`` (2 s) or longer, music most of
+   all: an own cell in the first gap that opens while it is still heard for 5/6 s, at most
+   ``LONG_LATE`` (3 s) after the onset, which its ``check.notes`` say ("음악 시작 1.29초 뒤"; not a
+   sound whose onset is a guess nor one the writer moved; ``_late``) -> ``no_room`` with the reason
+   ("소리 뒤 빈틈 0.42초"), and the one change of one cell that would make room where one change is
+   enough: ``hint`` {"cell", "line", "by" (s), "how": "end_earlier" | "move_later"} and the reason
+   ending in it (" · 앞 대사 칸을 0.42초 줄이면 들어감", audit 7-07; also for a guessed line without
+   room): worked out on the cells as written, a change that keeps that cell's 5/6 s and reading
+   time and moves an in-time by at most half a second (``_sound_hint``, ``_line_hint``).
+One sound per dialogue cell, never into a cell that already has two lines (⑤ cuts it first), the
+words of the dialogue are never changed (only line breaks and the display punctuation), and every
+sound ends up in a cell or in ``no_room``. A sound phrase of an older work folder ('♬ 무서운 음악')
+is written in today's notation ('[무서운 음악]').
+Measured in the 6th round (1000 made-up scenes, REAL=1 REALDUR=1): sounds placed 975 -> 1378 of
+3049, sounds in no_room 2074 -> 1671 (120 with a hint), cells with a violation and the checker's musts
+the same (1579, 2038); the copy of the first 30 minutes of a film: sound effects without room 17 -> 6,
+musts 12 -> 12.
 
 End adjustment (memo 5.2 끝 조정, TG1, 2, 4, 5), every cell in time order: ① a gap under half a
 second to the next cell is closed to 2 frames, except after a cell with dialogue that already stays
@@ -186,6 +216,7 @@ from __future__ import annotations
 import itertools
 import math
 import re
+import unicodedata
 
 from . import style
 from .textutil import EPS, end_bonus, fits, keep_costs, note_left_alone, units, wrap
@@ -230,6 +261,11 @@ class _P:
         self.music_f = int(round(float(s["music_dur"]) * f))
         self.flash_f = int(math.ceil(float(s["flash_dur"]) * f - 1e-6))   # 6 frames at 23.976 fps
         self.kiwi = bool(s["kiwi"])
+        # the sound rules of this module (``INTERRUPT_LEAD`` …), in frames as the limits above
+        self.lead = int(math.floor(INTERRUPT_LEAD * f + 0.5))
+        self.pause_f = int(math.floor(INTERRUPT_PAUSE * f + 0.5))
+        self.long_f = int(math.floor(LONG_SOUND * f + 0.5))
+        self.late_f = int(math.floor(LONG_LATE * f + 0.5))
 
     def fr(self, t: float) -> int:
         return int(round(float(t) * self.fps))
@@ -1129,7 +1165,11 @@ def _make_room(cells: list[_Cell], P: _P, w0: int, w1) -> tuple[list[dict], bool
                             "text": " ".join(x.parts[0]["text"] for x in sorted(mine, key=lambda x: x.start)),
                             "reason": (f"시각 추정 대사 · 앞뒤 칸 사이 빈틈 {gap:.2f}초 ({P.min_text}초 미만)" if k == 1 else
                                        f"시각 추정 대사 · 칸 {k}개 · 앞뒤 칸 사이 빈틈 {gap:.2f}초 "
-                                       f"(칸마다 {P.min_text}초면 {want:.2f}초 필요)")})
+                                       f"(칸마다 {P.min_text}초면 {want:.2f}초 필요)"),
+                            # for the hint of place (``_line_hint``): the cells around and the frames its
+                            # pieces want with their reading time (II.3: a hint that makes room makes it
+                            # for a cell within the limits)
+                            "_around": (prev, nxt, sum(_need(x, P) for x in run) + (k - 1) * P.gap)})
         for x in mine:
             cells.remove(x)
         i = max(0, a - 1)
@@ -1196,6 +1236,31 @@ def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> tuple[li
 
 # --------------------------------------------------------------------------- sounds
 
+# ④ a sound that comes while a line is spoken (II.9 "Sound effects which interrupt dialogue should be
+# treated as follows, ideally following the order of the original audio" = 대사를 끊는 효과음은 될 수
+# 있으면 원래 소리의 순서대로: "- 내가 어제 봤는데…" / "- [첨벙!]", then "그런 상황은 아니었어") shares the
+# cell of the piece before it (``_interrupt``). That cell shows from the first word of the piece, so the
+# words of the sound are on screen before it is heard, by as long as the piece is spoken: at most this
+# many seconds, else the sound goes with the piece after it, which starts at the sound, as before the 6th
+# round. Not measured (the guide's example piece has 8 syllables, about 1.5 s of speech)
+INTERRUPT_LEAD = 2.0
+# "…" ends that piece (I.4 "Use ellipses to indicate a pause (2 seconds or more), hesitation or an abrupt
+# interruption" = 갑작스러운 끊김에는 말줄임표) only when the words on both sides of the sound are this many
+# seconds apart (the speech stops for the sound) and the piece does not end in punctuation already; never
+# on every cut piece (audit note §8 "끊긴 조각에 항상 '…'를 붙이지 않는다. 말이 실제로 끊겼을 때만").
+# Not measured
+INTERRUPT_PAUSE = 0.5
+# a sound heard this many seconds or longer (music, rain, an engine) that finds no cell at its onset gets
+# one in the next gap that opens while it is still heard (``_late``, audit 2-05 "음악처럼 길게 이어지는 소리는
+# 소리가 끝나기 전의 다음 빈틈까지"): its first 5/6 s inside the sound, at most ``LONG_LATE`` after the onset,
+# and its ``check.notes`` say how late ("음악 시작 1.29초 뒤"). A shorter sound keeps the half second of ⑤.
+# Not measured
+LONG_SOUND = 2.0
+# the length a music cell is shown (memo 5.2: 3 s): a late cell starts within the time a cell at the
+# onset would have stood. Not measured
+LONG_LATE = 3.0
+
+
 def _sound_part(s: dict, P: _P):
     """A sound item as a cell part; None when it has no time."""
     kind = s.get("kind") if s.get("kind") in ("sfx", "music") else "sfx"
@@ -1233,6 +1298,12 @@ def _limit_after(x, start: int, cells: list[_Cell], P: _P, w1) -> int:
     nxt = [c.start for c in cells if c is not x and c.start >= start and (x is None or c.start > x.start)]
     lim = min(nxt) - P.gap if nxt else INF
     return min(lim, w1) if w1 is not None else lim
+
+
+def _inside(x: _Cell, cells: list[_Cell], P: _P, w1) -> int:
+    """The latest out-time of a cell cut from ``x``: 2 frames before the cell after ``x`` (the words
+    of ``x`` may go on under that cell, overlapping speech), the window end."""
+    return _limit_after(x, x.start + 1, cells, P, w1)
 
 
 def _plan_own(_x, t: int, sp: dict, text: str, ext: bool, cells: list[_Cell], P: _P, w1):
@@ -1312,9 +1383,11 @@ def _plan_merge(x: _Cell, t: int, sp: dict, text: str, ext: bool, cells: list[_C
     return apply, None
 
 
-def _plan_split(x: _Cell, t: int, sp: dict, text: str, ext: bool, cells: list[_Cell], P: _P, w1):
-    """④ split the dialogue cell ``x`` at the word boundary nearest the sound; the sound joins the
-    later part, which starts at the sound."""
+def _split_point(x: _Cell, t: int, P: _P):
+    """④ where the dialogue cell ``x`` is cut for the sound at ``t``: the word boundary nearest the
+    sound, at most 0.5 s from it: from the first word after it, or none when the sound comes in the
+    pause between the two words (a sound that stops the speech, II.9, however long the pause).
+    Returns (k, part before, part after) or (None, reason)."""
     if x.mode != "plain" or x.sounds() or not x.dialogue():
         return None, "대사 칸 중간 (나눌 수 없는 칸)"
     d = x.parts[0]
@@ -1323,13 +1396,38 @@ def _plan_split(x: _Cell, t: int, sp: dict, text: str, ext: bool, cells: list[_C
         return None, "작가가 한 칸에 두기로 정한 대사"
     if len(words) < 2:
         return None, "대사 중간, 나눌 어절 경계 없음"
-    k = min(range(1, len(words)), key=lambda q: (abs(words[q][1] - t), q))
-    if abs(words[k][1] - t) > P.win:
+
+    def far(q):
+        return 0 if words[q - 1][2] <= t <= words[q][1] else abs(words[q][1] - t)
+    k = min(range(1, len(words)), key=lambda q: (far(q), q))
+    if far(k) > P.win:
         return None, "소리 가까이 어절 경계 없음"
     if not all(style.tidy_line(" ".join(w[0] for w in side)) for side in (words[:k], words[k:])):
         return None, "소리 가까이 어절 경계 없음"          # one side would be punctuation only
     a = _piece(d, words[:k], d["prefix"])
     b = dict(_piece(d, words[k:], d["cont"]), e=d["e"])  # the later part: the language label again, no name
+    return k, a, b
+
+
+def _plan_interrupt(x: _Cell, t: int, sp: dict, text: str, ext: bool, cells: list[_Cell], P: _P, w1):
+    """④ the sound joins the part before it, in the order of the audio (II.9, ``_interrupt``); not a
+    sound the speaker made (II.5 "[지수] [재채기] 나도야!", no hyphen: ``_plan_split``). Tried before
+    ``_plan_split`` at every level of ⑤; gives no reason of its own (the reason is that of the old
+    order)."""
+    cut = _split_point(x, t, P)
+    if cut[0] is None or (sp["src"] is not None and sp["src"] in _ids(x.parts[0])):
+        return None, None
+    return _interrupt(x, t, sp, text, ext, cells, P, w1, *cut), None
+
+
+def _plan_split(x: _Cell, t: int, sp: dict, text: str, ext: bool, cells: list[_Cell], P: _P, w1):
+    """④ split the dialogue cell ``x`` at the word boundary nearest the sound (``_split_point``); the
+    sound joins the later part, which starts at the sound: the order before the 6th round, used when
+    the guide's order (``_plan_interrupt``) cannot be read, and for a sound the speaker made."""
+    cut = _split_point(x, t, P)
+    if cut[0] is None:
+        return cut
+    k, a, b = cut
     a_end = t - P.gap
     a_lines = _render([a], "plain", P)
     if not P.lines_ok(a_lines):
@@ -1358,6 +1456,62 @@ def _plan_split(x: _Cell, t: int, sp: dict, text: str, ext: bool, cells: list[_C
         x.set([a], "plain", P)
         cells.append(_Cell(t, end, parts, mode, P, next(seq)))
     return apply, None
+
+
+def _punct_end(word: str) -> bool:
+    """Whether ``word`` ends in punctuation ('봤는데,' '정말?' '그…' '말했잖아)')."""
+    return bool(word) and unicodedata.category(word[-1]).startswith("P")
+
+
+def _interrupt(x: _Cell, t: int, sp: dict, text: str, ext: bool, cells: list[_Cell], P: _P, w1, k: int,
+               a: dict, b: dict):
+    """④ in the guide's order (II.9 "Sound effects which interrupt dialogue … ideally following the
+    order of the original audio"): the piece ``a`` before the sound and the sound in one hyphen cell
+    from the in-time of ``x``, "- 내가 어제 봤는데…" / "- [첨벙!]", and the piece ``b`` after it in
+    the next cell from its first word, or from 2 frames after the sound when the sound comes later
+    (so that the sound is on screen when it is heard). Only when the words of the sound show at most
+    ``INTERRUPT_LEAD`` before it, each hyphen line fits one line (II.5, I.6) and both cells get 5/6 s
+    and their reading time (General Requirements 1, II.3). "…" ends ``a`` only where the speech stops
+    for the sound (``INTERRUPT_PAUSE``) and ``a`` has no punctuation of its own: the words are never
+    changed. Returns apply, or None (the caller tries the order before the 6th round)."""
+    if t - x.start > P.lead:
+        return None
+    words = x.parts[0]["words"]
+    if words[k][1] - words[k - 1][2] >= P.pause_f and not _punct_end(words[k - 1][0]):
+        toks = [w[0] for w in words[:k]]
+        toks[-1] += style.ELLIPSIS                       # the speech stops: an abrupt interruption (I.4)
+        body = _body(toks, a["sung"])
+        a = dict(a, body=body, text=a["prefix"] + body)
+    parts = [a, dict(sp, text=text)]
+    lines = _render(parts, "hyphen", P)
+    if _check_merged(lines, "hyphen", P):
+        return None
+    s2 = max(words[k][1], t + P.gap)
+    u1 = sum(units(y) for y in lines)
+    if ext:
+        # ⑤-2: the later piece waits for the 5/6 s and the reading time of the cell before, at most half
+        # a second after its first word (as the later piece of the old order starts at the sound, at
+        # most half a second away): 5/6 s, a must, before the in-time on its audio (TG 1, a should)
+        s2 = max(s2, min(x.start + max(P.min_f, P.need(u1)) + P.gap, words[k][1] + P.win))
+    end1 = s2 - P.gap
+    if end1 - x.start < P.min_f or P.too_fast(u1, end1 - x.start):
+        return None
+    b_lines = _render([b], "plain", P)
+    if not P.lines_ok(b_lines):
+        return None
+    limit = _inside(x, cells, P, w1)
+    ub = sum(units(y) for y in b_lines)
+    end2 = min(x.end, limit, s2 + P.max_f)
+    if ext:
+        end2 = min(max(end2, s2 + P.need(ub), s2 + P.min_f), limit, s2 + P.max_f)
+    if end2 - s2 < P.min_f or P.too_fast(ub, end2 - s2):
+        return None
+
+    def apply(seq):
+        x.end = end1
+        x.set(parts, "hyphen", P)
+        cells.append(_Cell(s2, end2, [b], "plain", P, next(seq)))
+    return apply
 
 
 def _music_start(t: int, cells: list[_Cell], cuts: list[int], P: _P) -> int:
@@ -1390,17 +1544,9 @@ def _no_room_reason(why, t: int, cells: list[_Cell], P: _P, w1) -> str:
     return " · ".join(x for x in (why, gap_txt) if x) or "자리 없음"
 
 
-def _place_sound(sp: dict, cells: list[_Cell], cuts: list[int], P: _P, w0: int, w1, seq):
-    """Put one sound in a cell (positions ①-⑤). Returns None, or the no_room reason."""
-    t = sp["t"]
-    if t < w0 or (w1 is not None and t >= w1):
-        return "처리 구간 밖"
-    if not sp["long"]:
-        return "문구 없음"
-    _sorted(cells)
-    if sp["kind"] == "music" and not sp["forced"]:
-        t = _music_start(t, cells, cuts, P)
-    texts = [sp["long"]] + ([sp["short"]] if sp["short"] and sp["short"] != sp["long"] else [])
+def _try_at(sp: dict, t: int, texts: list, cells: list[_Cell], P: _P, w1, seq, split: bool = True):
+    """Positions ①-④ and ⑤ for the sound at frame ``t``; ``split`` False: no ④ (a cell just cut in
+    two by ``_resplit`` is not cut again). Returns (placed, the first reason a position gave)."""
     levels = [(x, False) for x in texts] + [(x, True) for x in texts]     # ⑤-1 short, ⑤-2 longer end
     starts = sorted((c for c in cells if abs(c.start - t) <= P.win),
                     key=lambda c: (abs(c.start - t), c.start, c.seq))
@@ -1409,14 +1555,15 @@ def _place_sound(sp: dict, cells: list[_Cell], cuts: list[int], P: _P, w0: int, 
     else:
         mid = [c for c in cells if c.start + P.win < t < c.end + P.gap
                and c.speech_end() is not None and c.speech_end() > t]
-        targets = [(_plan_split, c) for c in mid] if mid else [(_plan_own, None)]
+        targets = ([(fn, c) for c in mid for fn in (_plan_interrupt, _plan_split)] if mid and split
+                   else [(_plan_own, None)])
     why = None
     for fn, x in targets:
         for text, ext in levels:
             apply, reason = fn(x, t, sp, text, ext, cells, P, w1)
             if apply is not None:
                 apply(seq)
-                return None
+                return True, None
             why = why or reason
     near = (_floor(c, P) + P.gap for c in cells if c.start <= t + P.win and c.end + P.gap > t)
     floors = sorted({f for f in near if t < f <= t + P.win})
@@ -1425,8 +1572,208 @@ def _place_sound(sp: dict, cells: list[_Cell], cuts: list[int], P: _P, w0: int, 
             apply, _ = _plan_own(None, t2, sp, text, True, cells, P, w1)
             if apply is not None:
                 apply(seq)
-                return None
+                return True, None
+    return False, why
+
+
+def _two_line_cells(t: int, cells: list[_Cell], P: _P) -> list[_Cell]:
+    """The dialogue cells of two lines that ``_resplit`` may cut for the sound at ``t``: one piece
+    of one line (one line of the script broken over two lines), no sound in it, not kept in one cell
+    by the writer (``keep``, also a writer's join of one speaker), on screen at the sound or starting
+    within half a second after it. Nearest first."""
+    out = [c for c in cells if c.mode == "plain" and len(c.parts) == 1 and c.dialogue() and len(c.lines) == 2
+           and not c.parts[0].get("keep") and c.start - P.win <= t < c.end + P.gap]
+    return sorted(out, key=lambda c: (abs(c.start - t), c.start, c.seq))
+
+
+def _resplit(x: _Cell, sp: dict, t: int, texts: list, cells: list[_Cell], P: _P, w1, seq) -> bool:
+    """⑤ a sound that finds no room at a dialogue cell of two lines (``_two_line_cells``; audit 2-05,
+    4-m2: TG 6 "You may need to re-segment and re-time subtitles and their neighbouring subtitles" =
+    이웃 자막과 함께 다시 나누고 시간을 다시 맞춰야 할 수 있다): ``x`` is cut at a word boundary into two
+    cells of one line each, the first from the in-time of ``x`` to 2 frames before the first word of
+    the second, the second to the out-time of ``x`` (longer when its reading time needs it, where
+    there is room), each with 5/6 s and its reading time (General Requirements 1, II.3); then the
+    sound shares one of the two (②, ③) or gets its own cell (①, ⑤), never a third cut. The ways of
+    cutting are tried cheapest first (as ``_split`` prices them: balanced, after sentence punctuation,
+    not between words that stay together). Returns whether the sound got a cell; else ``x`` is as
+    it was."""
+    d = x.parts[0]
+    words = d["words"]
+    toks = [w[0] for w in words]
+    keep = _cut_costs(toks, P)
+    lim = _inside(x, cells, P, w1)
+    ways = []
+    for k in range(1, len(words)):
+        if not (style.tidy_line(" ".join(toks[:k])) and style.tidy_line(" ".join(toks[k:]))):
+            continue
+        a = _piece(d, words[:k], d["prefix"])
+        b = dict(_piece(d, words[k:], d["cont"]), e=d["e"])
+        la, lb = _render([a], "plain", P), _render([b], "plain", P)
+        if len(la) != 1 or len(lb) != 1 or not (P.lines_ok(la) and P.lines_ok(lb)):
+            continue
+        ua, ub = units(la[0]), units(lb[0])
+        s_b = words[k][1]
+        need_a, need_b = max(P.min_f, P.need(ua)), max(P.min_f, P.need(ub))
+        end_b = min(max(x.end, s_b + need_b), lim, s_b + P.max_f)
+        if s_b - P.gap - x.start < need_a or end_b - s_b < need_b:
+            continue
+        cost = (ua / 4.0) ** 2 + (ub / 4.0) ** 2 - 2.0 * end_bonus(toks[k - 1]) + keep[k]
+        ways.append((cost, k, a, b, s_b, end_b))
+    for _, _, a, b, s_b, end_b in sorted(ways, key=lambda w: (w[0], w[1])):
+        first = _Cell(x.start, s_b - P.gap, [a], "plain", P, x.seq)
+        second = _Cell(s_b, end_b, [b], "plain", P, next(seq))
+        first.marks, second.marks = set(x.marks), set(x.marks)
+        i = cells.index(x)
+        cells[i:i + 1] = [first, second]
+        placed, _ = _try_at(sp, t, texts, cells, P, w1, seq, split=False)
+        if placed:
+            return True
+        cells.remove(first)                          # nothing else was changed: the cell as it was
+        cells.remove(second)
+        cells.insert(i, x)
+    return False
+
+
+def _late(sp: dict, t: int, texts: list, cells: list[_Cell], P: _P, w1, seq) -> bool:
+    """⑤ a long sound (``LONG_SOUND``) with no cell at its onset: an own cell in the first gap that
+    opens after it while the sound is still heard for 5/6 s, at most ``LONG_LATE`` after the onset;
+    its ``check.notes`` say how late ("음악 시작 1.29초 뒤"). Not for a sound whose onset is a guess
+    (when it ends is not known either) nor one the writer moved (the writer chose that time)."""
+    e = sp.get("e")
+    if e is None or sp["forced"] or sp["guess"] or e - sp["t"] < P.long_f:
+        return False
+    last = min(sp["t"] + P.late_f, e - P.min_f)
+    if w1 is not None:
+        last = min(last, w1 - P.min_f)
+    after = max(t, sp["t"])
+    starts = sorted({_floor(c, P) + P.gap for c in cells if c.start < last})     # where a gap can open
+    for t2 in (s for s in starts if after < s <= last):
+        what = "음악" if sp["kind"] == "music" else "소리"
+        late = dict(sp, notes=[f"{what} 시작 {(t2 - sp['t']) / P.fps:.2f}초 뒤"])
+        for text in texts:
+            apply, _ = _plan_own(None, t2, late, text, True, cells, P, w1)
+            if apply is not None:
+                apply(seq)
+                return True
+    return False
+
+
+def _place_sound(sp: dict, cells: list[_Cell], cuts: list[int], P: _P, w0: int, w1, seq):
+    """Put one sound in a cell (positions ①-⑤). Returns None, or the no_room reason. ``sp["tried"]``
+    is the frame it was tried at (music: on the shot change before it, ``_music_start``)."""
+    t = sp["t"]
+    if t < w0 or (w1 is not None and t >= w1):
+        return "처리 구간 밖"
+    if not sp["long"]:
+        return "문구 없음"
+    _sorted(cells)
+    if sp["kind"] == "music" and not sp["forced"]:
+        t = _music_start(t, cells, cuts, P)
+    sp["tried"] = t
+    texts = [sp["long"]] + ([sp["short"]] if sp["short"] and sp["short"] != sp["long"] else [])
+    placed, why = _try_at(sp, t, texts, cells, P, w1, seq)
+    if placed:
+        return None
+    for x in _two_line_cells(t, cells, P):
+        if _resplit(x, sp, t, texts, cells, P, w1, seq):
+            return None
+    if _late(sp, t, texts, cells, P, w1, seq):
+        return None
     return _no_room_reason(why, t, cells, P, w1)
+
+
+# --------------------------------------------------------------------------- what would make room
+
+# A no_room entry carries the one change of one cell that would make room ("hint", audit 7-07 "자리 없음
+# 항목마다 '이 칸을 이만큼 줄이면 들어감' 같은 구체적인 안을 계산해 작가에게 보인다"), worked out on the
+# cells as they are written: end the cell before earlier ("end_earlier") or start the cell after later
+# ("move_later"), and the reason ends in it (" · 앞 대사 칸을 0.42초 줄이면 들어감"). Only a change that
+# keeps that cell's 5/6 s and reading time (General Requirements 1, II.3: musts; a dialogue cell may end
+# before its speech, as cells of overlapping speech do) and moves an in-time by at most half a second
+# (``merge_window``, as ② and ⑤ take a sound: further, the cell is out of sync with its audio, TG 1);
+# none when one change is not enough.
+
+def _end_earlier(c: _Cell, end: int, P: _P):
+    """Frames ``c`` is shortened by to end at ``end``, or None when that breaks 5/6 s or the reading speed."""
+    if end >= c.end or end - c.start < _need(c, P):
+        return None
+    return c.end - end
+
+
+def _move_later(c: _Cell, by: int, cells: list[_Cell], P: _P, w1):
+    """``by`` when the in-time of ``c`` can come that many frames later (at most half a second) with its
+    5/6 s and reading time before the next cell, else None."""
+    if by <= 0 or by > P.win:
+        return None
+    i = cells.index(c)
+    lim = cells[i + 1].start - P.gap if i + 1 < len(cells) else INF
+    if w1 is not None:
+        lim = min(lim, w1)
+    s = c.start + by
+    end = max(c.end, s + _need(c, P))
+    return by if end <= lim and end - s <= P.max_f else None
+
+
+def _sound_hint(sp: dict, cells: list[_Cell], P: _P, w1):
+    """(cell, how, frames) for a sound without room: its own cell at the frame it was tried at, as long
+    as its shortest phrase needs (5/6 s and its reading time), when one cell is in the way."""
+    t = sp["tried"]
+    needs = [max(P.min_f, P.need(sum(units(y) for y in P.wrap(x)))) for x in (sp["short"], sp["long"])
+             if x and P.lines_ok(P.wrap(x))]
+    if not needs or (w1 is not None and t + min(needs) > w1):
+        return None
+    need = min(needs)
+    blocking = [c for c in cells if c.start < t and c.end > t - P.gap and _floor(c, P) > t - P.gap]
+    later = [c for c in cells if c.start >= t]
+    room = later[0].start - P.gap - t if later else INF
+    if w1 is not None:
+        room = min(room, w1 - t)
+    if len(blocking) == 1 and room >= need:
+        by = _end_earlier(blocking[0], t - P.gap, P)
+        return (blocking[0], "end_earlier", by) if by else None
+    if not blocking and room < need and later:
+        by = _move_later(later[0], need - room, cells, P, w1)
+        return (later[0], "move_later", by) if by else None
+    return None
+
+
+def _line_hint(around, cells: list[_Cell], P: _P, w0: int, w1):
+    """(cell, how, frames) for a guessed line without room (``_make_room``): the gap between the cells
+    around it (``around`` = cell before, cell after, frames its pieces want) made that long."""
+    prev, nxt, want = around
+    if not all(c is None or any(c is x for x in cells) for c in (prev, nxt)):
+        return None                                  # a cell around it was cut again (a sound)
+    lo = _floor(prev, P) + P.gap if prev is not None else w0
+    hi = nxt.start - P.gap if nxt is not None else (w1 if w1 is not None else INF)
+    if hi - lo >= want:
+        return None
+    if prev is not None and hi < INF:
+        by = _end_earlier(prev, hi - want - P.gap, P)
+        if by:
+            return prev, "end_earlier", by
+    if nxt is not None:
+        by = _move_later(nxt, lo + want - hi, cells, P, w1)
+        if by:
+            return nxt, "move_later", by
+    return None
+
+
+def _line_ref(c: _Cell, how: str):
+    """The line id of the hint's cell: the line that ends last (end_earlier) or starts first
+    (move_later); None for a cell of sounds only."""
+    d = c.dialogue()
+    if not d:
+        return None
+    if how == "end_earlier":
+        return _ids(max(d, key=lambda p: (p["e"], p["t"])))[-1]
+    return _ids(min(d, key=lambda p: (p["t"], p["e"])))[0]
+
+
+def _hint_text(c: _Cell, how: str, by: int, P: _P) -> str:
+    what = "대사 칸" if c.dialogue() else "소리 칸"
+    if how == "end_earlier":
+        return f"앞 {what}을 {by / P.fps:.2f}초 줄이면 들어감"
+    return f"뒤 {what}을 {by / P.fps:.2f}초 늦추면 들어감"
 
 
 # --------------------------------------------------------------------------- end adjustment
@@ -1625,11 +1972,14 @@ def place(lines, sounds, cuts, fps, window=(0.0, None), settings=None) -> dict:
             continue
         parts.append(sp)
     parts.sort(key=lambda p: (p["t"], str(p["id"])))
+    tried = []                                       # (no_room entry, sound) of a sound tried in the cells
     for sp in parts:
         reason = _place_sound(sp, cells, cut_f, P, w0, w1, seq)
         if reason is not None:
             no_room.append({"item": sp["id"], "t": round(sp["at"], 3), "text": sp["long"], "kind": sp["kind"],
                             "reason": reason})
+            if sp.get("tried") is not None:
+                tried.append((no_room[-1], sp))
     _adjust_ends(cells, cut_f, P, w1)
     for c in list(cells):                            # window start (in-times never go before it)
         if c.start < w0:
@@ -1643,6 +1993,17 @@ def place(lines, sounds, cuts, fps, window=(0.0, None), settings=None) -> dict:
     for a, b in zip(cells, cells[1:]):              # last guard: never overlap the next cell
         if b.start - a.end < P.gap:
             a.end = max(a.start + 1, b.start - P.gap)
+    names = {id(c): f"C{i + 1:04d}" for i, c in enumerate(cells)}       # the ids _out gives
+    sound_of = {id(x): s for x, s in tried}
+    for e in no_room:                                # what one change of one cell would make room (audit 7-07)
+        around = e.pop("_around", None)
+        sp = sound_of.get(id(e))
+        h = (_sound_hint(sp, cells, P, w1) if sp is not None else
+             _line_hint(around, cells, P, w0, w1) if around is not None else None)
+        if h is not None:
+            c, how, by = h
+            e["hint"] = {"cell": names[id(c)], "line": _line_ref(c, how), "by": round(by / P.fps, 3), "how": how}
+            e["reason"] += " · " + _hint_text(c, how, by, P)
     out = _out(cells, cut_f, P, _scene_notes(cells, cut_f, P))
     n_viol = sum(1 for c in out if c["check"]["violations"])
     placed = sum(1 for c in cells for p in c.sounds())
