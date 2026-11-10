@@ -557,6 +557,15 @@ kbd {
 .saved .warns { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; }
 .saved .ac { display: flex; gap: 6px; }
 .xp-note { color: var(--muted); font-size: 12.5px; }
+/* 말이 들리는데 자막 칸이 없는 구간: the list under its row */
+.xp-sub { display: flex; flex-direction: column; gap: 2px; margin: 0 0 8px 44px; padding: 6px 8px; border-radius: 12px; background: #FFF9EC; border: 1px solid #F3DE9F; max-height: 240px; overflow-y: auto; }
+.hnc {
+  display: grid; grid-template-columns: 112px minmax(0, 1fr) auto; gap: 10px; align-items: center; text-align: left;
+  border: 0; background: transparent; padding: 5px 4px; border-radius: 8px; cursor: pointer; font-size: 13px;
+}
+.hnc:hover { background: rgba(255, 255, 255, .7); }
+.hnc .t { color: var(--muted); }
+.hnc .tx { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
 /* 지침 검사 (조항별): 의무 · 권고, 조항 번호, 걸린 칸 */
 .guide { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 12px; background: #FAFBFF; border: 1px solid var(--line); }
 .g-rule { display: grid; grid-template-columns: 40px 46px minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 6px 4px; font-size: 13px; border-top: 1px solid var(--line-2); }
@@ -662,6 +671,11 @@ kbd {
 .tag.t-writer { background: var(--spk-bg); color: var(--spk-fg); }
 .tag.t-minor { background: transparent; color: var(--faint); box-shadow: inset 0 0 0 1px var(--line-strong); }
 .tag.t-suspect { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.tag.t-sung { background: var(--extra-bg); color: var(--extra-fg); }
+.tag.t-top { background: var(--primary-100); color: var(--primary-700); }
+/* 같은 사람일 수 있음 on a person's row */
+.r-same { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 6px; margin-top: 4px; font-size: 12.5px; }
+.r-same .flag { color: var(--chk-fg); font-weight: 650; }
 .row.is-suspect .r-phrase { color: var(--muted); }
 .link { border: 0; background: transparent; padding: 0; color: var(--primary-700); font: inherit; font-weight: 650; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .link.flag { color: var(--nor-fg); }
@@ -690,6 +704,12 @@ mark.d-spell { background: transparent; text-decoration: underline wavy #D08A1A;
 .ed-row label.grow .input { flex: 1; min-width: 0; }
 .input-sm { height: 30px; padding: 0 8px; border-radius: 8px; font-size: 13.5px; width: 128px; }
 select.input-sm { width: auto; max-width: 220px; background: #fff; }
+.ed-k { font-weight: 750; color: var(--muted); font-size: 12.5px; min-width: 34px; }
+.join-row .flag, .manner-now { font-weight: 650; }
+.join-row .flag { color: var(--nor-fg); }
+.join-prev { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 100%; }
+.manner-cue { display: inline-flex; align-items: center; gap: 6px; padding: 0 0 0 8px; border-radius: 8px; background: var(--well); }
+.manner-cue .tx { font-weight: 650; }
 .switch.sm { height: 30px; gap: 7px; font-size: 13px; }
 .switch.sm input { width: 38px; height: 22px; }
 .switch.sm input::after { width: 16px; height: 16px; }

@@ -103,6 +103,7 @@ def _edge() -> str | None:
 
 
 EDGE, NODE = _edge(), shutil.which("node")
+EDGE_EXIT_WAIT = 30          # s to wait for the killed Edge to be seen gone (재지 않은 값; 20 s was too short, see browser)
 HAVE_FFMPEG = bool(shutil.which("ffmpeg"))
 browser_only = pytest.mark.skipif(not (EDGE and NODE and HAVE_FFMPEG),
                                   reason="headless Edge, Node and ffmpeg are needed to drive the page")
@@ -220,7 +221,13 @@ def browser(tmp_path_factory):
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
         else:
             proc.kill()
-        proc.wait(timeout=20)
+        try:
+            proc.wait(timeout=EDGE_EXIT_WAIT)
+        except subprocess.TimeoutExpired:
+            # killed already (taskkill /F said so); on a busy Windows its handle can stay unsignalled
+            # for half a minute and more (2026-11-11: still not signalled 30 s after taskkill, with
+            # other headless Edges running) — nothing is left to end, so the tests' results stand
+            pass
         for _ in range(40):                     # its helper processes let go of the profile a moment later
             shutil.rmtree(prof, ignore_errors=True)
             if not prof.exists():
@@ -1125,3 +1132,432 @@ def test_the_reveal_line_picked_stays_while_an_earlier_write_is_answered(tmp_pat
         }""")["result"]
     assert r["seen"] and set(r["seen"]) == {"L0001+"}, r["seen"]
     assert r["dec"].get("reveal") == "line" and r["dec"].get("reveal_line") == "L0001" and r["end"] == "L0001", r
+
+
+# --------------------------------------- the review layer's new fields (6차 약속 나)
+# The server of this branch neither sends nor takes them yet: run in the page before its own
+# script, every state it is answered gets the fields of window.__over (lines · items · added ·
+# people · extras by id or name; ``decision`` merged, a null takes the field away; cells by a
+# line or item they are made of: pos, check.notes; the export check, its lines, the summary;
+# more aside rows). A POST that window.__answer(url, body) takes (it changes __over as the server
+# would) is answered here with the server's state and __over on it, or — window.__refuse — with
+# that error and __over as it was. Every POST is kept in window.__seen as [url, body].
+NEW_HOOK = r"""(() => {
+  const real = window.fetch.bind(window);
+  window.__over = Object.assign({ lines: {}, items: {}, added: {}, people: {}, extras: {}, cells: {}, check: {}, check_lines: {}, summary: {}, aside: [] }, @OVER@);
+  window.__seen = [];
+  window.__answer = null;
+  window.__refuse = null;
+  window.__dec = (id, fields) => { const o = (window.__over.lines[id] = window.__over.lines[id] || {}); o.decision = { ...(o.decision || {}), ...fields }; };
+  const put = (row, o) => {
+    for (const [k, v] of Object.entries(o)) {
+      if (k !== 'decision') { row[k] = v; continue; }
+      const d = { ...(row.decision || {}) };
+      for (const [a, b] of Object.entries(v)) { if (b === null) delete d[a]; else d[a] = b; }
+      if (Object.keys(d).length) row.decision = d; else delete row.decision;
+    }
+  };
+  const fix = (st) => {
+    const O = window.__over;
+    for (const ln of st.lines || []) if (O.lines[ln.id]) put(ln, O.lines[ln.id]);
+    for (const it of st.items || []) if (O.items[it.id]) put(it, O.items[it.id]);
+    for (const a of st.added || []) if (O.added[a.id]) put(a, O.added[a.id]);
+    for (const q of st.people || []) if (O.people[q.name]) put(q, O.people[q.name]);
+    for (const x of st.extras || []) if (O.extras[x.id]) put(x, O.extras[x.id]);
+    for (const c of (st.draft && st.draft.cells) || []) {
+      for (const [ref, o] of Object.entries(O.cells)) {
+        if (!(c.refs || []).includes(ref)) continue;
+        if ('pos' in o) { if (o.pos) c.pos = o.pos; else delete c.pos; }
+        if (o.notes) c.check = { ...(c.check || {}), notes: o.notes };
+      }
+    }
+    if (st.export_check) { Object.assign(st.export_check, O.check); st.export_check.lines = { ...(st.export_check.lines || {}), ...O.check_lines }; }
+    if (st.summary) Object.assign(st.summary, O.summary);
+    if (O.aside.length) { st.aside = [...(st.aside || []), ...O.aside]; if (st.summary && st.summary.lines) st.summary.lines.aside = st.aside.length; }
+    return st;
+  };
+  const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
+  window.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (init.method === 'POST') {
+      const body = init.body ? JSON.parse(init.body) : null;
+      window.__seen.push([u.replace(/^.*?(api\/)/, '$1'), body]);
+      const was = JSON.stringify(window.__over);
+      if (window.__answer && window.__answer(u, body || {})) {
+        if (window.__refuse) {
+          const e = window.__refuse;
+          window.__refuse = null;
+          window.__over = JSON.parse(was);
+          return json({ detail: e.detail }, e.status);
+        }
+        return json(fix(await (await real('api/state')).json()));
+      }
+    }
+    const r = await real(url, init);
+    if (!r.ok || u.includes('api/media') || u.includes('api/envelope')) return r;
+    const data = await r.clone().json().catch(() => null);
+    if (data && Array.isArray(data.lines)) return json(fix(data));
+    if (data && data.state && Array.isArray(data.state.lines)) { fix(data.state); data.export_check = data.state.export_check; return json(data); }
+    return r;
+  };
+})();"""
+
+
+def new_hook(over=None):
+    return json.dumps(NEW_HOOK.replace("@OVER@", json.dumps(over or {}, ensure_ascii=False)))
+
+
+JOIN_WHY = "앞 줄과 한 칸으로 묶지 못함 · 두 줄이 7초를 넘음"
+ASIDE_NEW = {"key": "fp:line@하늘:지어낸 다른 말이야#0", "speaker": "하늘", "text": "지어낸 다른 말이야", "at": "2026-11-11T09:30:00",
+             "decision": {"join": True, "pos": "top", "manner": "속삭이며"}, "candidates": [], "why": "gone"}
+
+
+@browser_only
+def test_a_line_is_put_in_one_cell_with_the_line_before_or_says_why_not(tmp_path, browser, clips):
+    # 앞 줄과 한 칸으로 (line join): a switch on every line in but the first; joined shows 앞 줄과
+    # 한 칸, asked and not joined shows the cell's note; kept while it is sent when an earlier write
+    # is answered, back to what is stored when refused; a kept-aside join · pos · manner in words
+    # (old page: no switch at all)
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
+    over = {"lines": {"L0003": {"joined": True}}, "aside": [ASIDE_NEW]}
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          await p.reload(@HOOK@);
+          await p.ev(`window.__ok = true; window.__answer = (u, b) => {
+            if (!u.endsWith('api/lines/L0002') || !('join' in b)) return false;
+            window.__dec('L0002', { join: b.join });
+            window.__over.lines.L0002.joined = !!b.join && window.__ok;
+            window.__over.cells.L0002 = { notes: b.join && !window.__ok ? ['@WHY@'] : [] };
+            return true; }`);
+          const sw = `document.querySelector('#evidence [data-change="ln-join"]')`;
+          const look = () => p.ev(`({ sw: !!${sw}, on: !!(${sw} || {}).checked, now: (document.querySelector('#evidence .join-now') || {}).textContent || '',
+            prev: (document.querySelector('#evidence .join-prev') || {}).textContent || '' })`);
+          const pick = async (id) => { await p.ev(`document.getElementById('lines-row-${id}').click()`); await p.sleep(250); };
+          const flip = async () => { await p.ev(`${sw}.click()`); await p.idle(); return look(); };
+          await p.ev(`document.querySelector('#tabs [data-view="lines"]').click()`);
+          await p.sleep(200);
+          const aside = await p.ev(`[...document.querySelectorAll('#aside-box .as-row')].map((r) => r.textContent.replace(/\\s+/g, ' ').trim())`);
+          await pick('L0001');
+          const first = await look();
+          await pick('L0003');
+          const auto = await look();
+          await pick('L0002');
+          const off = await look();
+          const joined = await flip();
+          const apart = await flip();
+          await p.ev(`window.__ok = false`);
+          const refused = await flip();
+          await p.latency(900);
+          await p.ev(`document.querySelector('#evidence [data-change="ln-sung"]').click()`);
+          await p.sleep(60);
+          await p.ev(`${sw}.click()`);
+          const seen = [];
+          for (let i = 0; i < 24; i++) { seen.push(await p.ev(`!!${sw}.checked`)); await p.sleep(100); }
+          await p.idle();
+          await p.latency(0);
+          const sent = await look();
+          await p.ev(`window.__refuse = { status: 500, detail: '시험용 서버 오류' }`);
+          await p.ev(`${sw}.click()`);
+          await p.idle();
+          const back = { ...(await look()), toast: await p.ev(`[...document.querySelectorAll('#toasts .toast')].map((t) => t.textContent).pop() || ''`) };
+          return { aside, first, auto, off, joined, apart, refused, seen, sent, back,
+                   bodies: await p.ev(`window.__seen.filter(([u, b]) => u === 'api/lines/L0002' && 'join' in b).map(([, b]) => b)`) };
+        }""".replace("@HOOK@", new_hook(over)).replace("@WHY@", JOIN_WHY))["result"]
+    assert not r["first"]["sw"], r["first"]                                   # the first line has no line before
+    assert r["auto"]["sw"] and not r["auto"]["on"] and r["auto"]["now"] == "앞 줄과 한 칸", r["auto"]
+    o = r["off"]
+    assert o["sw"] and not o["on"] and o["now"] == "" and "하늘" in o["prev"] and "누구 계세요?" in o["prev"], o
+    assert r["joined"]["on"] and r["joined"]["now"] == "앞 줄과 한 칸", r["joined"]
+    assert not r["apart"]["on"] and r["apart"]["now"] == "", r["apart"]
+    assert r["refused"]["on"] and r["refused"]["now"] == JOIN_WHY, r["refused"]
+    assert r["seen"] and set(r["seen"]) == {False}, r["seen"]                 # never back to 'on' meanwhile
+    assert not r["sent"]["on"] and r["sent"]["now"] == "", r["sent"]
+    b = r["back"]
+    assert not b["on"] and b["toast"] == "시험용 서버 오류", b
+    assert r["bodies"] == [{"join": True}, {"join": None}, {"join": True}, {"join": None}, {"join": True}], r["bodies"]
+    a = [t for t in r["aside"] if "지어낸 다른 말이야" in t]
+    assert len(a) == 1 and "앞 줄과 한 칸으로" in a[0] and "위치 · 위" in a[0] and "말투 · [속삭이며]" in a[0] and "join ·" not in a[0], r["aside"]
+
+
+@browser_only
+def test_the_cell_of_a_line_a_sound_or_an_added_one_goes_up_or_down(tmp_path, browser, clips):
+    # 위치 아래 · 위 on the line panel (api/lines {pos}), on a sound's panel (api/items {pos}), in
+    # the 새로 넣기 dialog (api/added · api/added/{id} pos) and on a line the writer added (its
+    # api/added/{id}); a cell at the top has a mark on its row (old page: nothing to pick)
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          await p.reload(@HOOK@);
+          await p.ev(`window.__answer = (u, b) => {
+            if (!('pos' in b)) return false;
+            const id = u.split('/').pop();
+            if (u.includes('api/lines/')) { window.__dec(id, { pos: b.pos }); window.__over.cells[id] = { pos: b.pos }; return true; }
+            if (u.includes('api/items/')) { window.__over.items[id] = { pos: b.pos }; window.__over.cells[id] = { pos: b.pos }; return true; }
+            if (u.includes('api/added/') && Object.keys(b).length === 1) { window.__over.added[id] = { pos: b.pos }; return true; }
+            return false; }`);
+          const chips = (act) => p.ev(`[...document.querySelectorAll('#evidence [data-act="${act}"]')].map((b) => b.textContent + (b.getAttribute('aria-pressed') === 'true' ? '*' : ''))`);
+          const go = async (act, v) => { await p.ev(`document.querySelector('#evidence [data-act="${act}"][data-v="${v}"]').click()`); await p.idle(); return chips(act); };
+          await p.ev(`document.querySelector('#tabs [data-view="lines"]').click()`);
+          await p.sleep(200);
+          await p.ev(`document.getElementById('lines-row-L0002').click()`);
+          await p.sleep(250);
+          const line0 = await chips('ln-pos');
+          const lineUp = await go('ln-pos', 'top');
+          await p.ev(`document.querySelector('#tabs [data-view="cells"]').click()`);
+          await p.sleep(200);
+          const tops = await p.ev(`[...document.querySelectorAll('#rows .row-cell')].filter((r) => r.querySelector('.t-top')).map((r) => r.id)`);
+          const nCells = await p.ev(`document.querySelectorAll('#rows .row-cell').length`);
+          const ofLine = await p.ev(`fetch('api/state').then((r) => r.json()).then((s) => s.draft.cells.filter((c) => (c.refs || []).includes('L0002')).map((c) => 'cells-row-' + c.id))`);
+          await p.ev(`document.querySelector('#tabs [data-view="lines"]').click()`);
+          await p.sleep(200);
+          const lineDown = await go('ln-pos', '');
+          await p.ev(`document.querySelector('#tabs [data-view="items"]').click()`);
+          await p.sleep(200);
+          await p.ev(`document.getElementById('row-P0001').click()`);
+          await p.sleep(200);
+          const speaker = await chips('it-pos');
+          await p.ev(`document.getElementById('row-S0001').click()`);
+          await p.sleep(200);
+          const sound0 = await chips('it-pos');
+          const soundUp = await go('it-pos', 'top');
+          await p.ev(`document.querySelector('[data-act="open-add"]').click()`);
+          await p.sleep(200);
+          const radios = await p.ev(`[...document.querySelectorAll('#modal-box input[name="add-pos"]')].map((i) => i.value + (i.checked ? '*' : ''))`);
+          await p.ev(`document.getElementById('add-text').value = '지어낸 새 줄이다'`);
+          await p.ev(`document.querySelector('#modal-box input[name="add-pos"][value="top"]').click()`);
+          await p.ev(`document.querySelector('#modal-box [data-act="add-save"]').click()`);
+          await p.idle();
+          const st = await p.ev(`fetch('api/state').then((r) => r.json())`);
+          const aid = (st.added[0] || {}).id;
+          const added0 = await chips('ln-pos');
+          const addedUp = await go('ln-pos', 'top');
+          await p.ev(`document.querySelector('#evidence [data-act="added-edit"]').click()`);
+          await p.sleep(200);
+          const editRadios = await p.ev(`[...document.querySelectorAll('#modal-box input[name="add-pos"]')].map((i) => i.value + (i.checked ? '*' : ''))`);
+          await p.ev(`document.querySelector('#modal-box input[name="add-pos"][value=""]').click()`);
+          await p.ev(`document.querySelector('#modal-box [data-act="add-save"]').click()`);
+          await p.idle();
+          return { line0, lineUp, tops, nCells, ofLine, lineDown, speaker, sound0, soundUp, radios, aid, added0, addedUp, editRadios,
+                   seen: await p.ev(`window.__seen.filter(([, b]) => 'pos' in b)`) };
+        }""".replace("@HOOK@", new_hook()))["result"]
+    assert r["line0"] == ["아래*", "위"] and r["lineUp"] == ["아래", "위*"] and r["lineDown"] == ["아래*", "위"], r
+    assert r["ofLine"] and sorted(r["tops"]) == sorted(r["ofLine"]) and r["nCells"] > len(r["ofLine"]), r   # the cells of L0002 only
+    assert r["speaker"] == [], r["speaker"]                                  # a speaker's line has its own
+    assert r["sound0"] == ["아래*", "위"] and r["soundUp"] == ["아래", "위*"], r
+    assert r["radios"] == ["*", "top"] and r["aid"], r
+    assert r["added0"] == ["아래*", "위"] and r["addedUp"] == ["아래", "위*"] and r["editRadios"] == ["", "top*"], r
+    seen = r["seen"]
+    assert seen[0] == ["api/lines/L0002", {"pos": "top"}] and seen[1] == ["api/lines/L0002", {"pos": None}], seen
+    assert seen[2] == ["api/items/S0001", {"pos": "top"}], seen
+    assert seen[3][0] == "api/added" and seen[3][1]["pos"] == "top" and seen[3][1]["text"] == "지어낸 새 줄이다", seen
+    assert seen[4] == [f"api/added/{r['aid']}", {"pos": "top"}], seen
+    assert seen[5][0] == f"api/added/{r['aid']}" and seen[5][1]["pos"] is None and seen[5][1]["text"] == "지어낸 새 줄이다", seen
+    assert len(seen) == 6, seen
+
+
+@browser_only
+def test_the_manner_the_script_writes_is_put_on_written_or_taken_off(tmp_path, browser, clips):
+    # 말투 in 말 표시: the script's words (delivery) with 표시에 넣기, the writer's own (20 letters at
+    # most: a longer one is refused here and not sent), 빼기; what is on now (old page: nothing)
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
+    over = {"lines": {"L0002": {"delivery": ["속삭이며", "다급하게"]}}}
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          await p.reload(@HOOK@);
+          await p.ev(`window.__answer = (u, b) => {
+            if (!u.includes('api/lines/') || !('manner' in b)) return false;
+            window.__dec(u.split('/').pop(), { manner: b.manner });
+            return true; }`);
+          const inp = `document.querySelector('#evidence [data-change="ln-manner"]')`;
+          const look = () => p.ev(`({ now: (document.querySelector('#evidence .manner-now') || {}).textContent || null,
+            from: (document.querySelector('#evidence .manner-from') || {}).textContent || null, value: (${inp} || {}).value ?? null,
+            cues: [...document.querySelectorAll('#evidence .manner-cue')].map((c) => c.querySelector('.tx').textContent + (c.querySelector('button').getAttribute('aria-pressed') === 'true' ? '*' : '')),
+            drop: !!document.querySelector('#evidence [data-act="ln-manner-drop"]') })`);
+          const type = async (v) => { await p.ev(`(() => { const i = ${inp}; i.value = ${JSON.stringify(v)}; i.dispatchEvent(new Event('change', { bubbles: true })); })()`); await p.idle(); return look(); };
+          await p.ev(`document.querySelector('#tabs [data-view="lines"]').click()`);
+          await p.sleep(200);
+          await p.ev(`document.getElementById('lines-row-L0001').click()`);
+          await p.sleep(250);
+          const none = await look();
+          await p.ev(`document.getElementById('lines-row-L0002').click()`);
+          await p.sleep(250);
+          const cues = await look();
+          await p.ev(`document.querySelector('#evidence [data-act="ln-manner-put"][data-v="속삭이며"]').click()`);
+          await p.idle();
+          const put = await look();
+          const own = await type('[숨죽여]');
+          const n0 = await p.ev(`window.__seen.length`);
+          const long = await type('가'.repeat(21));
+          const longSent = (await p.ev(`window.__seen.length`)) - n0;
+          const toast = await p.ev(`[...document.querySelectorAll('#toasts .toast')].map((t) => t.textContent).pop() || ''`);
+          await p.ev(`document.querySelector('#evidence [data-act="ln-manner-drop"]').click()`);
+          await p.idle();
+          const dropped = await look();
+          const st = await p.ev(`fetch('api/state').then((r) => r.json()).then((s) => s.lines.find((l) => l.id === 'L0002').decision || {})`);
+          return { none, cues, put, own, long, longSent, toast, dropped, st,
+                   bodies: await p.ev(`window.__seen.filter(([, b]) => 'manner' in b).map(([u, b]) => [u, b])`) };
+        }""".replace("@HOOK@", new_hook(over)))["result"]
+    assert r["none"]["now"] == "붙은 말투 없음" and "대본에 적힌 말투 없음" in r["none"]["from"] and r["none"]["cues"] == [], r["none"]
+    c = r["cues"]
+    assert c["cues"] == ["속삭이며", "다급하게"] and c["now"] == "붙은 말투 없음" and c["value"] == "" and not c["drop"], c
+    assert r["put"]["now"] == "지금 붙은 말투 [속삭이며]" and r["put"]["value"] == "속삭이며" and r["put"]["cues"] == ["속삭이며*", "다급하게"], r["put"]
+    assert r["own"]["now"] == "지금 붙은 말투 [숨죽여]" and r["own"]["value"] == "숨죽여" and r["own"]["drop"], r["own"]
+    assert r["longSent"] == 0 and r["long"]["value"] == "숨죽여" and "20자" in r["toast"], r
+    assert r["dropped"]["now"] == "붙은 말투 없음" and r["dropped"]["value"] == "" and not r["dropped"]["drop"], r["dropped"]
+    assert "manner" not in r["st"], r["st"]
+    assert r["bodies"] == [["api/lines/L0002", {"manner": "속삭이며"}], ["api/lines/L0002", {"manner": "숨죽여"}],
+                           ["api/lines/L0002", {"manner": None}]], r["bodies"]
+
+
+@browser_only
+def test_a_person_who_may_be_another_is_merged_or_told_apart(tmp_path, browser, clips):
+    # people[].maybe_same on a person's row: 같은 사람으로 (asks once; then every line of the person
+    # takes the other name through api/lines/{id}/speaker scope person), 아님 (api/people not_same)
+    # (old page: nothing on the row)
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
+    over = {"people": {"하늘": {"maybe_same": ["바다"]}, "바다": {"maybe_same": ["하늘"]}}}
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          await p.reload(@HOOK@);
+          await p.ev(`window.__answer = (u, b) => {
+            if (u.endsWith('api/people') && b.not_same) { for (const n of b.names) window.__over.people[n] = { maybe_same: [] }; return true; }
+            if (u.endsWith('/speaker') && b.scope === 'person') window.__over.people['바다'] = { maybe_same: [] };
+            return false; }`);
+          const row = (n) => `#rows .row[data-id="${n}"]`;
+          const same = (n) => p.ev(`[...document.querySelectorAll('${row(n)} .r-same')].map((s) => ({ text: s.querySelector('.flag').textContent,
+            acts: [...s.querySelectorAll('button')].map((b) => b.dataset.act + ':' + b.textContent.trim()) }))`);
+          await p.ev(`document.querySelector('#tabs [data-view="people"]').click()`);
+          await p.sleep(250);
+          const first = { sky: await same('하늘'), sea: await same('바다') };
+          await p.ev(`document.querySelector('${row('하늘')} [data-act="pp-not-same"]').click()`);
+          await p.idle();
+          const told = { sky: await same('하늘'), sea: await same('바다') };
+          const n0 = await p.ev(`window.__seen.length`);
+          await p.ev(`document.querySelector('${row('바다')} [data-act="pp-same"]').click()`);
+          await p.sleep(150);
+          const asked = { label: await p.ev(`document.querySelector('${row('바다')} [data-act="pp-same"]').textContent`), sent: (await p.ev(`window.__seen.length`)) - n0 };
+          await p.ev(`document.querySelector('${row('바다')} [data-act="pp-same"]').click()`);
+          await p.idle();
+          const st = await p.ev(`fetch('api/state').then((r) => r.json())`);
+          return { first, told, asked, seen: await p.ev(`window.__seen`), names: st.lines.map((l) => [l.id, l.name]),
+                   after: await same('바다') };
+        }""".replace("@HOOK@", new_hook(over)))["result"]
+    f = r["first"]
+    assert [s["text"] for s in f["sky"]] == ["같은 사람일 수 있음: 바다"] and [s["text"] for s in f["sea"]] == ["같은 사람일 수 있음: 하늘"], f
+    assert f["sea"][0]["acts"] == ["pp-same:같은 사람으로", "pp-not-same:아님"], f
+    assert r["told"]["sky"] == [] and len(r["told"]["sea"]) == 1, r["told"]
+    assert "한 번 더 누르면 하늘로 합침" in r["asked"]["label"] and "되돌릴 수 없음" in r["asked"]["label"] and r["asked"]["sent"] == 0, r["asked"]
+    assert r["seen"] == [["api/people", {"names": ["하늘"], "not_same": ["바다"]}],
+                         ["api/lines/L0002/speaker", {"name": "하늘", "scope": "person"}]], r["seen"]
+    assert dict(r["names"])["L0002"] == "하늘" and r["after"] == [], r
+
+
+@browser_only
+def test_the_export_check_lists_speech_heard_where_no_cell_is_and_names_that_did_not_settle(tmp_path, browser, clips):
+    # 내보내기 전 검사: 말이 들리는데 자막 칸이 없는 구간 N곳 with a list that opens (each goes to its
+    # time, and to its 대본에 없는 말 or its line), and 배치를 거듭해도 이름 표시가 맞춰지지 않은 줄 N개
+    # with its first line (old page: neither row)
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
+    heard = [{"start": 6.5, "end": 7.4, "text": "저기요 잠깐만요", "words": [], "extra": "X0001", "line": None},
+             {"start": 2.4, "end": 3.0, "text": "어디 가는 거야", "words": [], "extra": None, "line": "L0002"},
+             {"start": 4.1, "end": 4.5, "text": "응 그래", "words": [], "extra": None, "line": None}]
+    over = {"check": {"heard_no_cell": heard}, "summary": {"heard_no_cell": 3}, "check_lines": {"unsettled": ["L0003"]}}
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          await p.reload(@HOOK@);
+          const open = async () => { await p.ev(`document.querySelector('[data-act="open-export"][data-fmt="srt"]').click()`); await p.until(`!!document.querySelector('#modal-box .xp-row')`, 8000); };
+          const where = () => p.ev(`({ modal: !document.getElementById('modal').hidden, view: document.querySelector('#tabs .tab.is-on').dataset.view,
+            sel: (document.querySelector('#rows .row.is-sel') || {}).id || null, clock: document.getElementById('stage-time').textContent })`);
+          const go = async (i) => { await p.ev(`document.querySelector('#hnc-list [data-act="hnc-go"][data-i="${i}"]').click()`); await p.sleep(300); return where(); };
+          await open();
+          const rows = await p.ev(`[...document.querySelectorAll('#modal-box .xp-row')].map((r) => r.textContent.replace(/\\s+/g, ' ').trim())`);
+          const shut = await p.ev(`!!document.getElementById('hnc-list')`);
+          await p.ev(`document.querySelector('#modal-box [data-act="xp-hnc"]').click()`);
+          await p.sleep(100);
+          const list = await p.ev(`[...document.querySelectorAll('#hnc-list .hnc')].map((b) => b.textContent.replace(/\\s+/g, ' ').trim())`);
+          const toExtra = await go(0);
+          await open();
+          const toLine = await go(1);
+          await open();
+          const toTime = await go(2);
+          await open();
+          await p.ev(`[...document.querySelectorAll('#modal-box .xp-row')].find((r) => r.textContent.includes('맞춰지지 않은')).querySelector('[data-act="goto-line"]').click()`);
+          await p.sleep(300);
+          return { rows, shut, list, toExtra, toLine, toTime, unsettled: await where() };
+        }""".replace("@HOOK@", new_hook(over)))["result"]
+    heardRow = [t for t in r["rows"] if "말이 들리는데 자막 칸이 없는 구간" in t]
+    assert len(heardRow) == 1 and "구간 3곳" in heardRow[0] and "펼치기" in heardRow[0], r["rows"]
+    unset = [t for t in r["rows"] if "배치를 거듭해도 이름 표시가 맞춰지지 않은 줄" in t]
+    assert len(unset) == 1 and "줄 1개" in unset[0] and "첫 줄 보기" in unset[0], r["rows"]
+    assert r["shut"] is False and len(r["list"]) == 3, r
+    assert "00:06.5" in r["list"][0] and "저기요 잠깐만요" in r["list"][0] and "대본에 없는 말" in r["list"][0], r["list"]
+    assert "어디 가는 거야" in r["list"][1] and "대본 줄" in r["list"][1] and "대본" not in r["list"][2], r["list"]
+    e = r["toExtra"]
+    assert not e["modal"] and e["view"] == "extras" and e["sel"] == "extras-row-X0001" and _clock(e["clock"]) == pytest.approx(6.5, abs=0.06), e
+    ln = r["toLine"]
+    assert not ln["modal"] and ln["view"] == "lines" and ln["sel"] == "lines-row-L0002" and _clock(ln["clock"]) == pytest.approx(2.4, abs=0.06), ln
+    t = r["toTime"]
+    assert not t["modal"] and t["view"] == "lines" and t["sel"] == "lines-row-L0002" and _clock(t["clock"]) == pytest.approx(4.1, abs=0.06), t
+    u = r["unsettled"]
+    assert not u["modal"] and u["view"] == "lines" and u["sel"] == "lines-row-L0003", u
+
+
+@browser_only
+def test_sung_speech_and_the_name_and_language_hints_are_shown_and_filtered(tmp_path, browser, clips):
+    # 대본에 없는 말 in a 노래 구간 (extras[].sung): a 노래 tag, its form puts it in as sung; a line's
+    # hints name · language on its row, on its panel and as two chips of the 대사 filter (old page:
+    # neither tag nor hint nor chip)
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
+    over = {"extras": {"X0001": {"sung": True}},
+            "lines": {"L0001": {"hints": ["name"]}, "L0002": {"hints": ["language"], "heard_language": "영어"}}}
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          await p.reload(@HOOK@);
+          const sub = (id) => p.ev(`(document.querySelector('#${id} .r-sub') || {}).textContent || ''`);
+          const rows = () => p.ev(`[...document.querySelectorAll('#rows .row[data-id]')].map((r) => r.dataset.id)`);
+          await p.ev(`document.querySelector('#tabs [data-view="extras"]').click()`);
+          await p.sleep(200);
+          const tags = await p.ev(`[...document.querySelectorAll('#rows .row[data-id]')].map((r) => [r.dataset.id, [...r.querySelectorAll('.t-sung')].map((t) => t.textContent)])`);
+          await p.ev(`document.getElementById('extras-row-X0003').click()`);
+          await p.sleep(200);
+          const plain = await p.ev(`document.querySelector('#evidence [data-box="x-line"] [data-f="sung"]').checked`);
+          await p.ev(`document.getElementById('extras-row-X0001').click()`);
+          await p.sleep(200);
+          const sung = { box: await p.ev(`document.querySelector('#evidence [data-box="x-line"] [data-f="sung"]').checked`),
+                         note: await p.ev(`document.querySelector('#evidence .ev-note').textContent`) };
+          await p.ev(`document.querySelector('#evidence [data-act="x-line"]').click()`);
+          await p.idle();
+          await p.ev(`document.querySelector('#tabs [data-view="lines"]').click()`);
+          await p.sleep(200);
+          const subs = { l1: await sub('lines-row-L0001'), l2: await sub('lines-row-L0002'), l3: await sub('lines-row-L0003') };
+          const chips = await p.ev(`Object.fromEntries([...document.querySelectorAll('#state-chips .chip')].map((c) => [c.dataset.filter, [c.firstChild.textContent, Number(c.querySelector('.n').textContent)]]))`);
+          await p.ev(`document.querySelector('#state-chips [data-filter="name"]').click()`);
+          await p.sleep(150);
+          const byName = await rows();
+          await p.ev(`document.querySelector('#state-chips [data-filter="language"]').click()`);
+          await p.sleep(150);
+          const byLang = await rows();
+          await p.ev(`document.getElementById('lines-row-L0002').click()`);
+          await p.sleep(200);
+          const panel2 = await p.ev(`document.querySelector('#evidence .ev-note').textContent`);
+          await p.ev(`document.querySelector('#state-chips [data-filter="name"]').click()`);
+          await p.sleep(150);
+          await p.ev(`document.getElementById('lines-row-L0001').click()`);
+          await p.sleep(200);
+          const panel1 = await p.ev(`document.querySelector('#evidence .ev-note').textContent`);
+          return { tags, plain, sung, subs, chips, byName, byLang, panel1, panel2,
+                   put: await p.ev(`window.__seen.filter(([u]) => u === 'api/extras/X0001').map(([, b]) => b)`) };
+        }""".replace("@HOOK@", new_hook(over)))["result"]
+    tags = dict(r["tags"])
+    assert tags["X0001"] == ["노래"] and all(v == [] for k, v in tags.items() if k != "X0001"), r["tags"]
+    assert r["plain"] is False and r["sung"]["box"] is True and "노래 구간 안의 말" in r["sung"]["note"], r
+    assert len(r["put"]) == 1 and r["put"][0]["action"] == "line" and r["put"][0]["sung"] is True, r["put"]
+    s = r["subs"]
+    assert "이름만 다르게 들림" in s["l1"] and "들린 언어: 영어 · 언어 표시 확인" in s["l2"], s
+    assert "이름만" not in s["l3"] and "들린 언어" not in s["l3"], s
+    c = r["chips"]
+    assert c["name"] == ["이름만 다르게 들림", 1] and c["language"] == ["들린 언어 다름", 1], c
+    keys = list(c)
+    assert keys.index("spelling") < keys.index("name") < keys.index("language") < keys.index("lang"), keys
+    assert r["byName"] == ["L0001"] and r["byLang"] == ["L0002"], r
+    assert "이름만 다르게 들림" in r["panel1"] and "들린 언어: 영어 · 언어 표시 확인" in r["panel2"], r
