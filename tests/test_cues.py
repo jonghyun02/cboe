@@ -148,6 +148,13 @@ def test_sound_cues_that_are_sounds(text, first):
     ("현관문이 삐걱 열린다.", "[삐걱 - 현관문]"),
     ("문이 덜컹 닫힌다.", "[덜컹 - 문]"),
     ("문이 끼익- 하고 열린다.", "[끼익 - 문]"),
+    # other shapes of the same: '소리를 내며', '-거리며', a comma, the verb '연다'
+    ("문이 끼익 소리를 내며 열린다.", "[끼익 - 문]"),
+    ("문이 끼익 하는 소리와 함께 열린다.", "[끼익 - 문]"),
+    ("문이 끼익거리며 닫힌다.", "[끼익 - 문]"),
+    ("문이 끼익, 열린다.", "[끼익 - 문]"),
+    ("대문을 끼익 연다.", "[끼익 - 대문]"),
+    ("가온이 문을 끼익 연다.", "[끼익 - 문]"),
 ])
 def test_an_onomatopoeia_between_the_door_and_its_verb_is_the_door(text, phrase):
     """'문 + 의성어 + 열린다' is the door that sounds (not brakes: '[급정거]', the car family)."""
@@ -155,9 +162,21 @@ def test_an_onomatopoeia_between_the_door_and_its_verb_is_the_door(text, phrase)
     assert c["phrase"] == phrase and "door" in c["families"]
     assert "[급정거]" not in c["phrases"] and "car" not in c["families"]
     # a brake still is one
-    car = cues.sfx_cue("문 앞에 차가 끼익 선다.")
-    assert car["phrase"] == "[끼익]" and "[급정거]" in car["phrases"] and "car" in car["families"]
+    for brake in ("문 앞에 차가 끼익 선다.", "문 옆에 트럭이 끼익 멈춘다."):
+        car = cues.sfx_cue(brake)
+        assert car["phrase"] == "[끼익]" and "[급정거]" in car["phrases"] and "car" in car["families"]
+        assert "door" not in car["families"]
     assert "door" in cues.sfx_cue("끼익- 문이 열린다.")["families"]
+
+
+def test_a_doorbell_between_the_door_and_its_verb_keeps_its_family():
+    """An onomatopoeia inside the door's words that is a source of its own (a doorbell) is not
+    only how the door sounds: its families stay; a creak or a thud keeps only the manner."""
+    c = cues.sfx_cue("문이 띵동 열린다.")
+    assert {"door", "doorbell", "bell"} <= set(c["families"]) and "[띵동]" in c["phrases"]
+    thud = cues.sfx_cue("문이 쿵 열린다.")
+    assert "door" in thud["families"] and "explosion" not in thud["families"]
+    assert "car" not in cues.sfx_cue("문이 끼익 열린다.")["families"]
 
 
 @pytest.mark.parametrize("text", [

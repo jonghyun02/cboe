@@ -107,8 +107,10 @@ SOURCES = (
     (r"폭죽|불꽃놀이", "폭죽", "펑", "폭죽", ("explosion",)),
     (r"폭발|폭음|폭탄|포탄|포성|포격|수류탄|최루탄", None, "쾅", "폭발음", ("explosion", "gun")),
     (r"노크|두드리|두드린|두들기|똑똑", "문", "똑똑", "노크", ("door", "impact", "hit")),
-    # also with the onomatopoeia between the door and its verb: '문이 끼익 열린다', '철문이 삐걱- 닫힌다'
-    (r"문[이을]?\s*(?:쾅|닫|열|여닫)|문[이을]?\s+[가-힣]{1,4}[-~!]*\s*(?:(?:하고|하며|하더니)\s*)?(?:닫|열|여닫)|"
+    # also with the onomatopoeia between the door and its verb: '문이 끼익 열린다', '철문이 삐걱- 닫힌다',
+    # '문이 끼익거리며 닫힌다', '문이 끼익, 열린다', '문이 끼익 소리를 내며 열린다', '문을 끼익 연다'
+    (r"문[이을]?\s*(?:쾅|닫|열|여닫)|문[이을]?\s+[가-힣]{1,4}(?:(?:거리|대)(?:며|고))?[-~!,]*\s*"
+     r"(?:(?:하고|하며|하더니|(?:하는\s*)?소리(?:를\s*내(?:며|고)|와\s*함께))\s*)?(?:닫|열|여닫|연다|연(?![가-힣]))|"
      r"문\s*닫히|문\s*열리|문소리|문\s*여는|문\s*닫는", "문", "덜컥", "문소리", ("door", "impact")),
     (r"전화벨|벨이?\s*울|벨소리|따르릉|휴대폰|핸드폰|휴대전화|전화가?\s*(?:울|온|와)|"
      r"울리는\s*(?:[가-힣]+\s+){0,3}전화(?![가-힣])", "전화", "따르릉", "전화벨", ("phone", "alarm", "bell")),
@@ -171,6 +173,16 @@ _SOUND_NAMES = {"함성", "환호", "야유", "비명", "고함", "박수", "울
 # families that say how a thing sounds, not what sounds: all an onomatopoeia written inside the
 # words of the source that names the cue adds ('문이 끼익 열린다': a creak of the door, no car)
 MANNER_FAMILIES = {"creak", "scrape", "click", "impact", "hit"}
+
+
+def _inside_families(fam, word: str) -> tuple:
+    """The families a SOURCES entry adds when ``word``, its match, lies inside the words of the
+    source that names the cue: only how that source sounds (``MANNER_FAMILIES``) — all of them
+    when the word is the onomatopoeia of a source of its own that has none of those ('문이 띵동
+    열린다': a doorbell too)."""
+    if _ONO_ANY.fullmatch(word.strip(" !~-…")) and not set(fam) & MANNER_FAMILIES:
+        return tuple(fam)
+    return tuple(f for f in fam if f in MANNER_FAMILIES)
 
 # music
 MUSIC_WORD = re.compile(r"음악|노래(?!방)|노랫|선율|멜로디|연주|BGM|O\.?S\.?T|애국가|(?<![가-힣])가요(?![가-힣])|팝송|"
@@ -347,7 +359,7 @@ def _sound_name(text: str) -> tuple[str | None, list[str], list[str], tuple[int,
     """(description of what sounds, '- 출처' nouns, families, (where the naming entry's match
     starts, its index in SOURCES, where the match ends)) from the SOURCES table. An entry that
     matches only inside the naming entry's match (the '끼익' of '문이 끼익 열린다') adds only its
-    ``MANNER_FAMILIES``."""
+    ``MANNER_FAMILIES`` (``_inside_families``)."""
     desc, nouns, fams, onos, first, at = None, [], [], [], True, None
     for k, (rx, noun, ono, d, fam) in enumerate(_SOURCES):
         m = rx.search(text)
@@ -363,7 +375,7 @@ def _sound_name(text: str) -> tuple[str | None, list[str], list[str], tuple[int,
                 if ono:
                     onos.append(ono)
             elif at[0] <= m.start() and m.end() <= at[2]:
-                fam = tuple(f for f in fam if f in MANNER_FAMILIES)
+                fam = _inside_families(fam, m.group(0))
             fams.extend(f for f in fam if f not in fams)
     return desc, nouns + [f"@{o}" for o in onos], fams, at
 
@@ -491,7 +503,8 @@ def sfx_cue(text: str) -> dict | None:
     if "소리" in t:                                    # '구둣발 소리와 함께 …': what is right before '소리' names it
         at = t.index("소리")
         near_desc, near_srcs, _, near_at = _sound_name(t[max(0, at - 8):at + 2])
-        if near_desc and near_at:
+        # not a '소리' inside the words of the source that names the cue ('문이 끼익 소리를 내며 열린다')
+        if near_desc and near_at and not (src_at and src_at[0] <= at < src_at[2]):
             desc, srcs, src_at = near_desc, near_srcs, (max(0, at - 8) + near_at[0], near_at[1],
                                                         max(0, at - 8) + near_at[2])
     nouns = [s for s in srcs if not s.startswith("@")]
@@ -502,7 +515,7 @@ def sfx_cue(text: str) -> dict | None:
         inside = bool(src_at) and src_at[0] <= pos < src_at[2]      # how the named source sounds
         for rx, _n, _o, _d, fam in _SOURCES:
             if rx.search(o):
-                fams.extend(f for f in fam if f not in fams and (not inside or f in MANNER_FAMILIES))
+                fams.extend(f for f in (_inside_families(fam, o) if inside else fam) if f not in fams)
     generic = _generic_desc(t, t.index("소리")) if desc is None and "소리" in t else None
     if generic and ono and re.sub(r"[!\s]", "", ono) in generic.replace(" ", ""):
         generic = None                                 # '[꽈당]' says it: no '[꽈당 소리]'
