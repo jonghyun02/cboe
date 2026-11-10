@@ -49,7 +49,10 @@ OVERLAP_TOL = 2.0             # s two found scenes may overlap and still be in o
 
 
 def units(lines: list[dict]) -> list[dict]:
-    """Runs of consecutive lines with the same ``scene_id``: [{"scene_id", "idx", "chars", "grams"}]."""
+    """Runs of consecutive lines with the same ``scene_id``: [{"scene_id", "idx", "chars", "grams",
+    "foreign"}]. ``foreign``: at least half the letters are in lines the script marks with a
+    ``language`` — the script has the Korean translation and the film another language, so the
+    letters cannot find the scene (it is placed on voice, ``align._align_scenes``)."""
     out: list[dict] = []
     for i, ln in enumerate(lines):
         sid = ln.get("scene_id")
@@ -61,6 +64,8 @@ def units(lines: list[dict]) -> list[dict]:
         cs = [c for i in u["idx"] for c in norm_chars(str(lines[i].get("text") or ""))]
         u["chars"] = len(cs)
         u["grams"] = sorted({"".join(cs[k:k + N]) for k in range(len(cs) - N + 1)})
+        foreign = sum(len(norm_chars(str(lines[i].get("text") or ""))) for i in u["idx"] if lines[i].get("language"))
+        u["foreign"] = bool(cs) and foreign >= 0.5 * len(cs)
     return out
 
 
@@ -173,7 +178,7 @@ def locate(us: list[dict], words: list[dict], t_lo: float, t_hi: float) -> list[
     res: list[dict] = [{"status": "none", "score": 0.0, "hits": 0} for _ in us]
     cands = []
     for ui, u in enumerate(us):
-        if len(u["grams"]) < MIN_GRAMS:
+        if len(u["grams"]) < MIN_GRAMS or u.get("foreign"):
             continue
         ws = windows(st.hits(u["grams"]), len(u["grams"]), _span(u))
         if ws:
@@ -198,7 +203,8 @@ def locate(us: list[dict], words: list[dict], t_lo: float, t_hi: float) -> list[
         moved.append((w["a"], w["b"]))
     ends = [(-1, t_lo, t_lo)] + [(ui, w["a"], w["b"]) for ui, w in chain] + [(len(us), t_hi, t_hi)]
     for (u0, _, g0), (u1, g1, _) in zip(ends, ends[1:]):
-        todo = [ui for ui in range(u0 + 1, u1) if res[ui]["status"] != "found" and len(us[ui]["grams"]) >= MIN_GRAMS]
+        todo = [ui for ui in range(u0 + 1, u1) if res[ui]["status"] != "found" and len(us[ui]["grams"]) >= MIN_GRAMS
+                and not us[ui].get("foreign")]
         if not todo or g1 - g0 < 1.0:
             continue
         weak = []

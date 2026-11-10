@@ -3,11 +3,13 @@
 
 0. Scenes first (a shooting script, ``format: "screenplay"`` with scenes): ``cboe.scenes``
    finds where each scene is in the video without assuming the script's order, and the
-   steps below run inside each found scene only (감사 1-05, 8-02). A scene that is not found
-   and leaves no room (no unclaimed ASR words or voice) between the found scenes around it is
-   ``absent``; one with room is aligned there (``unknown``, see ``_align_scenes``); scenes
-   before / after the found ones in a partial processing window are ``out_of_range``. Other
-   scripts (``format`` lines / timed, no scenes) are one scene, as before.
+   steps below run inside each found scene only (감사 1-05, 8-02). The scenes not found are
+   matched with the unclaimed ASR words between the found scenes around them: found after all
+   by their lines, or ``absent`` when there is no room (no unclaimed ASR words or voice), or
+   ``unknown`` (see ``_align_scenes``); scenes beyond a partial processing window are
+   ``out_of_range`` (a scene cut by the window edge keeps the lines heard inside). A scene in
+   another language (``scenes.units`` "foreign") is placed on voice. Other scripts
+   (``format`` lines / timed, no scenes) are one scene, as before.
 1. Character alignment. Script text and ASR text are reduced to letters/digits and
    matched with difflib's longest-matching-blocks (contiguous matches first; a plain
    minimum-edit path happily pairs '으아아아' with '굴나오잖' when the ASR missed a
@@ -42,10 +44,12 @@ letters: it is placed like any other line, never ``differs``, and is ``ok`` with
 "foreign" when it was not heard. ``asr_text`` is what the ASR heard over the line, ``diff``
 the word-level differences and ``hints`` ["spelling"] when they look like spelling only.
 ASR words that no aligned line uses are ``extras`` (speech that is in no script line, 감사 1-04).
+The unheard lines of a found scene stay near its matched lines (``_place_scenes``).
 
 dialogue.json {"mode", "extras": [{"id", "start", "end", "text", "words", "scene_id",
-"overlaps"}], "lines": [...]}; scenes.json {"scenes": [{"id", "number", "heading", "start",
-"end", "status", "score", "how", "lines"}]}.
+"overlaps", "short"}], "lines": [...]}; scenes.json {"scenes": [{"id", "number", "heading",
+"start", "end" (the matched lines), "span" (every line with a time, when wider), "status",
+"score", "how", "lines", "guess", "note"}]}.
 """
 from __future__ import annotations
 
@@ -95,10 +99,19 @@ FOUND_BY_LINES, FOUND_BY_SHARE = 6, 0.4
 # a scene not found with at least this many 3-grams (about two sentences) has its lines absent;
 # a shorter one keeps them as unheard (감사 1-03: short lines are what the ASR misses)
 LONG_SCENE_GRAMS = 20
+# ... unless one of its lines was mostly heard there: at least this share and this many letters
+# matched (one stray two-letter block is not enough: other speech where a scene was cut has them)
+KEEP_MATCH, KEEP_LETTERS = 0.5, 3
+# the lines of a found scene that were not heard stay near its matched lines: within this many s
+# per letter of those lines, plus SCENE_SLACK s (Sunny: 75 % of the lines of a scene start within
+# 0.58 s per letter of the line before them)
+SCENE_SEC_PER_CHAR, SCENE_SLACK = 0.6, 4.0
+FOREIGN_STRETCH = 3.0  # foreign lines not heard may take up to this many times their letters' time
 MINOR_CHARS = 2       # letters that may differ in a stretch before it counts as a different word
 EXTRA_GAP = 0.8       # s of silence that ends a group of ASR words that are in no script line
-# one-word groups of these (and vocalisations) are not kept as speech that is in no script line
-INTERJECTIONS = {"네", "예", "응", "야", "얘", "어머", "어머나", "아이고", "에이", "참", "뭐", "자", "음", "흠", "헐"}
+# groups made only of these (and vocalisations) are not kept as speech that is in no script line
+INTERJECTIONS = {"네", "예", "응", "야", "얘", "어머", "어머나", "아이고", "에이", "참", "뭐", "자", "음", "흠", "헐", "엥"}
+EXTRA_SHORT = 2       # a group of this many letters or fewer is marked "short" (a word fragment, mostly)
 
 
 def is_vocalisation(text: str) -> bool:
@@ -402,6 +415,13 @@ def align_lines(p, lines: list[dict], asr_words: list[dict], t_lo: float, t_hi: 
 
 def _place_unaligned(p, out: list[dict], t_lo: float, t_hi: float) -> None:
     voice = p if isinstance(p, Voice) else Voice(p)
+    for i, j, a, b in _unaligned_runs(out, t_lo, t_hi):
+        _place_run(voice, out[i:j], a, b)
+
+
+def _unaligned_runs(out: list[dict], t_lo: float, t_hi: float):
+    """(i, j, a, b): each run out[i:j] of lines not aligned, with the time between its aligned
+    neighbours (the window edge where there is none)."""
     i = 0
     while i < len(out):
         if out[i]["aligned"]:
@@ -414,33 +434,43 @@ def _place_unaligned(p, out: list[dict], t_lo: float, t_hi: float) -> None:
         b = out[j]["start"] - 0.05 if j < len(out) else t_hi
         if b <= a:
             b = a + 0.3 * (j - i)
-        run = out[i:j]
-        n_chars = [max(len(norm_chars(r["text"])), 1) for r in run]
-        vocal = [is_vocalisation(r["text"]) for r in run]
-        regions = voice.regions(a, b)
-        pick = _assign(n_chars, vocal, regions)
-        if pick is not None:
-            groups: dict[int, list[int]] = {}
-            for q, jj in enumerate(pick):
-                groups.setdefault(jj, []).append(q)
-            for jj, qs in groups.items():            # lines sharing a region split it by length
-                s0, e0 = regions[jj][0], regions[jj][1]
-                tot = sum(max(0.3, SEC_PER_CHAR * n_chars[q]) for q in qs)
-                t = s0
-                for q in qs:
-                    d = (e0 - s0) * max(0.3, SEC_PER_CHAR * n_chars[q]) / tot
-                    s, e = t, min(t + d, t + max(0.6, 3 * SEC_PER_CHAR * n_chars[q]))
-                    run[q].update(start=round(s, 3), end=round(e, 3),
-                                  words=_even_words(run[q]["text"].split(), s, e), timing="voice")
-                    t += d
-        else:
-            span = (b - a) / len(run)
-            for k, r in enumerate(run):
-                s = a + k * span
-                e = min(s + max(0.6, SEC_PER_CHAR * n_chars[k]), s + span)
-                r.update(start=round(s, 3), end=round(e, 3), words=_even_words(r["text"].split(), s, e),
-                         timing="even")
+        yield i, j, a, b
         i = j
+
+
+def _place_run(voice: Voice, run: list[dict], a: float, b: float) -> None:
+    """Place lines that were not aligned on the voice activity of (a, b), in order. A run of
+    foreign lines (``language``: the script has the Korean translation, shorter than what is
+    said) is stretched over the voice there, up to FOREIGN_STRETCH times the time its letters take."""
+    n_chars = [max(len(norm_chars(r["text"])), 1) for r in run]
+    vocal = [is_vocalisation(r["text"]) for r in run]
+    regions = voice.regions(a, b)
+    if regions and all(r.get("language") for r in run):
+        have = sum(r[1] - r[0] for r in regions)
+        k = min(max(have / sum(max(0.3, SEC_PER_CHAR * n) for n in n_chars), 1.0), FOREIGN_STRETCH)
+        n_chars = [n * k for n in n_chars]
+    pick = _assign(n_chars, vocal, regions)
+    if pick is not None:
+        groups: dict[int, list[int]] = {}
+        for q, jj in enumerate(pick):
+            groups.setdefault(jj, []).append(q)
+        for jj, qs in groups.items():            # lines sharing a region split it by length
+            s0, e0 = regions[jj][0], regions[jj][1]
+            tot = sum(max(0.3, SEC_PER_CHAR * n_chars[q]) for q in qs)
+            t = s0
+            for q in qs:
+                d = (e0 - s0) * max(0.3, SEC_PER_CHAR * n_chars[q]) / tot
+                s, e = t, min(t + d, t + max(0.6, 3 * SEC_PER_CHAR * n_chars[q]))
+                run[q].update(start=round(s, 3), end=round(e, 3),
+                              words=_even_words(run[q]["text"].split(), s, e), timing="voice")
+                t += d
+    else:
+        span = (b - a) / len(run)
+        for k, r in enumerate(run):
+            s = a + k * span
+            e = min(s + max(0.6, SEC_PER_CHAR * n_chars[k]), s + span)
+            r.update(start=round(s, 3), end=round(e, 3), words=_even_words(r["text"].split(), s, e),
+                     timing="even")
 
 
 def _lines_from_asr(words: list[dict]) -> list[dict]:
@@ -533,28 +563,35 @@ def _in_order(seq: list[dict]) -> list[int]:
 def _align_scenes(p, doc: dict, words: list[dict], t_lo: float, t_hi: float, head_cut: bool,
                   tail_cut: bool, voice: Voice, heard_g: dict) -> tuple[list[dict], list[dict], list]:
     """Scene-first alignment of a shooting script. Returns (lines, per-unit info, gaps), gaps
-    being [(start, end, scene_id or None)] of the stretches given to scenes not found.
+    being [(start, end, [(scene_id, letters), ...])] of the stretches given to scenes not found.
 
     1. Found scenes (``cboe.scenes.locate``) are matched one by one (letters, as in
        ``align_lines``) with the ASR words between the matched 3-grams of the found scenes
        before and after them in time: a scene in a film runs much longer than its matched
        3-grams (Sunny: lines with every letter heard 100 s after the last matched 3-gram).
     2. The scenes not found between two found ones (in script order) share the time between
-       the matched lines of those two:
-       - no room there (less than ROOM_MIN s of ASR words no line uses, and of voice) ->
-         ``absent``;
-       - room: their lines are matched with the unused words there. A scene with
-         FOUND_BY_LINES matched letters (FOUND_BY_SHARE of a short scene's) is found after all
-         (``how`` "lines"). Otherwise it is ``unknown``: a short one (fewer than
-         LONG_SCENE_GRAMS 3-grams, too little text to be found reliably) keeps its lines, like
-         the short lines the ASR misses inside found scenes (감사 1-03); a longer one, whose text
-         matched nowhere although there is speech in its place, has its lines ``absent`` with
-         the place as ``guess`` — the speech heard there is kept as extras with that scene's id.
-       - before the first / after the last found scene of a partial window -> ``out_of_range``.
+       the matched lines of those two. Their lines are first matched with the ASR words there
+       that no line uses (``_judge``):
+       - a scene with FOUND_BY_LINES matched letters (FOUND_BY_SHARE of a short scene's) is
+         found after all (``how`` "lines") — however little room it takes (a short line heard
+         beside a cut scene, review B1);
+       - the others: no room left for them (less than ROOM_MIN s of unused ASR words, and of
+         voice outside the lines just found) -> ``absent``. Room: ``unknown``. A scene with a
+         matched line, a short one (fewer than LONG_SCENE_GRAMS 3-grams, too little text to be
+         found reliably) and a foreign one (``scenes.units`` "foreign": the script has the
+         translation, the sound another language) keep their lines, like the short lines the
+         ASR misses inside found scenes (감사 1-03); a longer one, whose text matched nowhere
+         although there is speech in its place, is ``absent`` with the place as ``guess`` — the
+         speech heard there is kept as extras with that scene's id.
+       - before the first / after the last found scene of a partial window (``edge``): the
+         scenes the window can still hold are matched with the unused words up to the window
+         edge; the one farthest out with matched lines is a scene cut by the window edge (review
+         B1): in the window up to (from) its last (first) matched line, its lines beyond are
+         left to ``_edge_out``. Every scene farther out is ``out_of_range``.
     3. All lines that keep a place, in film order (found scenes by time, the scenes not found
        after the found scene before them), lose matches that go back in time (``_in_order``),
-       and the lines not matched are placed on voice between their matched neighbours
-       (``_place_unaligned``, as for a script without scenes) -> ``unheard``."""
+       and the lines not matched are placed on voice between their matched neighbours, a found
+       scene's own lines near its matched ones (``_place_scenes``) -> ``unheard``."""
     from .. import scenes as S
     lines = doc["lines"]
     us = S.units(lines)
@@ -603,76 +640,189 @@ def _align_scenes(p, doc: dict, words: list[dict], t_lo: float, t_hi: float, hea
             return loc[ui]["a"] if first else loc[ui]["b"]
         return min(ts) if first else max(ts)
 
-    gaps, after = [], {}
-    for prev, nxt, uis in runs:
-        idx = [i for ui in uis for i in us[ui]["idx"]]
-        after.setdefault(prev, []).extend(uis)
-        if (prev is None and head_cut) or (nxt is None and tail_cut):
-            for i in idx:
-                out[i] = _no_time(lines[i], OUT)
-            for ui in uis:
-                state[ui] = OUT
-            continue
-        g0 = edge_time(prev, False) + 0.05 if prev is not None else t_lo
-        g1 = edge_time(nxt, True) - 0.05 if nxt is not None else t_hi
-        sid = us[uis[0]]["scene_id"] if len({us[ui]["scene_id"] for ui in uis}) == 1 else None
-        # room: ROOM_MIN s of speech, or half the time the lines need when they are shorter
-        need = min(ROOM_MIN, 0.5 * sum(max(0.3, SEC_PER_CHAR * len(norm_chars(str(lines[i].get("text") or ""))))
-                                       for i in idx))
-        if g1 - g0 >= need:
-            gaps.append((g0, g1, sid))
-        k0, k1 = bisect.bisect_left(starts, g0), bisect.bisect_right(starts, g1)
-        room = sum(float(words[k]["e"]) - float(words[k]["s"]) for k in range(k0, k1) if k not in claimed)
-        if g1 - g0 >= need and room < need:
-            room += sum(r[1] - r[0] for r in voice.regions(g0, g1))
-        if g1 - g0 < need or room < need:
-            for i in idx:
-                out[i] = _no_time(lines[i], ABSENT, (g0, g1) if g1 > g0 else None)
-            for ui in uis:
-                state[ui] = ABSENT
-            continue
-        align(uis, g0, g1)
+    def nch(i):
+        return len(norm_chars(str(lines[i].get("text") or "")))
+
+    def need_of(idx):                                  # the fastest time the lines can be said in
+        return sum(max(0.3, SEC_PER_CHAR * nch(i)) for i in idx)
+
+    def got_of(idx):                                   # matched letters
+        return sum(round(out[i]["match"] * nch(i)) for i in idx if out[i]["aligned"])
+
+    def drop(idx, status, guess=None):
+        for i in idx:
+            claimed.difference_update(heard_g.pop(i, []))
+            out[i] = _no_time(lines[i], status, guess)
+
+    def judge(uis, g0, g1, before) -> list[int]:
+        """Units not found by 3-grams whose lines were just matched with the unused ASR words of
+        [g0, g1] (``before``: the words other lines had taken). Returns the units not found."""
+        found_here, rest = [], []
         for ui in uis:
-            got = sum(round(out[i]["match"] * len(norm_chars(str(lines[i].get("text") or ""))))
-                      for i in us[ui]["idx"] if out[i]["aligned"])
-            if got and got >= min(FOUND_BY_LINES, FOUND_BY_SHARE * us[ui]["chars"]):
+            got = got_of(us[ui]["idx"])
+            if not us[ui]["foreign"] and got and got >= min(FOUND_BY_LINES, FOUND_BY_SHARE * us[ui]["chars"]):
                 state[ui] = "found"
                 loc[ui]["how"] = "lines"
-                continue
+                found_here.append(ui)
+            else:
+                rest.append(ui)
+        if not rest:
+            return rest
+        idx = [i for ui in rest for i in us[ui]["idx"]]
+        # room: ROOM_MIN s of speech, or half the time the lines need when they are shorter
+        need = min(ROOM_MIN, 0.5 * need_of(idx))
+        taken = {k for ui in found_here for i in us[ui]["idx"] for k in heard_g.get(i, [])}
+        k0, k1 = bisect.bisect_left(starts, g0), bisect.bisect_right(starts, g1)
+        room = sum(float(words[k]["e"]) - float(words[k]["s"]) for k in range(k0, k1)
+                   if k not in before and k not in taken)
+        if g1 - g0 >= need and room < need:
+            spans = [(out[i]["start"], out[i]["end"]) for ui in found_here for i in us[ui]["idx"] if out[i]["aligned"]]
+            room += sum(r[1] - r[0] for r in voice.regions(g0, g1) if not any(s < r[1] and e > r[0] for s, e in spans))
+        guess = (g0, g1) if g1 > g0 else None
+        if g1 - g0 < need or room < need:
+            for ui in rest:
+                state[ui] = ABSENT
+            drop(idx, ABSENT, guess)
+            return rest
+        for ui in rest:
+            u = us[ui]
             state[ui] = "unknown"
+            if u["foreign"] or any(out[i]["aligned"] and out[i]["match"] >= KEEP_MATCH and
+                                   round(out[i]["match"] * nch(i)) >= KEEP_LETTERS for i in u["idx"]):
+                continue
             # lines outside every scene (before the first scene heading: a cover or cast page the
             # reader took for dialogue) are not kept on a guess either
-            if len(us[ui]["grams"]) >= LONG_SCENE_GRAMS or us[ui]["scene_id"] is None:
-                for i in us[ui]["idx"]:
-                    claimed.difference_update(heard_g.pop(i, []))
-                    _set_no_time(out[i], ABSENT, (g0, g1))
+            if len(u["grams"]) >= LONG_SCENE_GRAMS or u["scene_id"] is None:
+                state[ui] = ABSENT
+                drop(u["idx"], ABSENT, guess)
+        return rest
+
+    def edge(uis, g0, g1, tail):
+        """The scenes not found after the last (``tail``) / before the first found scene of a
+        partial window. Returns (units inside the window to ``judge``, their g0, g1, words
+        taken before), or None when every one is out of range."""
+        seq = uis if tail else uis[::-1]               # from the found scene outwards
+        cands, t = [], 0.0
+        for ui in seq:                                 # the ones that could start inside the window
+            if cands and t >= g1 - g0:
+                break
+            cands.append(ui)
+            t += need_of(us[ui]["idx"])
+        before = set(claimed)
+        align(cands if tail else cands[::-1], g0, g1)
+        far_q = None
+        for q, ui in enumerate(cands):
+            idx = us[ui]["idx"]
+            al = [i for i in idx if out[i]["aligned"]]
+            if al and not us[ui]["foreign"]:
+                part = idx[:idx.index(al[-1]) + 1] if tail else idx[idx.index(al[0]):]
+                if got_of(part) >= min(FOUND_BY_LINES, FOUND_BY_SHARE * sum(nch(i) for i in part)):
+                    far_q = q
+        if far_q is None:
+            for ui in uis:
+                state[ui] = OUT
+            drop([i for ui in uis for i in us[ui]["idx"]], OUT)
+            return None
+        e_ui = cands[far_q]
+        for ui in seq[far_q + 1:]:
+            state[ui] = OUT
+            drop(us[ui]["idx"], OUT)
+        # the lines of the edge scene beyond its last (first) matched line are left to ``_edge_out``
+        # (out of range when there are OUT_RUN_LINES of them or the window has no time for them)
+        al = [i for i in us[e_ui]["idx"] if out[i]["aligned"]]
+        state[e_ui] = "found"
+        loc[e_ui]["how"] = "lines"
+        inner = cands[:far_q] if tail else cands[:far_q][::-1]
+        if tail:
+            return inner, g0, min(out[i]["start"] for i in al) - 0.05, before
+        return inner, max(out[i]["end"] for i in al) + 0.05, g1, before
+
+    gaps, after = [], {}
+    for prev, nxt, uis in runs:
+        after.setdefault(prev, []).extend(uis)
+        lead, tail = prev is None and head_cut, nxt is None and tail_cut
+        g0 = edge_time(prev, False) + 0.05 if prev is not None else t_lo
+        g1 = edge_time(nxt, True) - 0.05 if nxt is not None else t_hi
+        if (lead and tail) or ((lead or tail) and g1 <= g0):
+            for ui in uis:
+                state[ui] = OUT
+            drop([i for ui in uis for i in us[ui]["idx"]], OUT)
+            continue
+        if lead or tail:
+            got = edge(uis, g0, g1, tail)
+            if got is None:
+                continue
+            uis, g0, g1, before = got
+        else:
+            before = set(claimed)
+            align(uis, g0, g1)
+        rest = judge(uis, g0, g1, before) if uis else []
+        if rest:
+            gaps.append((g0, g1, [(us[ui]["scene_id"], us[ui]["chars"]) for ui in rest]))
     # film order: found scenes by time, the scenes not found after the found scene before them
     film = list(after.get(None, []))
     for ui in order:
         film.append(ui)
         film += after.get(ui, [])
-    seq = [out[i] for ui in film for i in us[ui]["idx"] if out[i].get("status") not in NO_TIME]
-    for q in _in_order(seq):
-        _unalign(seq[q])
-    gone = {id(r) for r in seq if not r["aligned"]}
+    seq = [(out[i], ui) for ui in film for i in us[ui]["idx"] if out[i].get("status") not in NO_TIME]
+    recs = [r for r, _ in seq]
+    for q in _in_order(recs):
+        _unalign(recs[q])
+    gone = {id(r) for r in recs if not r["aligned"]}
     for i in list(heard_g):
         if id(out[i]) in gone:
             del heard_g[i]
-    _edge_out(seq, t_lo, t_hi, head_cut, tail_cut)
-    seq = [r for r in seq if r.get("status") not in NO_TIME]
-    _place_unaligned(voice, seq, t_lo, t_hi)
-    for r in seq:
+    _edge_out(recs, t_lo, t_hi, head_cut, tail_cut)
+    seq = [(r, ui) for r, ui in seq if r.get("status") not in NO_TIME]
+    _place_scenes(voice, [r for r, _ in seq], [ui for _, ui in seq], t_lo, t_hi)
+    for r, _ in seq:
         r["status"] = OK if r["aligned"] else UNHEARD
     info = [{"scene_id": u["scene_id"], "idx": u["idx"], "state": state.get(ui, ABSENT),
              "score": loc[ui].get("score", 0.0), "how": loc[ui].get("how"), "a": loc[ui].get("a"),
-             "b": loc[ui].get("b")} for ui, u in enumerate(us)]
+             "b": loc[ui].get("b"), "foreign": u["foreign"]} for ui, u in enumerate(us)]
     return out, info, gaps
+
+
+def _place_scenes(voice: Voice, seq: list[dict], unit: list[int], t_lo: float, t_hi: float) -> None:
+    """``_place_unaligned`` for a scene-first alignment (``unit``: the scene unit of each line).
+    In a run of lines not aligned, the lines of the scene of the aligned line before the run
+    stay within SCENE_SEC_PER_CHAR s per letter (plus SCENE_SLACK s) after it, and those of the
+    scene of the aligned line after the run within as much before it; the other lines of the run
+    (scenes kept but not found) take the time between. Without this the first lines of a found
+    scene went anywhere up to the scene before, which may be minutes away (review B1: Sunny, 240 s
+    over two absent scenes; contract 2: unheard = a time inside the scene)."""
+    def allow(rs):
+        return SCENE_SLACK + SCENE_SEC_PER_CHAR * sum(max(len(norm_chars(str(r.get("text") or ""))), 1) for r in rs)
+
+    for i, j, a, b in list(_unaligned_runs(seq, t_lo, t_hi)):
+        u_prev = unit[i - 1] if i > 0 else None
+        u_next = unit[j] if j < len(seq) else None
+        t = i
+        while u_prev is not None and t < j and unit[t] == u_prev:
+            t += 1
+        m = j
+        while u_next is not None and m > t and unit[m - 1] == u_next:
+            m -= 1
+        at = allow(seq[i:t]) if t > i else 0.0
+        am = allow(seq[m:j]) if j > m else 0.0
+        if u_prev == u_next or at + am >= b - a:       # inside one scene, or no time to spare
+            _place_run(voice, seq[i:j], a, b)
+            continue
+        if t > i:
+            _place_run(voice, seq[i:t], a, a + at)
+        if j > m:
+            _place_run(voice, seq[m:j], b - am, b)
+        if m > t:
+            _place_run(voice, seq[t:m], a + at, b - am)
 
 
 def _scene_rows(doc: dict, out: list[dict], info: list[dict] | None) -> list[dict]:
     """scenes.json rows for the scenes of the script. Without scene-first alignment (``info``
-    None) a scene is found when one of its lines was aligned. A scene without dialogue is
-    ``unknown`` with the time between its neighbours (``out_of_range`` beside such scenes)."""
+    None) a scene is found when one of its lines was aligned. ``start``/``end``: the matched
+    lines (the placed ones when none was matched); ``span``: every line with a time, when the
+    unheard lines reach farther. A scene without dialogue is ``unknown`` with the time between
+    its neighbours (``out_of_range`` beside such scenes). ``note`` "foreign": a scene in another
+    language (``scenes.units``), placed on voice."""
     by_sid: dict = {}
     for i, ln in enumerate(out):
         by_sid.setdefault(ln.get("scene_id"), []).append(i)
@@ -684,14 +834,21 @@ def _scene_rows(doc: dict, out: list[dict], info: list[dict] | None) -> list[dic
     for sc in doc.get("scenes") or []:
         idx = by_sid.get(sc.get("id"), [])
         timed = [out[i] for i in idx if out[i].get("start") is not None]
+        heard = [r for r in timed if r.get("aligned")] or timed
         row = {"id": sc.get("id"), "number": sc.get("number"), "heading": sc.get("heading"),
-               "start": round(min(r["start"] for r in timed), 3) if timed else None,
-               "end": round(max(r["end"] for r in timed), 3) if timed else None,
+               "start": round(min(r["start"] for r in heard), 3) if heard else None,
+               "end": round(max(r["end"] for r in heard), 3) if heard else None,
                "status": None, "score": None, "how": None, "lines": [out[i]["id"] for i in idx]}
+        if timed:
+            span = [round(min(r["start"] for r in timed), 3), round(max(r["end"] for r in timed), 3)]
+            if span != [row["start"], row["end"]]:
+                row["span"] = span
         ui = unit_by_sid.get(sc.get("id"))
         if ui:
             best = min(ui, key=lambda u: rank[u["state"]])
             row.update(status=best["state"], score=max(u["score"] for u in ui), how=best["how"])
+            if any(u.get("foreign") for u in ui):
+                row["note"] = "foreign"
         elif idx:
             row["status"] = "found" if any(out[i].get("aligned") for i in idx) else \
                 OUT if all(out[i].get("status") == OUT for i in idx) else "unknown"
@@ -761,8 +918,12 @@ def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str
     if not s_c or not h_c:
         return [], []
     chunks: list[dict] = []
+    s2h: list = [None] * len(s_c)
+    h2s: list = [None] * len(h_c)
     for tag, i1, i2, j1, j2 in SequenceMatcher(None, s_c, h_c, autojunk=False).get_opcodes():
         if tag == "equal":
+            for d in range(i2 - i1):
+                s2h[i1 + d], h2s[j1 + d] = j1 + d, i1 + d
             continue
         sws, hws = set(s_o[i1:i2]), set(h_o[j1:j2])
         if not sws and 0 < i1 < len(s_c) and s_o[i1 - 1] == s_o[i1]:
@@ -779,12 +940,22 @@ def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str
             last["sub"] += c["sub"]
         else:
             chunks.append(c)
+    def widen(ss: set, hs: set) -> tuple[set, set]:
+        """Whole words on both sides: the script words whose letters the heard words of the
+        stretch also hold, and back, until nothing is added (review B1: '같아.' shown against
+        '있었을거야.' without the script's '있었을거')."""
+        while True:
+            hs2 = hs | {h_o[s2h[k]] for k in range(len(s_c)) if s_o[k] in ss and s2h[k] is not None}
+            ss2 = ss | {s_o[h2s[k]] for k in range(len(h_c)) if h_o[k] in hs2 and h2s[k] is not None}
+            if ss2 == ss and hs2 == hs:
+                return ss, hs
+            ss, hs = ss2, hs2
+
     out, hints = [], []
     for c in chunks:
         s_txt = " ".join(sw[i] for i in sorted(c["s"]))
         h_txt = " ".join(heard[j] for j in sorted(c["h"]))
-        row = {"kind": "word", "script": s_txt, "heard": h_txt,
-               "at": [min(c["s"]), max(c["s"]) + 1] if c["s"] else None}
+        row = {"kind": "word"}
         s_key, h_key = "".join(norm_chars(s_txt)), "".join(norm_chars(h_txt))
         if any(not a or not b for a, b in c["sub"]) and not (s_key and h_key):
             alike = True                       # a short word not heard / heard in addition
@@ -803,9 +974,25 @@ def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str
             if all(_spelling_like(a, b) for a, b in c["sub"]) and len(s_key) == len(h_key) and \
                     not any(k in s_key or k in h_key for k in keys):
                 row["spelling"] = True
-                if "spelling" not in hints:
-                    hints.append("spelling")
+        # the kind is judged on the stretch itself; what is shown is widened to whole words
+        ss, hs = widen(set(c["s"]), set(c["h"]))
+        if out and (ss & out[-1]["_s"] or hs & out[-1]["_h"]):       # widened into the stretch before
+            last = out[-1]
+            rank = {"word": 0, "number": 1, "minor": 2}
+            last["kind"] = min(last["kind"], row["kind"], key=rank.get)
+            if not (last.get("spelling") and row.get("spelling")):
+                last.pop("spelling", None)
+            last["_s"] |= ss
+            last["_h"] |= hs
+            continue
+        row.update(_s=ss, _h=hs)
         out.append(row)
+    for row in out:
+        ss, hs = row.pop("_s"), row.pop("_h")
+        row.update(script=" ".join(sw[i] for i in sorted(ss)), heard=" ".join(heard[j] for j in sorted(hs)),
+                   at=[min(ss), max(ss) + 1] if ss else None)
+        if row.get("spelling") and "spelling" not in hints:
+            hints.append("spelling")
     return out, hints
 
 
@@ -892,16 +1079,43 @@ def _finish(out: list[dict], words: list[dict], heard_g: dict, names=()) -> list
     return out
 
 
+def _gap_scene(gaps, m: float):
+    """The scene not found whose place (``gaps``, from ``_align_scenes``) holds time ``m``: with
+    several scenes in one place, the one at that share of their letters. None when there is none."""
+    for g0, g1, scs in gaps:
+        if g0 <= m <= g1:
+            named = [(s, n) for s, n in scs if s]
+            if not named:
+                return None
+            tot = sum(n for _, n in named)
+            pos, acc = (m - g0) / max(g1 - g0, 1e-6) * tot, 0
+            for s, n in named:
+                acc += n
+                if pos <= acc:
+                    return s
+            return named[-1][0]
+    return None
+
+
 def _extras(out: list[dict], words: list[dict], heard_g: dict, hotwords, gaps=()) -> list[dict]:
     """ASR words no aligned line uses, grouped where they follow each other (gap < EXTRA_GAP s,
-    or a sentence end). Dropped: one-word groups that are an interjection or a vocalisation and
-    groups that only repeat the ASR hint names (``asr.hint_echo``)."""
+    or a sentence end). Dropped: groups made only of interjections and vocalisations, and groups
+    that only repeat the ASR hint names (``asr.hint_echo``). A group of EXTRA_SHORT letters or
+    fewer is marked ``short``. Words over a foreign line (placed on voice) are that line's."""
     from .asr import hint_echo
     used: set[int] = set()
     for i, ks in heard_g.items():
         if out[i].get("aligned") and out[i].get("start") is not None:
             used.update(ks)
     spans = [(r["start"], r["end"]) for r in out if r.get("aligned") and r.get("start") is not None]
+    run: list = []                                     # foreign lines in a row: the speech between is theirs
+    for r in out + [{}]:
+        if r.get("language") and r.get("start") is not None and (not run or r.get("scene_id") == run[0].get("scene_id")):
+            run.append(r)
+            continue
+        if run:
+            spans.append((min(x["start"] for x in run), max(x["end"] for x in run)))
+        run = [r] if r.get("language") and r.get("start") is not None else []
     spans.sort()
     s_starts = [s for s, _ in spans]
 
@@ -930,20 +1144,22 @@ def _extras(out: list[dict], words: list[dict], heard_g: dict, hotwords, gaps=()
     for g in groups:
         ws = [words[k] for k in g]
         toks = [str(w["w"]).strip() for w in ws]
-        if len(ws) == 1 and ("".join(norm_chars(toks[0])) in INTERJECTIONS or is_vocalisation(toks[0])
-                             or len(norm_chars(toks[0])) < 1):
+        keys = ["".join(norm_chars(t)) for t in toks]
+        if all(not k or k in INTERJECTIONS or is_vocalisation(k) for k in keys):
             continue
         if hotwords and all(hint_echo(toks, hotwords)):
             continue
         s, e = float(ws[0]["s"]), float(ws[-1]["e"])
         m = (s + e) / 2
-        sid = next((g_sid for g0, g1, g_sid in gaps if g0 <= m <= g1), "none")
-        if sid == "none":
+        sid = _gap_scene(gaps, m)
+        if sid is None:
             near = min(timed, key=lambda t: 0.0 if t[0] <= m <= t[1] else min(abs(m - t[0]), abs(m - t[1])),
                        default=None)
             sid = near[2] if near else None
         row = {"id": f"X{len(extras) + 1:04d}", "start": round(s, 3), "end": round(e, 3), "text": " ".join(toks),
                "words": [{"w": str(w["w"]).strip(), "s": w["s"], "e": w["e"]} for w in ws], "scene_id": sid}
+        if sum(len(k) for k in keys) <= EXTRA_SHORT:
+            row["short"] = True
         ov = [t[3] for t in timed if t[4] == UNHEARD and t[0] < e and t[1] > s]
         if ov:
             row["overlaps"] = ov

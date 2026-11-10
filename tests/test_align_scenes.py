@@ -207,6 +207,117 @@ def test_partial_window_puts_other_scenes_out_of_range(tmp_path, doc):
     assert by["SC001"]["status"] == by["SC030"]["status"] == "out_of_range"
 
 
+def test_partial_window_edge_inside_a_scene(tmp_path, doc):
+    """review B1: a window that ends one line into a long scene (or starts one line before its
+    end) keeps that heard line; the rest of the scene is out of range and nothing is an extra."""
+    words, vad, truth, t_end = speak(film_of(doc))
+    longs = [k for k in range(2, 30) if len(scene_lines(doc, k)) >= 8][:3]
+    assert len(longs) == 3
+    for k in longs:
+        ls = [ln["id"] for ln in scene_lines(doc, k)]
+        for side, t0, t1, inside in (("tail", 0.0, truth[ls[0]][1] + 0.3, ls[:1]),
+                                     ("head", truth[ls[-1]][0] - 0.3, None, ls[-1:])):
+            w = tmp_path / f"{side}{k}"
+            w.mkdir()
+            d, sc, _ = run(w, doc, words, vad, t_end, t0, t1)
+            by = {ln["id"]: ln for ln in d["lines"]}
+            for i in ls:
+                if i in inside:
+                    assert by[i]["status"] == "ok" and abs(by[i]["start"] - truth[i][0]) <= 0.5, (side, k, by[i])
+                else:
+                    assert by[i]["status"] == "out_of_range" and by[i]["start"] is None, (side, k, by[i])
+            assert d["extras"] == [], (side, k)
+            assert next(s for s in sc if s["id"] == f"SC{k:03d}")["status"] == "found"
+
+
+@pytest.mark.parametrize("cut", [{6}, {8}, {6, 8}])
+def test_short_scene_beside_a_cut_scene_is_found(tmp_path, doc, cut):
+    """review B1 (감사 1-03): scene 7 is one two-letter line; heard beside a cut scene it was absent
+    because the room was reckoned for the cut scene's lines too."""
+    words, vad, truth, t_end = speak(film_of(doc, cut=cut))
+    d, sc, _ = run(tmp_path, doc, words, vad, t_end)
+    ln = next(x for x in d["lines"] if x["scene_id"] == "SC007")
+    assert ln["status"] == "ok" and abs(ln["start"] - truth[ln["id"]][0]) <= 0.3
+    by = {s["id"]: s for s in sc}
+    assert by["SC007"]["status"] == "found"
+    assert all(by[f"SC{k:03d}"]["status"] == "absent" and by[f"SC{k:03d}"]["guess"] for k in cut)
+    assert d["extras"] == []
+
+
+def test_scene_in_another_language_is_placed_on_voice(tmp_path, doc):
+    """review B1 (brief 7): a whole scene marked foreign (script in Korean, sound in English) cannot
+    be found by its letters; it is placed on voice (ok, note foreign), and what is said there is
+    its lines', not speech in no script line. Cut, it is absent."""
+    rng = random.Random(3)
+    eng = ["hello", "there", "my", "friend", "where", "is", "the", "station", "please", "drive", "fast", "now",
+           "money", "camera", "road", "home", "tonight", "soldier", "people", "street"]
+    d2 = {**doc, "lines": [dict(ln) for ln in doc["lines"]]}
+    said = {}
+    for ln in d2["lines"]:
+        said[ln["id"]] = ln["text"]
+        if ln["scene_id"] in ("SC005", "SC020"):
+            ln["language"] = "영어"
+            said[ln["id"]] = " ".join(rng.choice(eng) for _ in range(len(ln["text"].split()) + 1))
+    foreign = {ln["id"] for ln in d2["lines"] if ln["language"]}
+    words, vad, truth, t_end = speak([(i, said[i], sc) for i, _, sc in film_of(d2)])
+    (tmp_path / "a").mkdir()
+    d, sc, _ = run(tmp_path / "a", d2, words, vad, t_end)
+    rows = [ln for ln in d["lines"] if ln["id"] in foreign]
+    assert len(rows) >= 6
+    assert all(r["status"] == "ok" and r["note"] == "foreign" and r["timing"] in ("voice", "even") and "diff" not in r
+               for r in rows)
+    assert sum(abs(r["start"] - truth[r["id"]][0]) <= 1.0 for r in rows) >= 0.8 * len(rows)
+    by = {s["id"]: s for s in sc}
+    assert by["SC005"]["status"] == by["SC020"]["status"] == "unknown"
+    assert by["SC005"]["note"] == by["SC020"]["note"] == "foreign"
+    assert d["extras"] == []
+    assert placed(d["lines"], {k: v for k, v in truth.items() if k not in foreign}) >= 0.99
+    # the same script on a film without scene 20: its lines are not there
+    words, vad, truth, t_end = speak([(i, said[i], sc) for i, _, sc in film_of(d2, cut={20})])
+    (tmp_path / "b").mkdir()
+    d, sc, _ = run(tmp_path / "b", d2, words, vad, t_end)
+    assert all(r["status"] == "absent" for r in d["lines"] if r["scene_id"] == "SC020")
+    assert all(r["status"] == "ok" and r["start"] is not None for r in d["lines"] if r["scene_id"] == "SC005")
+
+
+def test_unheard_lines_stay_near_their_scene(tmp_path, doc):
+    """review B1: scenes 9 and 10 are cut and other speech is in their place; the first two lines
+    of scene 11 are not heard. With no voice scores (an ASR of the whole film only) they were
+    spread from the end of scene 8 on; they stay just before scene 11's first matched line."""
+    rng = random.Random(7)
+    used = set(" ".join(ln["text"] for ln in doc["lines"]).split())
+    other = [w for w in _vocab(rng, 200, 3, 4) if w not in used]
+    film = []
+    for k in range(1, 31):
+        if k in (9, 10):
+            film += [(f"N{k}_{n}", " ".join(rng.sample(other, 4)), k) for n in range(10)]
+        else:
+            film += [(ln["id"], ln["text"], k) for ln in scene_lines(doc, k)]
+    words, _, truth, t_end = speak(film)
+    s11 = [ln["id"] for ln in scene_lines(doc, 11)]
+    quiet = s11[:2]
+    words = [w for w in words if not any(truth[i][0] - 0.01 <= w["s"] <= truth[i][1] for i in quiet)]
+    d, sc, _ = run(tmp_path, doc, words, [], t_end)
+    by = {ln["id"]: ln for ln in d["lines"]}
+    first = by[s11[2]]
+    assert first["status"] == "ok"
+    end8 = max(by[ln["id"]]["end"] for ln in scene_lines(doc, 8))
+    assert first["start"] - end8 > 60.0
+    for i in quiet:
+        assert by[i]["status"] == "unheard" and first["start"] - 30.0 < by[i]["start"] < first["start"]
+    letters = sum(len(align.norm_chars(by[i]["text"])) for i in quiet)
+    assert by[quiet[0]]["start"] >= first["start"] - (align.SCENE_SLACK + align.SCENE_SEC_PER_CHAR * letters) - 0.1
+    rows = {s["id"]: s for s in sc}
+    assert rows["SC011"]["start"] == first["start"] and rows["SC011"]["span"][0] == by[quiet[0]]["start"]
+    for k in (9, 10):                                   # all their lines absent: so is the scene, with its place
+        assert all(by[ln["id"]]["status"] == "absent" for ln in scene_lines(doc, k))
+        assert rows[f"SC{k:03d}"]["status"] == "absent" and rows[f"SC{k:03d}"]["guess"]
+    # the other speech in their place is kept (one group per stretch without a pause), each under
+    # one of the two scenes by its share of their letters (it was None with two scenes in one place)
+    there = [x for x in d["extras"] if end8 < x["start"] < first["start"]]
+    assert [x["scene_id"] for x in there] == ["SC009", "SC010"]
+
+
 def test_changed_words_differ_and_one_letter_is_a_hint(tmp_path, doc):
     rng = random.Random(4)
     long_lines = [ln for ln in doc["lines"] if len(ln["text"].split()) >= 4]
@@ -323,10 +434,11 @@ def test_extras_leave_out_interjections_and_hint_echoes(tmp_path, doc):
     film.insert(3, ("N1", "네", 1))
     film.insert(6, ("N2", "가람 나래 다솜 가람", 1))       # the hint names repeated
     film.insert(9, ("N3", "타파하 코토포 무부수", 1))       # a real ad-lib
+    film.insert(12, ("N4", "아 네", 1))                     # interjections only (review B1)
+    film.insert(15, ("N5", "쿄쿄", 1))                      # two letters: kept, marked short
     words, vad, truth, t_end = speak(film)
     d, _, _ = run(tmp_path, small, words, vad, t_end)
-    texts = [x["text"] for x in d["extras"]]
-    assert texts == ["타파하 코토포 무부수"]
+    assert [(x["text"], x.get("short", False)) for x in d["extras"]] == [("타파하 코토포 무부수", False), ("쿄쿄", True)]
 
 
 def test_voice_scores_are_read_once(tmp_path, doc, monkeypatch):
@@ -371,6 +483,11 @@ def test_compare_words():
     assert align.compare("3층이야", ["삼층이야"])[0][0]["kind"] == "number"
     assert align.compare("모비 가자", ["모키다", "가자"])[0][0]["kind"] == "word"      # a letter became two
     assert align.compare("아무 말", []) == ([], [])
+    # what is shown is whole words on both sides; the kind is judged on the stretch (review B1)
+    diff, _ = align.compare("그건 있었을거 같아.", ["그건", "있었을거야."])
+    assert [(x["kind"], x["script"], x["heard"], x["at"]) for x in diff] == [("word", "있었을거 같아.", "있었을거야.", [1, 3])]
+    diff, _ = align.compare("빨리 기다려야 하잖아요.", ["빨리", "기다려야죠."])
+    assert [(x["script"], x["heard"], x["at"]) for x in diff] == [("기다려야 하잖아요.", "기다려야죠.", [1, 3])]
 
 
 def test_locate_without_order(doc):
