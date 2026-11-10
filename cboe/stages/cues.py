@@ -24,12 +24,19 @@ OUT = "cues.json"
 VERSION = 1
 
 
+def span(p) -> tuple[float, float | None]:
+    """The processed stretch (project t0, t1; t1 missing: the video's end, if known)."""
+    meta = getattr(p, "meta", None) or {}
+    t1 = meta.get("t1") if meta.get("t1") is not None else meta.get("duration")
+    return float(meta.get("t0") or 0.0), (float(t1) if t1 is not None else None)
+
+
 def load(p) -> list[dict]:
     """The cues of a work folder, from script.json, dialogue.json and scenes.json (made now)."""
     doc = read_json(p.path("script.json"), {}) or {}
     lines = (read_json(p.path("dialogue.json"), {}) or {}).get("lines", [])
     scenes = (read_json(p.path("scenes.json"), {}) or {}).get("scenes")
-    return cue_mod.build(doc, lines, scenes)
+    return cue_mod.build(doc, lines, scenes, span(p))
 
 
 def run(p, cfg: dict) -> dict:

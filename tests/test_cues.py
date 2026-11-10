@@ -299,6 +299,136 @@ def test_cues_between_the_same_lines_share_the_window():
     assert a["window"] == b["window"] == [2.0, 10.0] and (a["guess"], b["guess"]) == (2.0, 6.0)
 
 
+def _scene_first(extra=False):
+    """A script and the align output the way the scene-first alignment writes it: a found
+    scene's start / end are its matched lines' range (감사 이음매: 0-second windows).
+    SC001 found (L0001 45–47 s, L0002 50–52 s), SC002 not in the video, SC003 no dialogue,
+    SC004 found (L0004 80–82 s), SC005 at the end of the processed stretch (L0005 90–92 s, then
+    L0006–L0008 out of it), SC006 out of it."""
+    d = Doc()
+    s1 = d.scene(1)
+    d.act(s1, "벽시계가 째깍째깍 소리를 낸다.")            # C0001: before the first line of the first scene
+    d.act(s1, "자명종이 요란하게 울린다.")                 # C0002
+    d.say(s1, "벌써 아침이야?")
+    d.say(s1, "얼른 일어나.", speaker="나래")
+    d.act(s1, "쾅! 방문이 닫힌다.")                       # C0003: after the last line
+    if extra:
+        d.act(s1, "덜컹! 창문이 흔들린다.")
+    s2 = d.scene(2, "지어낸 부엌")
+    d.act(s2, "냄비가 끓는 소리.")                        # C0004: a scene the video does not have
+    d.say(s2, "밥 먹자.")
+    s3 = d.scene(3, "지어낸 계단")
+    d.act(s3, "멀리서 개 짖는 소리가 들려온다.")           # C0005: a scene without dialogue
+    s4 = d.scene(4, "지어낸 교실")
+    d.act(s4, "땡땡땡 종이 울린다.")                      # C0006: before the first line, after a gap
+    d.say(s4, "자리에 앉아.")
+    s5 = d.scene(5, "지어낸 운동장")
+    d.say(s5, "공 이리 줘!")
+    d.act(s5, "휘익- 호루라기 소리.")                     # C0007: the next lines are out of the stretch
+    d.say(s5, "반칙이야.", speaker="나래")
+    d.say(s5, "아니거든.")
+    d.act(s5, "쿵! 공이 골대에 맞는다.")                  # C0008: after lines out of the stretch
+    d.say(s5, "아깝다.", speaker="나래")
+    s6 = d.scene(6, "지어낸 버스")
+    d.act(s6, "빵빵 경적이 울린다.")                      # C0009: a scene out of the stretch
+    d.say(s6, "다 왔다.")
+    t = {"L0001": (45.0, 47.0), "L0002": (50.0, 52.0), "L0004": (80.0, 82.0), "L0005": (90.0, 92.0)}
+    lines = []
+    for ln in d.lines:
+        s, e = t.get(ln["id"], (None, None))
+        status = "ok" if s is not None else "absent" if ln["scene_id"] == "SC002" else "out_of_range"
+        lines.append({"id": ln["id"], "scene_id": ln["scene_id"], "start": s, "end": e, "timing": "asr",
+                      "status": status})
+    scenes = [{"id": "SC001", "start": 45.0, "end": 52.0, "status": "found"},
+              {"id": "SC002", "start": None, "end": None, "status": "absent"},
+              {"id": "SC003", "start": 52.0, "end": 80.0, "status": "unknown"},
+              {"id": "SC004", "start": 80.0, "end": 82.0, "status": "found"},
+              {"id": "SC005", "start": 90.0, "end": 92.0, "status": "found"},
+              {"id": "SC006", "start": None, "end": None, "status": "out_of_range"}]
+    return d, lines, scenes
+
+
+def test_a_window_beside_a_scene_edge_reaches_the_lines_of_the_next_scene():
+    d, lines, scenes = _scene_first()
+    w = {c["id"]: c for c in cues.build(d.doc(), lines, scenes, (0.0, 100.0))}
+    assert [w[f"C{k:04d}"]["type"] for k in range(1, 10)] == ["sfx"] * 9
+    # before the first line of the film: from the start of the processed stretch
+    assert w["C0001"]["window"] == w["C0002"]["window"] == [0.0, 45.0]
+    assert w["C0001"]["window_by"] == ["range", "line"] and w["C0001"]["window_lines"] == [None, "L0001"]
+    # after the last line of a scene: to the next timed line, past a scene the video does not have
+    assert w["C0003"]["window"] == [52.0, 80.0] and w["C0003"]["window_by"] == ["line", "other_scene"]
+    assert w["C0003"]["window_lines"] == ["L0002", "L0004"]
+    assert w["C0004"]["window"] is None                                    # its scene is not in the video
+    assert w["C0005"]["window"] == [52.0, 80.0] and w["C0005"]["window_by"] == ["scene", "scene"]
+    assert w["C0005"]["window_estimated"]                                  # where that scene lies is a guess
+    assert w["C0006"]["window"] == [52.0, 80.0] and w["C0006"]["window_by"] == ["other_scene", "line"]
+    assert not w["C0006"]["window_estimated"]
+    # lines out of the stretch: before them the cue may still be in it, after them it is not
+    assert w["C0007"]["window"] == [92.0, 100.0] and w["C0007"]["window_by"] == ["line", "range"]
+    assert w["C0008"]["window"] is None and w["C0009"]["window"] is None
+    assert not any(c["window"] and c["window"][0] == c["window"][1] for c in w.values())
+    # the stretch unknown: no end there
+    w = {c["id"]: c["window"] for c in cues.build(d.doc(), lines, scenes)}
+    assert w["C0001"] is None and w["C0007"] is None and w["C0003"] == [52.0, 80.0]
+    # the stage reads the stretch from project.json
+    assert cue_stage.span(type("P", (), {"meta": {"t0": 5.0, "t1": None, "duration": 70.0}})()) == (5.0, 70.0)
+
+
+def test_guessed_times_in_a_window_that_reaches_into_another_scene():
+    d, lines, scenes = _scene_first()
+    w = {c["id"]: c for c in cues.build(d.doc(), lines, scenes, (0.0, 100.0))}
+    # before a scene's first line: spread in script order, none on the far end
+    assert (w["C0001"]["guess"], w["C0002"]["guess"]) == (15.0, 30.0)
+    assert w["C0006"]["guess"] == 66.0
+    # after a scene's last line: right after it
+    assert w["C0003"]["guess"] == 52.0 and w["C0007"]["guess"] == 92.0
+    d, lines, scenes = _scene_first(extra=True)                # a second cue after the same last line
+    got = [c for c in cues.build(d.doc(), lines, scenes, (0.0, 100.0)) if c["scene_id"] == "SC001"
+           and c["window"] == [52.0, 80.0]]
+    assert [c["guess"] for c in got] == [52.0, 52.0 + cues.GUESS_STEP_S]
+
+
+def test_wide_windows_take_the_named_kind_and_the_music_near_the_scene():
+    d, lines, scenes = _scene_first()
+    built = {c["id"]: c for c in cues.build(d.doc(), lines, scenes, (0.0, 100.0))}
+    clock, alarm = built["C0001"], built["C0002"]
+    tick = _sound("S0001", 12.0, "Tick", "째깍")
+    ring = _sound("S0002", 15.0, "Alarm clock", "따르릉")
+    bang = _sound("S0003", 20.0, "Generic impact sounds", "부딪히는", confident=False, unknown=True)
+    got = cues.match_sounds([clock, alarm], [tick, ring, bang])
+    assert {k: v["id"] for k, v in got.items()} == {"S0001": "C0001", "S0002": "C0002"}
+    # a 30-second window: no unnamed sound
+    assert cues.match_sounds([clock], [bang]) == {}
+    # a candidate whose best guess is the kind goes before one that only has it as a runner-up
+    cry = {"id": "C0001", "type": "sfx", "window": [10.0, 14.0], "families": ["crying"], "keywords": []}
+    wind = _sound("S0004", 11.0, "Wind", "바람", confident=False)
+    wind["label"]["competing"] = [{"class": "Crying, sobbing"}]
+    sob = _sound("S0005", 12.5, "Crying, sobbing", "흐느낌", confident=False, unknown=True)
+    assert list(cues.match_sounds([cry], [wind, sob])) == ["S0005"]
+    assert list(cues.match_sounds([cry], [wind])) == ["S0004"]
+    # music before the first line of the film: the music playing near that line, not the opening titles'
+    d2 = Doc()
+    s = d2.scene(1)
+    d2.act(s, "라디오에서 잔잔한 음악이 흘러나온다.")
+    d2.say(s, "좋은 아침.")
+    song = cues.build(d2.doc(), [{"id": "L0001", "scene_id": s, "start": 60.0, "end": 62.0, "timing": "asr",
+                                  "status": "ok"}], [{"id": s, "start": 60.0, "end": 62.0, "status": "found"}],
+                      (0.0, 100.0))[0]
+    assert song["type"] == "music" and song["window"] == [0.0, 60.0]
+
+    def mus(iid, onset, seg, event="start"):
+        return {"id": iid, "onset": onset, "music": {"event": event, "segment": seg}}
+
+    titles, later, inner = mus("M0001", 2.0, [2.0, 20.0]), mus("M0002", 40.0, [40.0, 70.0]), \
+        mus("M0003", 52.0, [40.0, 70.0], "cue")
+    hits, _ = cues.match_music([song], [titles, later, inner])
+    assert list(hits) == ["M0002"]
+    # a narrow window still takes the first music that starts in it
+    hits, _ = cues.match_music([{**song, "window": [38.0, 60.0], "window_by": ["line", "line"]}],
+                               [titles, later, inner])
+    assert list(hits) == ["M0002"]
+
+
 def test_scene_of_a_time():
     starts = cues.scene_starts(_dialogue(), SCENES)
     assert starts == [(5.0, "SC001"), (30.0, "SC002")]

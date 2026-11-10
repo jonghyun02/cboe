@@ -784,20 +784,49 @@ def scene_times(scenes) -> dict[str, dict]:
     return out
 
 
-def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None) -> list[dict]:
+EDGE_TOL_S = 0.05         # a scene start / end this close to its own first / last line says nothing more
+NO_SCENE_TIME = ("absent", "out_of_range")         # scenes.json: the scene is not in the processed video
+FAR_ENDS = ("other_scene", "range")                # window ends outside the cue's own scene
+GUESS_STEP_S = 5.0         # guessed onsets of sounds written after a scene's last line, one after another
+
+
+def _far_end(cue: dict) -> int:
+    """-1: only the window's start lies outside the cue's own scene (``window_by``), +1: only its
+    end, 0: neither or both."""
+    by = cue.get("window_by") or [None, None]
+    far = [b in FAR_ENDS for b in by]
+    return -1 if far[0] and not far[1] else 1 if far[1] and not far[0] else 0
+
+
+def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None, span=None) -> list[dict]:
     """Add ``window`` [lo, hi] (s) to every cue, or None: from the end of the nearest dialogue
-    line before it in the same scene that has a time to the start of the nearest one after it;
-    without such a line the scene start / end (scenes.json). A speaker's own sound: its line.
+    line before it that has a time to the start of the nearest one after it, in script order.
+    A speaker's own sound: its line.
+
+    Each end looks in the cue's own scene first ('line'). Without a timed line there, a scene
+    edge from scenes.json that lies outside the scene's own lines ends it ('scene': a scene
+    without dialogue holds the time between its neighbours). The scene-first alignment writes a
+    found scene's start / end as the range of its matched lines, so a scene's first or last
+    line says nothing more and the end goes on to the nearest timed line of another scene
+    ('other_scene'), else to the edge of the processed stretch ``span`` = (t0, t1) ('range').
+    A cue whose way to a timed line passes a line out of the processed stretch (align status
+    out_of_range) is out of it too: no window. A cue of a scene that is not in the video
+    (scenes.json absent / out_of_range) gets none either; nor does a cue of a scene with no
+    timed line and no scenes.json time (it is not known to be in the video).
+
     A dialogue.json line counts only when it carries the same ``scene_id`` as the script line
     (an older dialogue.json without it gives no window). ``window_by``: what each end came from
-    ('line' | 'scene'); ``window_lines``: [line before, line after] used; ``window_estimated``:
-    an end rests on a line whose time is a guess (align ``timing`` voice / even, ``status``
-    unheard) or on a scene whose place was not found for sure (status other than 'found')."""
+    ('line' | 'scene' | 'other_scene' | 'range'); ``window_lines``: [line before, line after]
+    used; ``window_estimated``: an end rests on a line whose time is a guess (align ``timing``
+    voice / even, ``status`` unheard) or on a scene whose place was not found for sure (status
+    other than 'found')."""
     doc = doc or {}
     timed = {ln.get("id"): ln for ln in lines or [] if has_time(ln)}
+    status = {ln.get("id"): ln.get("status") for ln in lines or []}
     script_lines = doc.get("lines") or []
     scene_of = {ln.get("id"): ln.get("scene_id") for ln in script_lines}
     st = scene_times(scenes)
+    edge = tuple(span) if span else (None, None)
 
     def usable(lid):
         ln = timed.get(lid)
@@ -805,11 +834,56 @@ def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None) -> list
             return None
         return ln
 
-    # the lines of each scene in document order
-    order: dict[str | None, list[str]] = {}
-    for ln in script_lines:
-        order.setdefault(ln.get("scene_id"), []).append(ln.get("id"))
-    rank = {lid: k for ids in order.values() for k, lid in enumerate(ids)}
+    # the dialogue lines in document order (by element; a script without elements: its lines)
+    elements = doc.get("elements") or []
+    el_pos = {e.get("id"): i for i, e in enumerate(elements)}
+    seq = [(i, e["line_id"]) for i, e in enumerate(elements) if e.get("type") == "dialogue" and e.get("line_id")]
+    if not seq:
+        seq = [(k, ln.get("id")) for k, ln in enumerate(script_lines)]
+    at = {lid: k for k, (_, lid) in enumerate(seq)}
+    idx = [i for i, _ in seq]
+    own: dict[str, list[dict]] = {}                    # the timed lines of each scene
+    for _, lid in seq:
+        if usable(lid) is not None:
+            own.setdefault(scene_of.get(lid), []).append(timed[lid])
+
+    def scene_edge(scene, side):
+        """The scene's start (side -1) / end (+1) when it bounds more than the scene's own lines."""
+        t = st.get(scene, {}).get("start" if side < 0 else "end")
+        if t is None:
+            return None
+        mine = own.get(scene)
+        if not mine:
+            return float(t)
+        if side < 0:
+            return float(t) if float(t) < min(float(ln["start"]) for ln in mine) - EDGE_TOL_S else None
+        return float(t) if float(t) > max(float(ln["end"]) for ln in mine) + EDGE_TOL_S else None
+
+    def bound(k, side, scene):
+        """(time, by, line) of the window end, from position ``k`` going ``side``; None: no window."""
+        passed_out, left = False, False
+        while 0 <= k < len(seq):
+            lid = seq[k][1]
+            if not left and scene_of.get(lid) != scene:
+                left = True
+                t = scene_edge(scene, side)
+                if t is not None:
+                    return t, "scene", None
+            ln = usable(lid)
+            if ln is not None:
+                if passed_out:
+                    return None                        # lines out of the stretch lie between: so does the cue
+                t = float(ln["end"] if side < 0 else ln["start"])
+                return t, ("line" if scene_of.get(lid) == scene else "other_scene"), ln
+            passed_out = passed_out or status.get(lid) == "out_of_range"
+            k += side
+        if not left:
+            t = scene_edge(scene, side)
+            if t is not None:
+                return t, "scene", None
+        t = edge[0] if side < 0 else edge[1]
+        return (float(t), "range", None) if t is not None else None
+
     for c in cues:
         c["window"], c["window_by"], c["window_lines"] = None, None, [None, None]
         c["window_estimated"] = False
@@ -822,26 +896,22 @@ def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None) -> list
                 c["window_lines"] = [c["line_id"], c["line_id"]]
                 c["window_estimated"] = _estimated(ln)
             continue
-        if scene is None:
+        sc = st.get(scene, {})
+        if scene is None or sc.get("status") in NO_SCENE_TIME or (scene not in own and sc.get("start") is None
+                                                                  and sc.get("end") is None):
             continue
-        ids = order.get(scene, [])
-        prev = nxt = None
-        if c.get("after_line") in rank:
-            for lid in reversed(ids[:rank[c["after_line"]] + 1]):
-                if usable(lid) is not None:
-                    prev = timed[lid]
-                    break
-        if c.get("before_line") in rank:
-            for lid in ids[rank[c["before_line"]]:]:
-                if usable(lid) is not None:
-                    nxt = timed[lid]
-                    break
-        sc = st.get(scene, {})                         # no line with a time around it: the scene times
-        lo, lo_by = (float(prev["end"]), "line") if prev else (sc.get("start"), "scene")
-        hi, hi_by = (float(nxt["start"]), "line") if nxt else (sc.get("end"), "scene")
-        if sc.get("status") == "absent" or lo is None or hi is None:
+        if c.get("element_id") in el_pos:              # the cue sits between seq[k - 1] and seq[k]
+            k = bisect_right(idx, el_pos[c["element_id"]])
+        elif c.get("after_line") in at:
+            k = at[c["after_line"]] + 1
+        elif c.get("before_line") in at:
+            k = at[c["before_line"]]
+        else:
             continue
-        lo, hi = float(lo), float(hi)
+        lo, hi = bound(k - 1, -1, scene), bound(k, 1, scene)
+        if lo is None or hi is None:
+            continue
+        (lo, lo_by, prev), (hi, hi_by, nxt) = lo, hi
         if hi < lo:                                    # overlapping lines: the cue is somewhere in there
             lo, hi = hi, lo
         c["window"] = [round(lo, 3), round(hi, 3)]
@@ -849,24 +919,35 @@ def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None) -> list
         c["window_lines"] = [prev["id"] if prev else None, nxt["id"] if nxt else None]
         c["window_estimated"] = any(_estimated(ln) for ln in (prev, nxt) if ln) or \
             ("scene" in (lo_by, hi_by) and sc.get("status") != "found")
-    # several cues between the same two lines: each gets its share of the window for a guessed time
+    # several cues between the same two lines: each gets its share of the window for a guessed
+    # time, in script order. Before a scene's first line with the window reaching into the scene
+    # before (or to the start): spread inside it, none on the far end. After a scene's last line:
+    # one after another from that line (써니 앞 30분: sounds written after a scene's last line
+    # followed it within 4 s; those before a first line came 1–82 s before it).
     groups: dict[tuple, list[dict]] = {}
     for c in cues:
         if c.get("window") and c["type"] != "vocal":
             groups.setdefault((c["scene_id"], tuple(c["window"])), []).append(c)
     for group in groups.values():
         lo, hi = group[0]["window"]
+        n, far = len(group), _far_end(group[0])
         for k, c in enumerate(group):
-            c["guess"] = round(lo + (hi - lo) * k / len(group), 3)
+            if far < 0:
+                g = lo + (hi - lo) * (k + 1) / (n + 1)
+            elif far > 0:
+                g = lo + min(GUESS_STEP_S * k, (hi - lo) * k / n)
+            else:
+                g = lo + (hi - lo) * k / n
+            c["guess"] = round(g, 3)
     for c in cues:
         if c.get("window") and "guess" not in c:
             c["guess"] = c["window"][0]
     return cues
 
 
-def build(doc: dict, lines: list[dict], scenes=None) -> list[dict]:
+def build(doc: dict, lines: list[dict], scenes=None, span=None) -> list[dict]:
     """``extract`` + ``windows``."""
-    return windows(extract(doc), doc, lines, scenes)
+    return windows(extract(doc), doc, lines, scenes, span)
 
 
 def counts(cues: list[dict]) -> dict:
@@ -982,17 +1063,30 @@ def in_window(cue: dict, onset: float, pad: float = MATCH_PAD_S) -> bool:
     return bool(w) and w[0] - pad <= float(onset) <= w[1] + pad
 
 
+def anchor(cue: dict) -> float | None:
+    """The end of a cue's window that lies in its own scene, when only the other end reaches
+    into another scene or to the edge of the processed stretch (``window_by``): music written
+    before a scene's first line is the music playing near that line, not the music at the end
+    of the scene before. None when both ends are of the same kind."""
+    w, far = cue.get("window"), _far_end(cue)
+    if not w or not far:
+        return None
+    return float(w[1]) if far < 0 else float(w[0])
+
+
 def match_sounds(cues: list[dict], sfx: list[dict]) -> dict[str, dict]:
     """{sound candidate id: cue} — every sound or speaker's-own-sound cue with a window takes the
-    most likely detected candidate that starts in it (a candidate of the kind the cue names
-    before an unnamed one, louder first), each candidate at most once. In a window longer than
-    ``WIDE_S`` only a candidate of the named kind is taken. A cue that does not say which sound
-    it is takes no named candidate ('any'): nothing tells that the two are the same sound."""
+    most likely detected candidate that starts in it (one whose best guess is of the kind the cue
+    names before one that only has it as a runner-up; a named candidate of the kind before an
+    unnamed one; louder first), each candidate at most once. In a window longer than ``WIDE_S``
+    only a candidate of the named kind is taken. A cue that does not say which sound it is takes
+    no named candidate ('any'): nothing tells that the two are the same sound."""
     taken: dict[str, dict] = {}
     for cue in cues:
         if cue["type"] not in ("sfx", "vocal") or not cue.get("window"):
             continue
         wide = cue["window"][1] - cue["window"][0] > WIDE_S
+        fams = set(cue.get("families") or [])
         best, best_key = None, None
         for c in sfx:
             if c.get("id") in taken or not in_window(cue, c["onset"]):
@@ -1002,7 +1096,8 @@ def match_sounds(cues: list[dict], sfx: list[dict]) -> dict[str, dict]:
                 continue
             if cue["type"] == "vocal" and how != "kind" and how != "unnamed":
                 continue
-            key = (_TIER[how], not c.get("minor"), float(c.get("level_jump_db") or 0.0), -float(c["onset"]))
+            first = phrases.info((c.get("label") or {}).get("class", "")).get("family") in fams
+            key = (first, _TIER[how], not c.get("minor"), float(c.get("level_jump_db") or 0.0), -float(c["onset"]))
             if best_key is None or key > best_key:
                 best, best_key = c, key
         if best is not None:
@@ -1012,8 +1107,11 @@ def match_sounds(cues: list[dict], sfx: list[dict]) -> dict[str, dict]:
 
 def match_music(cues: list[dict], music: list[dict]) -> tuple[dict[str, list[dict]], dict[str, dict]]:
     """({music candidate id: [music cues]}, {stop candidate id: silence cue}). A music cue goes
-    to the music candidates that start in its window, else to the one whose music is playing
-    there; a silence cue to a music-stop candidate in its window."""
+    to the music candidate that starts first in its window, else to the one whose music is
+    playing there; a silence cue to a music-stop candidate in its window. In a window longer
+    than ``WIDE_S`` with one end in the cue's own scene (``anchor``) the music nearest that end
+    is taken (the first candidate of it in the window), not the first music of the window: a
+    window that reaches back to the start of the video holds the opening titles' music too."""
     hits: dict[str, list[dict]] = {}
     stops: dict[str, dict] = {}
     plays = [m for m in music if (m.get("music") or {}).get("event") != "stop"]
@@ -1031,6 +1129,15 @@ def match_music(cues: list[dict], music: list[dict]) -> tuple[dict[str, list[dic
             continue
         lo, hi = cue["window"]
         starting = [m for m in plays if in_window(cue, m["onset"])]
+        near = anchor(cue) if hi - lo > WIDE_S else None
+        if near is not None and starting:
+
+            def gap(m):                                # how far the candidate's music is from the anchor
+                a, b = (m.get("music") or {}).get("segment") or (m["onset"], m["onset"])
+                return max(0.0, float(a) - near, near - float(b))
+
+            closest = min(gap(m) for m in starting)
+            starting = sorted((m for m in starting if gap(m) <= closest + 1e-6), key=lambda m: float(m["onset"]))
         if not starting:                               # the music of a candidate that began before is playing here
             seg = [m for m in plays if (m.get("music") or {}).get("segment")
                    and m["music"]["segment"][0] <= hi + MATCH_PAD_S and m["music"]["segment"][1] >= lo - MATCH_PAD_S
