@@ -115,6 +115,8 @@ def load_env(p) -> dict:
 def run(p, cfg: dict) -> dict:
     t0 = float(p.meta.get("t0", 0.0))
     todo = [k for k in TRACKS if not p.path(f"sed_{k}.npz").exists()]
+    if not todo and p.path("env.npz").exists():
+        return {"skipped": True}                       # nothing to do: run_log keeps the run that did it
     out = {}
     if todo:
         names = class_names()

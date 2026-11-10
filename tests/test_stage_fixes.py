@@ -1375,3 +1375,22 @@ def test_sound_table_has_no_english_names_and_no_doubled_words():
     assert not [r["desc"] for r in table.values() if r["desc"].endswith(("음 소리", "성 소리"))
                 and r["desc"] not in ("신음 소리", "발걸음 소리")]
     assert len(table) == 447 and all(len(r) == 7 for r in table.values())           # no row lost a column
+
+
+def test_sed_with_nothing_to_do_keeps_the_record_of_the_run_that_did_it(tmp_path):
+    """sed (and agent without a queue) report ``skipped``: a later run does not overwrite run_log."""
+    from cboe import pipeline
+    from cboe.stages import sed
+    write_json(tmp_path / "project.json", {"title": "t", "video": str(tmp_path / "x.mkv"), "t0": 0.0, "t1": 10.0,
+                                           "fps": 24.0, "duration": 10.0, "width": 64, "height": 36})
+    for k in sed.TRACKS:
+        np.savez_compressed(tmp_path / f"sed_{k}.npz", probs=np.zeros((250, 2), np.float16), fps=25,
+                            classes=np.array(["Speech", "Music"]), t0=0.0)
+    np.savez_compressed(tmp_path / "env.npz", hop=np.float32(0.01), t0=np.float32(0.0),
+                        effects=np.zeros(10, np.float32), music=np.zeros(10, np.float32), speech=np.zeros(10, np.float32))
+    did = {"frames": {k: 250 for k in sed.TRACKS}, "seconds": 42.0}
+    write_json(tmp_path / "run_log.json", {"sed": did})
+    assert sed.run(Project(tmp_path), {}) == {"skipped": True}
+    log = pipeline.run(tmp_path, stages=["sed"])
+    assert log["sed"] == did
+    assert read_json(tmp_path / "run_history.json")[-1]["stages"][0]["skipped"] is True

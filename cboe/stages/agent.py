@@ -215,7 +215,10 @@ def run(p, cfg: dict) -> dict:
         write_json(p.path("items.json"), {"items": recommend.build(p, previous)})
         write_json(p.path("agent_done.json"), {"ran": 0, "total": len(previous), "left": [it["id"] for it in rest],
                                                "reason": "no queue" if not queue else "no llm"})
-        return {"ran": 0, "total": len(previous), "left": len(rest)}
+        res = {"ran": 0, "total": len(previous), "left": len(rest)}
+        if not queue:                                   # nothing to ask: run_log keeps the run that asked
+            res["skipped"] = True
+        return res
     write_json(p.path("items.json"), {"items": recommend.build(p, previous)})   # tools see current state
     tools = Tools(p)
     url, server = serve(tools)
