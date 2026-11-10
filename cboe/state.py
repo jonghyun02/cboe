@@ -24,7 +24,12 @@ place among lines of the same speaker and text) and context (``ctx``: the script
 and how many lines share its words): line ids are sequence numbers that change when the script is
 read again, so a stored decision never lands on another line (as for items). Among lines of the
 same words the one with the same neighbours is the line; when that cannot be told the decision
-stays aside under ``fp:<fingerprint>`` rather than land on a line the writer never touched.
+stays aside under ``fp:<fingerprint>`` rather than land on a line the writer never touched (a line
+of the same words that has the old neighbours on one side only, after one of them left the
+script, is not enough; nor are two decisions as sure of one line). Decisions kept aside are listed
+(``compose`` ``aside``, the state, the export check) with the lines they may be about; the writer
+puts one on a line or lets it go (``set_aside``), and a decision the writer makes on a line
+replaces those kept aside that may be about it (they never come back over it).
 An extra that becomes a line keeps its fingerprint in the added line (``extra_fp``).
 
 ``compose()`` merges everything into what placement, the review server and the export check use
@@ -133,7 +138,7 @@ def _line_index(lines: list[dict]) -> dict:
     def at(j):
         return bases[j] if 0 <= j < len(bases) else ""
     seen: dict = {}
-    fps, ctx, by_base = {}, {}, {}
+    fps, ctx, by_base, who = {}, {}, {}, {}
     for i, ln in enumerate(lines):
         b, lid = bases[i], ln.get("id")
         k = seen.get(b, 0)
@@ -141,7 +146,8 @@ def _line_index(lines: list[dict]) -> dict:
         fps[lid] = f"{b}#{k}"
         ctx[lid] = {"prev": [at(i - 1), at(i - 2)], "next": [at(i + 1), at(i + 2)], "n": count[b]}
         by_base.setdefault(b, []).append(lid)
-    return {"fps": fps, "ctx": ctx, "by_base": by_base}
+        who[lid] = ln.get("speaker") or ""
+    return {"fps": fps, "ctx": ctx, "by_base": by_base, "who": who}
 
 
 def _ctx_score(was: dict, now: dict) -> int:
@@ -178,10 +184,73 @@ def _pick_line(fp, ctx, index: dict) -> tuple[str | None, int]:
     top = max(score.values())
     best = [c for c in cands if score[c] == top]
     if top > 0 and len(best) == 1:
+        if isinstance(n, int) and len(cands) < n and _contradicts(ctx, index["ctx"][best[0]]):
+            # a line of these words is gone, and this one has the old neighbours on one side only
+            # (the line before a scene that was cut is the line before the next scene now)
+            return None, 0
         return best[0], top
     if by_k in best and n == len(cands):
         return by_k, top
     return None, 0
+
+
+def _contradicts(was: dict, now: dict) -> bool:
+    """Whether the nearest line on one side was another line then than now (the end of the
+    script, "", is no evidence either way)."""
+    for side in ("prev", "next"):
+        a, b = list(was.get(side) or []), list(now.get(side) or [])
+        if a and b and a[0] and b[0] and a[0] != b[0]:
+            return True
+    return False
+
+
+def _aside_candidates(d: dict, index: dict) -> tuple[list[str], str]:
+    """Lines a line decision kept aside may be about, for the writer to choose (none is chosen for
+    them): ``(ids, "text_changed")`` — the one line of the same speaker whose words changed and
+    whose nearest lines on both sides are the ones the decision was made next to (a typo fixed in
+    the script); else ``(ids, "same_words")`` — the lines of the same words that fit its context
+    best; ``([], "gone")`` when there is none."""
+    base, _ = _split_fp(d.get("fp"))
+    ctx = d.get("ctx") if isinstance(d.get("ctx"), dict) else None
+    if ctx:
+        p0, n0 = (list(ctx.get("prev") or []) + [""])[0], (list(ctx.get("next") or []) + [""])[0]
+        moved = [lid for lid, fp in index["fps"].items()
+                 if _split_fp(fp)[0] != base and base.startswith(f"line@{index['who'].get(lid) or ''}:")
+                 and index["ctx"][lid]["prev"][0] == p0 and index["ctx"][lid]["next"][0] == n0]
+        if len(moved) == 1:
+            return moved, "text_changed"
+    cands = list(index["by_base"].get(base) or [])
+    if not cands:
+        return [], "gone"
+    if ctx:
+        score = {c: _ctx_score(ctx, index["ctx"][c]) for c in cands}
+        top = max(score.values())
+        cands = [c for c in cands if score[c] == top]
+    return cands, "same_words"
+
+
+def _aside_row(key: str, d: dict, index: dict) -> dict:
+    """A line decision kept aside as ``compose`` lists it (``aside``)."""
+    base, _ = _split_fp(d.get("fp"))
+    who, _, words = base[len("line@"):].partition(":") if base.startswith("line@") else ("", "", base)
+    cands, why = _aside_candidates(d, index)
+    return {"key": key, "speaker": who or None, "text": words, "decision": {k: d[k] for k in LINE_FIELDS if k in d},
+            "at": d.get("at"), "candidates": cands, "why": why}
+
+
+def _aside_keys(stored: dict, claimed: set) -> list[tuple[str, dict]]:
+    """``(key, decision)`` of the line decisions on no line (``claimed``: ``id()`` of those that
+    are), under the key they are kept with — ``fp:<fingerprint>`` (``~2``, ``~3`` … when two have
+    one fingerprint) — in their order in ``stored``."""
+    out, taken = [], set()
+    for d in (stored or {}).values():
+        if isinstance(d, dict) and d.get("fp") and id(d) not in claimed:
+            key, k = f"fp:{d['fp']}", 2
+            while key in taken:
+                key, k = f"fp:{d['fp']}~{k}", k + 1
+            taken.add(key)
+            out.append((key, d))
+    return out
 
 
 def extra_fp(x: dict) -> str:
@@ -453,15 +522,8 @@ class Project:
         ``fp:<fingerprint>``. Every decision kept with a line gets the line's fingerprint and context
         of today. Returns the ``_line_index`` (``fps``, ``ctx``)."""
         cur, index = self._line_decisions(review, dlg)
-        new, used = {}, {id(d) for d in cur.values()}
-        for lid, d in cur.items():
-            new[lid] = dict(d, fp=index["fps"][lid], ctx=index["ctx"][lid])
-        for d in (review.get("lines") or {}).values():
-            if isinstance(d, dict) and d.get("fp") and id(d) not in used:
-                key, k = f"fp:{d['fp']}", 2
-                while key in new:
-                    key, k = f"fp:{d['fp']}~{k}", k + 1
-                new[key] = d
+        new = {lid: dict(d, fp=index["fps"][lid], ctx=index["ctx"][lid]) for lid, d in cur.items()}
+        new.update(_aside_keys(review.get("lines"), {id(d) for d in cur.values()}))
         review["lines"] = new
         return index
 
@@ -553,18 +615,25 @@ class Project:
                                          if k in LINE_FIELDS}, fields)
             if "name" in fields:
                 self._drop_item_names(review, [line_id])
-            self._store_line(review, line_id, index, cur)
+            self._store_line(review, line_id, index, cur, direct=True)
             self.save_review(review)
             return {"line": line_id, "decision": cur}
 
-    def _store_line(self, review: dict, line_id: str, index: dict, cur: dict) -> None:
+    def _store_line(self, review: dict, line_id: str, index: dict, cur: dict, direct: bool = False) -> None:
         """Keep ``cur`` (the fields of a line decision) under ``line_id`` with the line's fingerprint
-        and context (``_line_index``), or drop the decision when nothing is left."""
+        and context (``_line_index``), or drop the decision when nothing is left. ``direct``: the
+        writer decided this very line — a decision kept aside that may be about it
+        (``_aside_candidates``) is older and gives way, so that it never comes back over this one
+        when the script is read again."""
         if cur:
             review["lines"][line_id] = dict(cur, fp=index["fps"][line_id], ctx=index["ctx"][line_id],
                                             at=time.strftime("%Y-%m-%dT%H:%M:%S"))
         else:
             review["lines"].pop(line_id, None)
+        if direct:
+            for key in [k for k, d in review["lines"].items() if k.startswith("fp:") and isinstance(d, dict)]:
+                if line_id in _aside_candidates(review["lines"][key], index)[0]:
+                    review["lines"].pop(key)
 
     def set_lines(self, ids: list[str], include: bool | None) -> dict:
         """Take several lines in or out at once (None: back to the default). Nothing is stored when
@@ -588,9 +657,44 @@ class Project:
             if bad:
                 raise Conflict(f"시각이 없는 줄은 시작과 끝을 정해야 넣을 수 있습니다: {', '.join(bad[:5])}")
             for i, cur in new.items():
-                self._store_line(review, i, index, cur)
+                self._store_line(review, i, index, cur, direct=True)
             self.save_review(review)
             return {"lines": ids}
+
+    def set_aside(self, key: str, line_id: str | None = None) -> dict:
+        """A line decision kept aside (``compose`` ``aside``, by its ``key``): put it on the line
+        ``line_id`` — its fields over that line's own decision (cut points that no longer fit the
+        words are left out) — or, with None, let it go. KeyError for an unknown key or line."""
+        with self._lock:
+            review = self.review()
+            dlg = self.dialogue()
+            index = self._normalise_lines(review, dlg)
+            d = review["lines"].get(key) if str(key).startswith("fp:") else None
+            if not isinstance(d, dict):
+                raise KeyError(key)
+            if line_id is not None:
+                ln = next((x for x in dlg if x.get("id") == line_id), None)
+                if ln is None:
+                    raise KeyError(line_id)
+                fields = {k: d[k] for k in LINE_FIELDS if k in d and k not in ("text", "text_from", "breaks")}
+                if d.get("text_from") == "heard" or d.get("text"):
+                    fields.update(text=d.get("text"), text_from=d.get("text_from"))
+                elif d.get("text_from") == "script":
+                    fields["text_from"] = "script"
+                cur = self._line_fields(ln, {k: v for k, v in review["lines"].get(line_id, {}).items()
+                                             if k in LINE_FIELDS}, fields)
+                n = len((_norm(cur.get("text")) or _norm(ln.get("text"))).split())
+                fit = [b for b in d.get("breaks") or [] if isinstance(b, int) and not isinstance(b, bool) and 0 < b < n]
+                if fit:
+                    cur["breaks"] = fit
+                review["lines"].pop(key)
+                if "name" in fields:
+                    self._drop_item_names(review, [line_id])
+                self._store_line(review, line_id, index, cur, direct=True)
+            else:
+                review["lines"].pop(key)
+            self.save_review(review)
+            return {"key": key, "line": line_id}
 
     def _drop_item_names(self, review: dict, line_ids) -> None:
         """A name stored on a speaker item by an older version gives way to the line's name."""
@@ -616,7 +720,7 @@ class Project:
             if lid in by:
                 cur = self._line_fields(by[lid], {k: v for k, v in review["lines"].get(lid, {}).items()
                                                   if k in LINE_FIELDS}, {"name": name})
-                self._store_line(review, lid, index, cur)
+                self._store_line(review, lid, index, cur, direct=targets == [line_id])
             elif lid in (review.get("added") or {}):
                 a = dict(review["added"][lid])
                 if name:
@@ -823,8 +927,9 @@ class Project:
     def _line_decisions(self, review: dict, lines: list[dict]) -> tuple[dict, dict]:
         """({line id: decision}, ``_line_index(lines)``) — a stored decision applies to the line its
         fingerprint and context point to (``_pick_line``), at most one decision per line: the
-        surest first, then the one stored under that line's id. A decision without a fingerprint
-        goes by the id."""
+        surest first. Two decisions as sure of one line both stay aside: once the script is read
+        again the key they are stored under (a line id of before) tells nothing. A decision
+        without a fingerprint goes by the id."""
         index = _line_index(lines)
         claims = []
         for key, d in (review.get("lines") or {}).items():
@@ -837,11 +942,14 @@ class Project:
             lid, sure = _pick_line(d["fp"], d.get("ctx"), index)
             if lid:
                 claims.append((sure, key == lid, key, lid, d))
-        out, used = {}, set()
-        for _sure, _own, key, lid, d in sorted(claims, key=lambda c: (-c[0], not c[1], c[2])):
-            if lid not in out and key not in used:
-                out[lid] = d
-                used.add(key)
+        out, blocked = {}, set()
+        for sure, _own, key, lid, d in sorted(claims, key=lambda c: (-c[0], not c[1], c[2])):
+            if lid in out or lid in blocked:
+                continue
+            if d.get("fp") and any(c[3] == lid and c[0] == sure and c[2] != key and c[4].get("fp") for c in claims):
+                blocked.add(lid)                    # as sure as another one: neither is this line's
+                continue
+            out[lid] = d
         return out, index
 
     def _line(self, ln: dict, idx: int, d: dict, item_name, asr) -> dict:
@@ -926,7 +1034,10 @@ class Project:
 
     def compose(self, review: dict | None = None, draft: dict | None = None) -> dict:
         """Everything merged (module doc): ``{"items", "lines", "extras", "added", "people",
-        "scenes", "unplaced"}``. ``draft``: the placement result of this composition — with it,
+        "scenes", "unplaced", "aside"}``. ``aside``: the writer's line decisions that are on no
+        line now (the script was read again and they cannot be told — they are not used), each
+        ``{"key", "speaker", "text" (the script words it was made on), "decision", "at",
+        "candidates", "why"}`` (``_aside_candidates``; ``set_aside`` puts one on a line). ``draft``: the placement result of this composition — with it,
         items whose root went to ``no_room`` are 확인 필요 again, lines carry their cells, and a line
         that got no cell (``unplaced``: the draft's ``no_room`` lines and the ``unplaced`` that
         ``settle`` keeps there from its earlier rounds) names nobody: the line after it is no
@@ -957,6 +1068,7 @@ class Project:
         item_dec = self._decisions(review, items, "items")
         sp_of = {(it.get("speaker") or {}).get("line_id"): it for it in items if it.get("kind") == "speaker"}
         line_dec, lindex = self._line_decisions(review, dlg)
+        aside = [_aside_row(key, d, lindex) for key, d in _aside_keys(review.get("lines"), {id(d) for d in line_dec.values()})]
         lines = []
         for idx, ln in enumerate(dlg):
             it = sp_of.get(ln["id"])
@@ -1022,7 +1134,7 @@ class Project:
                              early=info.get("early"), mode=info.get("mode"), before=info.get("before"),
                              decision=pdec.get(p["name"])))
         comp = {"items": eff, "lines": lines, "extras": ex_rows, "added": added_rows, "people": prow,
-                "scenes": scenes, "review": review, "unplaced": sorted(unplaced)}
+                "scenes": scenes, "review": review, "unplaced": sorted(unplaced), "aside": aside}
         return self.finish(comp, draft) if draft is not None else comp
 
     def finish(self, comp: dict, draft: dict) -> dict:
@@ -1148,7 +1260,8 @@ class Project:
         was heard differ and the writer has not chosen), ``unheard`` (in, at a guessed time),
         ``absent`` / ``out_of_range`` (out: not in the film / outside the processed part),
         ``writer_excluded``, ``no_room`` (no cell: a guessed line squeezed between two others),
-        ``unsettled`` (placement did not settle: the draft may show the name otherwise, ``settle``).
+        ``unsettled`` (placement did not settle: the draft may show the name otherwise, ``settle``),
+        ``aside`` (keys of the writer's line decisions on no line since the script changed).
         ``extras_open``: '대본에 없는 말' not decided yet. ``names_early``: people whose name is
         shown before it is told (``{"person", "line", "told"}``; told None = never called)."""
         from . import check, style
@@ -1181,7 +1294,8 @@ class Project:
                  "out_of_range": [ln["id"] for ln in comp["lines"] if ln["excluded"] == "out_of_range"],
                  "writer_excluded": [ln["id"] for ln in comp["lines"] if ln["excluded"] == "writer"],
                  "no_room": [e for e in draft.get("no_room", []) if e.get("line")],
-                 "unsettled": list(draft.get("unsettled") or [])}
+                 "unsettled": list(draft.get("unsettled") or []),
+                 "aside": [a["key"] for a in comp.get("aside") or []]}
         early = [{"person": p["name"], "line": p["early"]["line"], "told": p["early"]["told"]}
                  for p in comp["people"] if p.get("early")]
         return {"check": pending, "check_speaker": check_speaker,

@@ -621,7 +621,7 @@ def test_an_older_work_folder_opens_and_gives_the_same_draft(tmp_path):
     assert all(ln["status"] == "ok" and ln["include"] for ln in lines)
     chk = p.export_check()
     assert chk["lines"] == {"differs_open": [], "unheard": [], "absent": [], "out_of_range": [], "writer_excluded": [],
-                            "no_room": [], "unsettled": []} and chk["extras_open"] == []
+                            "no_room": [], "unsettled": [], "aside": []} and chk["extras_open"] == []
     rv = read_json(p.path("review.json"))
     assert set(rv) == {"items", "placement"}                                      # reading writes nothing
 
@@ -796,3 +796,90 @@ def test_settle_that_does_not_end_lists_the_lines_it_could_not_settle(tmp_path, 
     chk = p.export_check(draft=d)
     assert chk["lines"]["unsettled"] == d["unsettled"]
     assert any("이름 표시가 맞춰지지 않은 줄" in w for w in export_warnings(chk))
+
+
+# =================================================================== 4차: 대본을 다시 읽은 뒤의 줄 결정
+def scenes_abc():
+    a = [line("", "하늘", "네", 10, 10.5), line("", "바다", "들어와", 11, 12), line("", "구름", "안녕", 13, 14)]
+    b = [line("", "하늘", "네", 20, 20.5), line("", "바다", "앉아", 21, 22), line("", "구름", "고마워", 23, 24)]
+    c = [line("", "하늘", "네", 30, 30.5), line("", "바다", "가자", 31, 32), line("", "구름", "그래", 33, 34)]
+    return a, b, c
+
+
+def reread(p, lines):
+    write_json(p.path("dialogue.json"), {"mode": "scenes", "extras": [], "lines": lines})
+
+
+@pytest.mark.parametrize("decide_c", [False, True])
+def test_a_scene_cut_from_the_script_does_not_move_its_decisions_onto_the_next_scene(tmp_path, decide_c):
+    a, b, c = scenes_abc()
+    p = make(tmp_path, lines=renumbered(a + b + c), items=[], extras=[])
+    p.set_line("L0004", include=False)                     # scene B's '네' (20.0 s)
+    if decide_c:
+        p.set_line("L0007", text="네네")                    # scene C's '네' (30.0 s)
+    reread(p, renumbered(a + c))                            # scene B is cut
+    got = {k: (v["start"], v["include"], v["text"]) for k, v in by_id(p.effective_lines()).items() if v["speaker"] == "하늘"}
+    assert got == {"L0001": (10.0, True, "네"), "L0004": (30.0, True, "네")}      # the untouched line stays in
+    comp = p.compose()
+    assert len(comp["aside"]) == (2 if decide_c else 1)
+    assert all(x["candidates"] == ["L0004"] and x["why"] == "same_words" for x in comp["aside"])
+    if decide_c:                                            # the writer puts C's decision back on C's '네'
+        key = next(x["key"] for x in comp["aside"] if x["decision"].get("text") == "네네")
+        p.set_aside(key, "L0004")
+        ln = by_id(p.effective_lines())["L0004"]
+        assert (ln["include"], ln["text"]) == (True, "네네")
+        assert p.compose()["aside"] == []                  # B's decision that pointed there gave way
+
+
+def test_scenes_that_swap_places_keep_their_decisions(tmp_path):
+    a, b, c = scenes_abc()
+    p = make(tmp_path, lines=renumbered(a + b + c), items=[], extras=[])
+    p.set_line("L0004", include=False)
+    p.set_line("L0007", text="네네")
+    reread(p, renumbered(b + c + a))
+    got = {v["start"]: (v["include"], v["text"]) for v in p.effective_lines() if v["speaker"] == "하늘"}
+    assert got == {20: (False, "네"), 30: (True, "네네"), 10: (True, "네")} and p.compose()["aside"] == []
+
+
+def test_a_decision_kept_aside_is_shown_and_can_be_put_back_after_a_typo_fix(tmp_path):
+    v1 = [line("L0001", "하늘", "네", 10.0, 10.5), line("L0002", "바다", "음", 11.0, 11.5),
+          line("L0003", "하늘", "네", 13.0, 13.5)]
+    p = make(tmp_path, lines=v1, items=[], extras=[])
+    p.set_line("L0002", include=False, name="구름")
+    reread(p, [v1[0], dict(v1[1], text="음음", raw="음음"), v1[2]])           # the script's typo fixed
+    ln = by_id(p.effective_lines())["L0002"]
+    assert ln["include"] and ln["name"] == "바다"                              # not used ...
+    (row,) = p.compose()["aside"]                                              # ... but not hidden either
+    assert (row["speaker"], row["text"], row["candidates"], row["why"]) == ("바다", "음", ["L0002"], "text_changed")
+    assert row["decision"] == {"include": False, "name": "구름"} and row["at"]
+    with TestClient(create_app(p.work)) as c:
+        st = c.get("/api/state").json()
+        assert st["summary"]["lines"]["aside"] == 1 and st["aside"][0]["candidates"] == ["L0002"]
+        assert st["export_check"]["lines"]["aside"] == [row["key"]]
+        assert any("붙지 못한 작가 결정 1개" in w for w in export_warnings(st["export_check"]))
+        assert c.post("/api/lines/aside", json={"key": "fp:없는 결정", "line": "L0002"}).status_code == 404
+        assert c.post("/api/lines/aside", json={"key": row["key"], "line": "L0999"}).status_code == 404
+        st = c.post("/api/lines/aside", json={"key": row["key"], "line": "L0002"}).json()
+        r = by_id(st["lines"])["L0002"]
+        assert not r.get("include") and r["name"] == "구름" and st["aside"] == [] and st["summary"]["lines"]["aside"] == 0
+    # letting one go
+    reread(p, v1)
+    key = p.compose()["aside"][0]["key"]
+    p.set_aside(key, None)
+    assert p.compose()["aside"] == [] and by_id(p.effective_lines())["L0002"]["include"]
+
+
+def test_a_decision_kept_aside_never_comes_back_over_a_newer_one(tmp_path):
+    v1 = [line("L0001", "하늘", "네", 10.0, 10.5), line("L0002", "바다", "음", 11.0, 11.5),
+          line("L0003", "하늘", "네", 13.0, 13.5)]
+    p = make(tmp_path, lines=v1, items=[], extras=[])
+    p.set_line("L0001", text="네 첫 결정")
+    # version 2: a line in between and one more '네' at the end — the first decision cannot be told
+    v2 = [v1[0], line("L0002", "구름", "뭐라고", 10.6, 10.9), dict(v1[1], id="L0003"), dict(v1[2], id="L0004"),
+          line("L0005", "하늘", "네", 15.0, 15.5)]
+    reread(p, v2)
+    assert [x["decision"]["text"] for x in p.compose()["aside"]] == ["네 첫 결정"]
+    p.set_line("L0001", text="네 새 결정")                  # the writer decides that line again
+    assert [k for k in read_json(p.path("review.json"))["lines"]] == ["L0001"]
+    reread(p, v1)                                            # the script goes back to version 1
+    assert by_id(p.effective_lines())["L0001"]["text"] != "네 첫 결정"

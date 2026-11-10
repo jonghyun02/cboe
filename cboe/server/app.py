@@ -19,6 +19,8 @@ Sound phrases stored in an older notation ('♬ …') are shown in today's ('[�
 (what the writer added) and the counts in ``summary.lines`` / ``summary.extras`` /
 ``summary.people``. Routes: ``/api/lines/{id}`` (in / out, text, name, language, sung, start /
 end, breaks, keep), ``/api/lines/bulk``, ``/api/lines/{id}/speaker`` (a name by scope),
+``/api/lines/aside`` (a decision kept aside since the script changed — state ``aside``: put it on a
+line or let it go),
 ``/api/extras/{id}`` (line | ignore | clear), ``/api/added`` (+ ``/{id}`` to change, DELETE to
 remove), ``/api/people``. Unknown ids are 404, values that cannot be used 400, clashes 409.
 ``/api/envelope`` gives the timeline the level of the separated tracks (env.npz, cut down).
@@ -96,6 +98,11 @@ class LineUpdate(BaseModel):
 class LinesBulk(BaseModel):
     ids: list[str]
     include: bool | None = None
+
+
+class AsideAction(BaseModel):
+    key: str                               # state ``aside`` key ('fp:…')
+    line: str | None = None                # the line to put it on; null: let it go
 
 
 class SpeakerUpdate(BaseModel):
@@ -292,7 +299,8 @@ def export_warnings(chk: dict) -> list[str]:
                       ("absent", "영화에 없는 장면이라 뺀 줄 {}개"),
                       ("out_of_range", "처리 구간 밖이라 뺀 줄 {}개"),
                       ("writer_excluded", "작가가 뺀 줄 {}개"),
-                      ("unsettled", "배치를 거듭해도 이름 표시가 맞춰지지 않은 줄 {}개 (초안 칸의 이름 표시를 확인)")):
+                      ("unsettled", "배치를 거듭해도 이름 표시가 맞춰지지 않은 줄 {}개 (초안 칸의 이름 표시를 확인)"),
+                      ("aside", "대본이 바뀌어 붙지 못한 작가 결정 {}개 (자막에 쓰지 않음 · 줄에 다시 붙이거나 버림)")):
         if ln.get(key):
             out.append(text.format(len(ln[key])))
     if chk.get("extras_open"):
@@ -597,6 +605,7 @@ class ReviewService:
                 "text_changed": sum(1 for ln in script_lines if ln["text"] != ln.get("script_text")),
                 "no_room": sum(1 for e in draft.get("no_room", []) if e.get("line")),
                 "unsettled": len(draft.get("unsettled") or []),
+                "aside": len(comp.get("aside") or []),
                 "differs_open": len(((chk or {}).get("lines") or {}).get("differs_open") or [])}
             summary["extras"] = {s: sum(1 for x in comp["extras"] if x["state"] == s) for s in ("open", "line", "ignored")}
             summary["extras"]["total"] = len(comp["extras"])
@@ -621,6 +630,8 @@ class ReviewService:
                     "lines": [line_row(ln) for ln in comp["lines"]],
                     "line_codes": {"origin": ORIGIN_KO, "excluded": EXCLUDED_KO, "status": list(LINE_STATUSES)},
                     "extras": comp["extras"], "scenes": comp["scenes"], "people": comp["people"],
+                    # the writer's line decisions on no line since the script changed (Project.compose)
+                    "aside": comp.get("aside") or [],
                     "added": [dict(a, cells=added_cells.get(a["id"], []), no_room=no_room.get(a["id"]))
                               for a in comp["added"]],
                     "items": eff, "draft": draft, "cuts": p.cuts(), "characters": p.characters(comp["review"]),
@@ -756,6 +767,14 @@ def create_app(work, media=None) -> FastAPI:
         """Take several dialogue lines in or out at once (include null: back to the default)."""
         with svc.lock:
             apply("줄", svc.project.set_lines, body.ids, body.include)
+            return svc.state(recompute=True)
+
+    @app.post("/api/lines/aside")
+    def line_aside(body: AsideAction):
+        """A line decision on no line since the script changed (state ``aside``): put it on the line
+        ``line`` (its fields over that line's own) or, with ``line`` null, let it go."""
+        with svc.lock:
+            apply("결정", svc.project.set_aside, body.key, body.line)
             return svc.state(recompute=True)
 
     @app.post("/api/lines/{line_id}")
