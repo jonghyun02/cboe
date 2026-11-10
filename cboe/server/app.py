@@ -19,8 +19,8 @@ Sound phrases stored in an older notation ('♬ …') are shown in today's ('[�
 (what the writer added) and the counts in ``summary.lines`` / ``summary.extras`` /
 ``summary.people``. Routes: ``/api/lines/{id}`` (in / out, text, name, language, sung, start /
 end, breaks, keep), ``/api/lines/bulk``, ``/api/lines/{id}/speaker`` (a name by scope),
-``/api/lines/aside`` (a decision kept aside since the script changed — state ``aside``: put it on a
-line or let it go),
+``/api/lines/aside`` (a decision kept aside since the script changed — state ``aside``, kind "line"
+or "speaker": put it on a line, or on the speaker item of a line, or let it go),
 ``/api/extras/{id}`` (line | ignore | clear), ``/api/added`` (+ ``/{id}`` to change, DELETE to
 remove), ``/api/people``. Unknown ids are 404, values that cannot be used 400, clashes 409.
 ``/api/envelope`` gives the timeline the level of the separated tracks (env.npz, cut down).
@@ -789,8 +789,9 @@ def create_app(work, media=None) -> FastAPI:
 
     @app.post("/api/lines/aside")
     def line_aside(body: AsideAction):
-        """A line decision on no line since the script changed (state ``aside``): put it on the line
-        ``line`` (its fields over that line's own) or, with ``line`` null, let it go."""
+        """A decision on no line since the script changed (state ``aside``): put it on the line
+        ``line`` (its fields over that line's own; a kind "speaker" one on that line's speaker
+        item — 400 when the line has none) or, with ``line`` null, let it go."""
         with svc.lock:
             apply("결정", svc.project.set_aside, body.key, body.line)
             return svc.state(recompute=True)

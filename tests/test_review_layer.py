@@ -879,11 +879,15 @@ def test_a_decision_kept_aside_never_comes_back_over_a_newer_one(tmp_path):
     v2 = [v1[0], line("L0002", "구름", "뭐라고", 10.6, 10.9), dict(v1[1], id="L0003"), dict(v1[2], id="L0004"),
           line("L0005", "하늘", "네", 15.0, 15.5)]
     reread(p, v2)
-    assert [x["decision"]["text"] for x in p.compose()["aside"]] == ["네 첫 결정"]
+    (row,) = p.compose()["aside"]
+    assert row["decision"]["text"] == "네 첫 결정" and row["candidates"] == ["L0001", "L0004", "L0005"]
     p.set_line("L0001", text="네 새 결정")                  # the writer decides that line again
-    assert [k for k in read_json(p.path("review.json"))["lines"]] == ["L0001"]
+    # the first decision may be about another '네': it stays aside, without that line (5차)
+    assert set(read_json(p.path("review.json"))["lines"]) == {"L0001", row["key"]}
+    assert [(x["key"], x["candidates"]) for x in p.compose()["aside"]] == [(row["key"], ["L0004", "L0005"])]
     reread(p, v1)                                            # the script goes back to version 1
     assert by_id(p.effective_lines())["L0001"]["text"] != "네 첫 결정"
+    assert "네 첫 결정" in [x["decision"].get("text") for x in p.compose()["aside"]]   # still for the writer
 
 
 # =================================================================== 4차: 화자 항목 결정은 줄을 따라감
@@ -1125,3 +1129,100 @@ def test_rows_of_a_two_speaker_cell_with_names_keep_their_names_as_the_person(tm
     p = make(tmp_path / "same", lines=ls, items=[], extras=[])
     assert [x["person"] for x in p.placement_inputs()[0]] == ["하늘", "하늘", None]
     assert not any(ln.startswith("- ") for c in p.recompute()["cells"] for ln in c["lines"])
+
+
+# =================================================================== 5차: 붙지 못한 결정 — 후보가 여럿, 화자 항목
+def two_yes():
+    """Version 1: 하늘's one '네'; version 2: a second '네' with the same line before it — a
+    decision on the first cannot be told between the two."""
+    v1 = [line("L0001", "바다", "가자", 10.0, 10.5), line("L0002", "하늘", "네", 11.0, 11.5),
+          line("L0003", "구름", "나도", 12.0, 12.5)]
+    v2 = [line("L0001", "바다", "가자", 10.0, 10.5), line("L0002", "하늘", "네", 11.0, 11.5),
+          line("L0003", "별", "뭐야", 12.0, 12.5), line("L0004", "바다", "가자", 20.0, 20.5),
+          line("L0005", "하늘", "네", 21.0, 21.5), line("L0006", "달", "그래", 22.0, 22.5)]
+    return v1, v2
+
+
+def test_editing_one_of_several_candidates_keeps_the_decision_aside_without_that_line(tmp_path):
+    v1, v2 = two_yes()
+    p = make(tmp_path, lines=v1, items=[], extras=[])
+    p.set_line("L0002", include=False)
+    reread(p, v2)
+    (row,) = p.compose()["aside"]
+    assert (row["kind"], row["candidates"], row["why"], row["decision"]) == ("line", ["L0002", "L0005"], "same_words",
+                                                                           {"include": False})
+    p.set_line("L0005", sung=True)                           # about something else: nothing about L0002
+    (left,) = p.compose()["aside"]
+    assert left["key"] == row["key"] and left["candidates"] == ["L0002"] and left["decision"] == {"include": False}
+    lines = by_id(p.effective_lines())
+    assert lines["L0002"]["include"] and lines["L0005"]["include"] and lines["L0005"]["sung"]
+    with TestClient(create_app(p.work)) as c:
+        st = c.get("/api/state").json()
+        assert st["summary"]["lines"]["aside"] == 1 and st["export_check"]["lines"]["aside"] == [row["key"]]
+        st = c.post("/api/lines/aside", json={"key": row["key"], "line": "L0002"}).json()   # the writer puts it back
+        assert not by_id(st["lines"])["L0002"].get("include") and st["aside"] == []
+        assert by_id(st["lines"])["L0005"]["sung"] and by_id(st["lines"])["L0005"]["include"]
+    # the writer decides the one candidate left: the decision kept aside gives way
+    p = make(tmp_path / "again", lines=v1, items=[], extras=[])
+    p.set_line("L0002", include=False)
+    reread(p, v2)
+    p.set_line("L0005", sung=True)
+    assert [x["candidates"] for x in p.compose()["aside"]] == [["L0002"]]
+    p.set_line("L0002", include=True)
+    assert p.compose()["aside"] == []
+    assert set(read_json(p.path("review.json"))["lines"]) == {"L0002", "L0005"}
+
+
+def test_a_speaker_decision_whose_line_words_changed_is_kept_aside_and_can_be_put_back(tmp_path):
+    v1 = [line("L0001", "바다", "가자", 10.0, 10.5), line("L0002", "하늘", "알았어", 11.0, 11.5),
+          line("L0003", "구름", "나도", 12.0, 12.5)]
+    p = make(tmp_path, lines=v1, items=[speaker_item(x) for x in v1], extras=[])
+    p.set_decision("P0002", decision="exclude")
+    v2 = [v1[0], dict(v1[1], text="알았어요", raw="알았어요"), v1[2]]      # the script's typo fixed
+    write_json(p.path("dialogue.json"), {"mode": "scenes", "extras": [], "lines": v2})
+    write_json(p.path("items.json"), {"items": [speaker_item(x) for x in v2[:2]]})   # L0003: no speaker item
+    it = by_id(p.effective_items())["P0002"]
+    assert it["final"] == "include" and not it["decided"]                        # not used ...
+    (row,) = p.compose()["aside"]                                                # ... but not hidden either
+    assert (row["kind"], row["speaker"], row["text"], row["candidates"], row["why"]) == \
+        ("speaker", "하늘", "알았어", ["L0002"], "text_changed")
+    assert row["decision"] == {"final": "exclude"} and row["at"] and row["key"].startswith("fp:speaker@line@")
+    with TestClient(create_app(p.work)) as c:
+        st = c.get("/api/state").json()
+        assert st["summary"]["lines"]["aside"] == 1 and st["aside"] == [row]
+        assert st["export_check"]["lines"]["aside"] == [row["key"]]
+        assert any("붙지 못한 작가 결정 1개" in w for w in export_warnings(st["export_check"]))
+        assert c.post("/api/lines/aside", json={"key": row["key"], "line": "L0999"}).status_code == 404
+        assert c.post("/api/lines/aside", json={"key": "fp:speaker@line@하늘:없는 말#0", "line": "L0002"}).status_code == 404
+        r = c.post("/api/lines/aside", json={"key": row["key"], "line": "L0003"})
+        assert r.status_code == 400 and "화자 항목" in r.json()["detail"]
+        st = c.post("/api/lines/aside", json={"key": row["key"], "line": "L0002"}).json()
+        it = by_id(st["items"])["P0002"]
+        assert (it["final"], it["decided"]) == ("exclude", True) and st["aside"] == []
+        assert st["summary"]["lines"]["aside"] == 0
+        stored = read_json(p.path("review.json"))["items"]
+        assert set(stored) == {"P0002"} and stored["P0002"]["fp"] == "speaker@" + line_fp(v2[1], 0)
+    # letting one go
+    v3 = [v1[0], dict(v1[1], text="알았어요 정말", raw="알았어요 정말"), v1[2]]
+    write_json(p.path("dialogue.json"), {"mode": "scenes", "extras": [], "lines": v3})
+    write_json(p.path("items.json"), {"items": [speaker_item(x) for x in v3]})
+    (row,) = p.compose()["aside"]
+    p.set_aside(row["key"], None)
+    assert p.compose()["aside"] == [] and read_json(p.path("review.json"))["items"] == {}
+
+
+def test_a_speaker_decision_kept_aside_gives_way_to_the_writers_decision_on_its_line(tmp_path):
+    v1, v2 = two_yes()
+    p = make(tmp_path, lines=v1, items=[speaker_item(x) for x in v1], extras=[])
+    p.set_decision("P0002", decision="exclude")
+    read_again(p, v2)
+    (row,) = p.compose()["aside"]
+    assert (row["kind"], row["candidates"], row["why"]) == ("speaker", ["L0002", "L0005"], "same_words")
+    p.set_decision("P0005", decision="include")                  # one of them, one by one
+    (left,) = p.compose()["aside"]
+    assert left["key"] == row["key"] and left["candidates"] == ["L0002"]
+    it = by_id(p.effective_items())
+    assert (it["P0005"]["final"], it["P0005"]["decided"]) == ("include", True) and not it["P0002"]["decided"]
+    p.set_decision("P0002", decision="include")                  # the one candidate left
+    assert p.compose()["aside"] == []
+    assert by_id(p.effective_items())["P0002"]["final"] == "include"
