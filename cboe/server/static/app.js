@@ -2433,7 +2433,7 @@
     const from = (ln.delivery || []).filter(Boolean);
     const put = from.map((m) => `<span class="manner-cue"><span class="tx">${esc(m)}</span><button type="button" class="btn btn-sm${cur === m ? ' is-on' : ''}" data-act="ln-manner-put" data-v="${esc(m)}" aria-pressed="${cur === m}">표시에 넣기</button></span>`).join('');
     return `<div class="ed-row manner-row" data-box="manner"><span class="ed-k">말투</span><span class="manner-now">${cur ? `지금 붙은 말투 ${esc(bracket(cur))}` : '붙은 말투 없음'}</span>
-        <label>직접 <input class="input input-sm" data-change="ln-manner" value="${esc(cur)}" maxlength="${MANNER_MAX}" placeholder="예: 속삭이며" autocomplete="off" aria-label="말투 직접 쓰기 (${MANNER_MAX}자 이내)"></label>
+        <label>직접 <input class="input input-sm" data-change="ln-manner" value="${esc(cur)}" maxlength="${MANNER_MAX}" placeholder="예: 속삭이며" autocomplete="off" aria-label="말투 직접 쓰기 · ${MANNER_MAX}자 이내"></label>
         ${cur ? '<button type="button" class="btn btn-sm btn-text" data-act="ln-manner-drop">빼기</button>' : ''}</div>
       <div class="ed-row manner-from"><span class="ed-k">대본의 말투</span>${put || '<span class="field-hint">대본에 적힌 말투 없음</span>'}</div>`;
   }
