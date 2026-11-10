@@ -893,6 +893,50 @@ def test_cells_carry_their_position():
     assert {c["refs"][0]: c["pos"] for c in d["cells"]} == {"L1": "bottom", "L2": "top", "S1": "top", "S2": "bottom"}
 
 
+def test_a_top_position_goes_with_the_cell_whatever_shares_it():
+    # 6th round (약속 가): the review layer passes pos "top" for lines and sounds; one part on top puts
+    # the cell on top, in a cell of its own, with a line, in a hyphen cell and in a joined cell
+    line = L("L1", "나도 갈래", 10.0, 11.0, speaker="A", timing="asr")
+
+    def top(s):
+        return dict(s, pos="top")
+    c = one(run([line], [top(S("S1", 10.0, "[쿵]"))]), "L1")                    # ② another source
+    assert c["lines"] == ["- [쿵]", "- 나도 갈래"] and sorted(c["refs"]) == ["L1", "S1"] and c["pos"] == "top"
+    c = one(run([line], [top(S("S1", 10.0, "[한숨]", src="L1"))]), "L1")       # ③ the speaker's own
+    assert c["lines"] == ["[한숨] 나도 갈래"] and c["pos"] == "top"
+    assert one(run([line], [S("S1", 10.0, "[쿵]")]), "L1")["pos"] == "bottom"
+    cs = cells_of(run([L("L1", TEXT7, 10.0, 13.0, timing="asr")], [top(S("S1", 11.6, "[쾅]"))]), "L1")
+    assert [(c["pos"], "S1" in c["refs"]) for c in cs] == [("bottom", False), ("top", True)]     # ④ the part with it
+    pair = [L("L1", "뭐?", 10.0, 10.2, speaker="빌"), L("L2", "응", 10.45, 10.6, speaker="세바스찬", pos="top")]
+    c = one(run(pair), "L1")
+    assert c["refs"] == ["L1", "L2"] and c["lines"] == ["- 뭐?", "- 응"] and c["pos"] == "top"
+    joined = [L("L1", "어디 가?", 10.0, 10.5, speaker="빌", pos="top"), L("L2", "집에", 12.0, 12.4, speaker="빌", join=True)]
+    c = one(run(joined), "L1")
+    assert c["refs"] == ["L1", "L2"] and c["lines"] == ["어디 가? 집에"] and c["pos"] == "top"
+
+
+def test_a_manner_of_speech_goes_in_the_label_and_counts_in_the_width():
+    # 6th round (약속 가): the manner the writer picks comes in label_extra. II.8 "[영희/속삭임]",
+    # "[영희/속마음/영어]": name, source, manner, the language last; without a shown name the label
+    # alone (style.speaker_label), and it counts in the 16 units of the line (II.2)
+    def lines_of(text="나도 갈래", **kw):
+        return [c["lines"] for c in cells_of(run([L("L1", text, 10.0, 11.0, timing="asr", **kw)]), "L1")]
+    assert lines_of(name="하늘", show=False, label_extra=["속삭이며"]) == [["[속삭이며] 나도 갈래"]]
+    assert lines_of(name="하늘", show=True, label_extra=["속삭이며"]) == [["[하늘/속삭이며] 나도 갈래"]]
+    assert lines_of(name="영희", show=True, label_extra=["속마음", "속삭임"], language="영어") == \
+        [["[영희/속마음/속삭임/영어] 나도", "갈래"]]                                  # 12.5 units of label
+    assert lines_of("오늘은 정말 고마웠어요") == [["오늘은 정말 고마웠어요"]]              # 11 units: one line
+    assert lines_of("오늘은 정말 고마웠어요", label_extra=["속삭이며"]) == [["[속삭이며] 오늘은", "정말 고마웠어요"]]
+    # in a hyphen cell; on a long line only its first cell has it (the language goes on every cell, II.6)
+    pair = [L("L1", "뭐?", 10.0, 10.2, speaker="빌"), L("L2", "응", 10.45, 10.6, speaker="세바스찬", label_extra=["속삭이며"])]
+    assert one(run(pair), "L1")["lines"] == ["- 뭐?", "- [속삭이며] 응"]
+    text = "오늘은 정말 이상한 날이었어. 아침부터 계속 이상한 소리가 들렸거든. 그래서 도서관에 가 보기로 했어"
+    cs = cells_of(run([L("L1", text, 10.0, 18.0, label_extra=["속삭이며"], language="영어", timing="asr")]), "L1")
+    assert len(cs) >= 2 and cs[0]["lines"][0].startswith("[속삭이며/영어] ")
+    assert all(c["lines"][0].startswith("[영어] ") and "속삭이며" not in " ".join(c["lines"]) for c in cs[1:])
+    assert all(units(x) <= 16 for c in cs for x in c["lines"])
+
+
 def test_lines_without_a_time_are_skipped():
     gone = {"id": "L2", "text": "영상에 없는 장면의 대사", "start": None, "end": None, "words": [],
             "status": "absent", "guess": [11.0, 12.0], "show_name": True, "name": "영희"}
