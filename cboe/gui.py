@@ -68,6 +68,13 @@ def _serve(app, port: int | None = None):
     return f"http://127.0.0.1:{port}/", server, th
 
 
+def script_filter() -> str:
+    """The script choice of the file dialog: every kind ``cboe.script.read`` reads (PDF and HWP
+    shooting scripts included)."""
+    from .script import SUFFIXES
+    return f"대본 ({';'.join('*' + s for s in SUFFIXES)})"
+
+
 class WindowApi:
     """Functions the page can call in the desktop window (window.pywebview.api.*)."""
 
@@ -81,7 +88,7 @@ class WindowApi:
             res = self._window.create_file_dialog(webview.FileDialog.FOLDER)
         else:
             types = (("영상 (*.mp4;*.mkv;*.mov;*.avi;*.webm;*.m4v;*.ts;*.wmv)", "모든 파일 (*.*)") if kind == "video"
-                     else ("대본 (*.txt;*.docx;*.srt;*.vtt;*.csv;*.tsv;*.json)", "모든 파일 (*.*)"))
+                     else (script_filter(), "모든 파일 (*.*)"))
             res = self._window.create_file_dialog(webview.FileDialog.OPEN, allow_multiple=False, file_types=types)
         if not res:
             return None

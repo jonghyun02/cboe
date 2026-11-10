@@ -25,13 +25,17 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-STAGES = ["ingest", "separate", "cuts", "sed", "asr", "align", "sfx", "music", "speaker", "screen",
+STAGES = ["ingest", "script", "separate", "cuts", "sed", "asr", "align", "sfx", "music", "speaker", "screen",
           "dialog_ev", "recommend", "agent", "placement", "export"]
+NO_TIME = ("ingest", "script", "export")        # nothing of theirs sits at a time (--at leaves them out)
 
 # stage -> (덱, 코드 (파일, 찾을 줄), 결과 파일)
 INFO = {
-    "ingest": ("영상·대본", [("cboe/stages/ingest.py", "def run("), ("cboe/script.py", "def read(")],
-               "project.json, script.json, audio/mix_48k.wav·mix_16k.wav"),
+    "ingest": ("영상 소리 뽑기", [("cboe/stages/ingest.py", "def run(")], "project.json, audio/mix_48k.wav·mix_16k.wav"),
+    "script": ("대본 읽기 (촬영 대본 PDF·HWP, 줄 대본, 자막)",
+               [("cboe/stages/script.py", "def run("), ("cboe/script.py", "def read("),
+                ("cboe/screenplay.py", "def classify_plain(")],
+               "script.json (version 2: 장면·지문·대사 줄·괄호 지시)"),
     "separate": ("5.2 음원 분리 (Bandit v2)", [("cboe/stages/separate.py", "def run(")],
                  "audio/{speech,music,effects}_48k·16k.wav  (트랙 소리 세기 env.npz 는 sed 단계가 씀)"),
     "cuts": ("5.5 장면 나누기 (TransNetV2)", [("cboe/stages/cuts.py", "def run("), ("cboe/stages/cuts.py", "THRESHOLD =")],
@@ -69,6 +73,8 @@ INFO = {
 VIS_KO = {"visible": "얼굴 보임", "not_visible": "얼굴 안 보임", "unclear": "애매"}
 TIMING_KO = {"asr": "받아쓰기와 맞춤", "voice": "못 맞춤→목소리 구간에 배치", "even": "못 맞춤→고르게 나눔",
              "script": "자막 시각 그대로", None: "-"}
+STATUS_KO = {"ok": "맞음", "differs": "들린 말이 다름", "unheard": "못 맞춤", "absent": "장면이 영상에 없음",
+             "out_of_range": "처리 구간 밖"}
 
 
 # ---------------------------------------------------------------- helpers
@@ -106,7 +112,8 @@ def cut(s, n=90) -> str:
 
 
 def overlap(s, e, a, b) -> bool:
-    return e >= a and s <= b
+    """Whether [s, e] meets [a, b]; a row without a time (a script line not found in the film) never does."""
+    return s is not None and e is not None and e >= a and s <= b
 
 
 class Ctx:
@@ -175,21 +182,54 @@ def missing(c: Ctx, *files) -> bool:
 # ---------------------------------------------------------------- stages
 def st_ingest(c: Ctx, a, b, full):
     m = c.meta
-    if a is None:
-        print(f"  제목 {m.get('title')} | 영상 {m.get('video')}")
-        print(f"  대본 {m.get('script')} | 처리 구간 {ft(m.get('t0'))}~{ft(m.get('t1'))} | {m.get('fps')}fps {m.get('width')}x{m.get('height')}")
+    print(f"  제목 {m.get('title')} | 영상 {m.get('video')}")
+    print(f"  처리 구간 {ft(m.get('t0'))}~{ft(m.get('t1'))} | {m.get('fps')}fps {m.get('width')}x{m.get('height')} "
+          f"| 프로필 {m.get('profile') or 'adult'}")
+    adir = c.w / "audio"
+    print("  소리: " + (", ".join(f for f in ("mix_48k.wav", "mix_16k.wav") if (adir / f).exists()) or "없음"))
+
+
+def _line_marks(ln: dict) -> str:
+    """What the script says about a line beside its words: language, singing, source, manner, sounds."""
+    marks = [ln["language"]] if ln.get("language") else []
+    marks += ["노래"] if ln.get("sung") else []
+    marks += [ln["source"]] if ln.get("source") else []
+    marks += [f"말투 {', '.join(ln['delivery'])}"] if ln.get("delivery") else []
+    marks += [f"소리 {', '.join(ln['vocal'])}"] if ln.get("vocal") else []
+    marks += [f"{d['by']}의 소리 {d['text']}" for d in ln.get("directions") or [] if d.get("by")]
+    return f" ({'; '.join(marks)})" if marks else ""
+
+
+def st_script(c: Ctx, a, b, full):
+    m = c.meta
     sc = c.j("script.json")
+    print(f"  대본 파일 {m.get('script') or '없음'}")
     if sc is None:
         missing(c, "script.json")
         return
-    lines = sc.get("lines", [])
-    if a is None:
-        nos = sum(1 for ln in lines if not ln.get("speaker"))
-        print(f"  대본 줄 {len(lines)} (화자 없음 {nos}) | 시각 있는 대본 {sc.get('timed')} | 인물 {sc.get('characters')}")
-        for ln in lines[:3 if not full else None]:
-            print(f"    {ln['id']} [{ln.get('speaker') or '-'}] {cut(ln['text'], 80)}")
-    else:
-        print("  (대본 줄에는 아직 시각이 없음 → align 단계에서 붙음)")
+    lines, elements = sc.get("lines", []), sc.get("elements", [])
+    try:
+        from cboe import script as script_mod
+        sm = script_mod.summary(sc)
+    except Exception as e:      # a reading the summary does not know: show what is there instead of stopping
+        sm = {"warnings": [f"요약 실패: {e}"]}
+    src = sc.get("source") if isinstance(sc.get("source"), dict) else {}
+    print(f"  형식 version {sc.get('version', 1)} · {sc.get('format') or ('timed' if sc.get('timed') else 'lines')}"
+          + (f" ({sc['layout']})" if sc.get("layout") else "") + (f" · sha1 {src['sha1'][:10]}" if src.get("sha1") else ""))
+    print(f"  장면 {len(sc.get('scenes') or [])} · 대사 줄 {len(lines)} (화자 없음 {sum(1 for ln in lines if not ln.get('speaker'))}) "
+          f"· 인물 {len(sc.get('characters') or [])} · 요소 " +
+          (", ".join(f"{k} {v}" for k, v in Counter(e.get("type") for e in elements).items()) or "없음"))
+    print(f"  외국어 {dict(Counter(ln['language'] for ln in lines if ln.get('language')))} · 노래 "
+          f"{sum(1 for ln in lines if ln.get('sung'))} · 출처 {dict(Counter(ln['source'] for ln in lines if ln.get('source')))}"
+          f" · 말투 {sum(len(ln.get('delivery') or []) for ln in lines)} · 화자 소리 {sum(len(ln.get('vocal') or []) for ln in lines)}"
+          f" · 남의 소리 {sum(1 for ln in lines for d in ln.get('directions') or [] if d.get('by'))}")
+    for w in sm.get("warnings") or []:
+        print(f"  ⚠ {w}")
+    if sm.get("error"):
+        print(f"  ✗ {sm['error']}")
+    print(f"  인물: {', '.join(sc.get('characters') or [])}")
+    for ln in lines[:None if full else 3]:
+        print(f"    {ln['id']} {ln.get('scene_id') or '-'} [{ln.get('speaker') or '-'}] {cut(ln['text'], 80)}{_line_marks(ln)}")
 
 
 def st_separate(c: Ctx, a, b, full):
@@ -308,19 +348,25 @@ def st_align(c: Ctx, a, b, full):
         print(f"  방식 {d.get('mode')} | 줄 {len(lines)} | " + ", ".join(f"{TIMING_KO.get(k, k)} {v}" for k, v in tm.items()))
         print(f"  글자 일치(match): 0.8 이상 {sum(m >= 0.8 for m in mt)}, 0.5~0.8 {sum(0.5 <= m < 0.8 for m in mt)}, "
               f"0.5 미만 {sum(m < 0.5 for m in mt)}")
+        st = Counter(ln.get("status") or "ok" for ln in lines)      # a dialogue.json without status: all 'ok'
+        print("  줄 상태: " + ", ".join(f"{STATUS_KO.get(k, k)} {v}" for k, v in st.items())
+              + f" | 시각 없음 {sum(1 for ln in lines if ln.get('start') is None)}"
+              + f" | 대본에 없는 들린 말 {len(d.get('extras') or [])}")
         bad = [ln for ln in lines if ln.get("timing") != "asr" and ln.get("timing") != "script"]
         if bad:
             print("  받아쓰기와 못 맞춘 줄 (시각이 추정값):")
             for ln in bad[:None if full else 8]:
-                print(f"    {ln['id']} {ft(ln['start'])}~{ft(ln['end'])} [{TIMING_KO.get(ln.get('timing'))}] "
+                print(f"    {ln['id']} {ft(ln.get('start'))}~{ft(ln.get('end'))} [{TIMING_KO.get(ln.get('timing'))}] "
                       f"[{ln.get('speaker') or '-'}] {cut(ln['text'], 60)}")
         if not full:
             return
         a, b = -1, 1e12
+    every = a == -1 and b == 1e12           # the whole stage: the lines without a time too
     for ln in lines:
-        if overlap(ln["start"], ln["end"], a, b):
+        if overlap(ln.get("start"), ln.get("end"), a, b) or (every and ln.get("start") is None):
             anch = sum(1 for w in ln.get("words", []) if w.get("anchored"))
-            print(f"  {ln['id']} {ft(ln['start'])}~{ft(ln['end'])} [{ln.get('speaker') or '-'}] "
+            print(f"  {ln['id']} {ft(ln.get('start'))}~{ft(ln.get('end'))} [{ln.get('speaker') or '-'}] "
+                  f"{STATUS_KO.get(ln.get('status') or 'ok', ln.get('status'))} · "
                   f"{TIMING_KO.get(ln.get('timing'), ln.get('timing'))} · match {ln.get('match')} · "
                   f"맞춘 낱말 {anch}/{len(ln.get('words', []))}")
             print(f"      {cut(ln['text'], 100)}")
@@ -359,9 +405,13 @@ def st_sfx(c: Ctx, a, b, full):
 def _music_row(x):
     moods = ", ".join(f"{m['ko']} {m['score']:.2f}" for m in x.get("moods", [])[:3])
     inst = ", ".join(f"{m['ko']} {m['score']:.2f}" for m in x.get("instruments", [])[:2])
-    print(f"  {x['kind']:11s} {ft(x['onset'])} (구간 {ft(x['segment'][0])}~{ft(x['segment'][1])}) 음악 점수 {x.get('music_score')}"
+    seg = x.get("segment") or [None, None]
+    print(f"  {x['kind']:11s} {ft(x['onset'])} (구간 {ft(seg[0])}~{ft(seg[1])}) 음악 점수 {x.get('music_score')}"
           f" · 분위기 세기 {x.get('mood_strength')} · 변화 {x.get('change') or '-'}")
-    print(f"      분위기: {moods} | 악기: {inst}")
+    if x["kind"] == "stop":                 # the music breaks off: how far its level fell
+        print(f"      음악이 멈춤 · 소리 {x.get('drop_db')}dB 떨어짐")
+    else:
+        print(f"      분위기: {moods} | 악기: {inst}")
 
 
 def st_music(c: Ctx, a, b, full):
@@ -391,19 +441,24 @@ def st_speaker(c: Ctx, a, b, full):
     rows = d.get("lines", [])
     dl = {ln["id"]: ln for ln in c.j("dialogue.json", {}).get("lines", [])}
     if a is None:
-        print("  " + ", ".join(f"{VIS_KO.get(k, k)} {v}" for k, v in Counter(r['face'] for r in rows).items()))
+        print("  " + ", ".join(f"{VIS_KO.get(k, k)} {v}" for k, v in Counter(r['face'] for r in rows).items())
+              + f" | 대본이 화면 밖이라 한 줄 {sum(1 for r in rows if r.get('by') == 'script')}"
+              + f" | 시각 없어 건너뛴 대사 줄 {sum(1 for ln in dl.values() if ln.get('start') is None)}")
         if not full:
             return
         a, b = -1, 1e12
     for r in rows:
         ln = dl.get(r["line_id"], {})
-        s, e = ln.get("start", r["window"][0]), ln.get("end", r["window"][1])
+        win = r.get("window") or [None, None]
+        s = ln.get("start") if ln.get("start") is not None else win[0]
+        e = ln.get("end") if ln.get("end") is not None else win[1]
         if overlap(s, e, a, b):
             best = r.get("best") or {}
             bs = (f" · 가장 큰 얼굴 말한 프레임 {best.get('speaking_frames')}/{best.get('frames')} 최고점 {best.get('max_score')}"
                   if best else "")
-            print(f"  {r['line_id']} [{ln.get('speaker') or '-'}] 본 구간 {ft(r['window'][0])}~{ft(r['window'][1])} → "
-                  f"{VIS_KO.get(r['face'], r['face'])} · 얼굴 {r.get('n_faces')}개{bs} · 이름 이미 불림 {r.get('name_revealed')}")
+            by = f" · 대본에 적힌 출처 {r.get('source')} (모델 없이)" if r.get("by") == "script" else ""
+            print(f"  {r['line_id']} [{ln.get('speaker') or '-'}] 본 구간 {ft(win[0])}~{ft(win[1])} → "
+                  f"{VIS_KO.get(r['face'], r['face'])} · 얼굴 {r.get('n_faces')}개{bs}{by} · 이름 이미 불림 {r.get('name_revealed')}")
 
 
 def _ids_in(c: Ctx, a, b, kinds=("sfx", "music")):
@@ -664,7 +719,7 @@ def main():
         import contextlib
         import io
         for s in STAGES:
-            if s in ("ingest", "export"):
+            if s in NO_TIME:
                 continue
             head(s)
             buf = io.StringIO()

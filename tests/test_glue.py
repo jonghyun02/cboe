@@ -7,8 +7,14 @@ Every script text here is made up for the test; no line of a real script is used
 """
 from __future__ import annotations
 
+import importlib.util
+import json
+from pathlib import Path
+
 from cboe import screenplay as sp
 from cboe import script
+
+ROOT = Path(__file__).resolve().parents[1]
 
 # a script whose speaker cells are set off by spaces, with a title page and long speeches
 GAP_SCRIPT = [
@@ -149,3 +155,65 @@ def test_summary_does_not_count_the_title_page_as_unread(tmp_path):
     doc = script.read(f)
     assert doc["format"] == "screenplay" and len(doc["lines"]) == 6
     assert not any("가르지 못한" in w for w in script.summary(doc)["warnings"])
+
+
+# ------------------------------------------------------------ the GUI file dialog
+def test_the_script_dialog_offers_every_kind_the_reader_reads():
+    from cboe import gui
+    text = gui.script_filter()
+    assert "*.pdf" in text and "*.hwp" in text
+    assert all(f"*{ext}" in text for ext in script.SUFFIXES)
+
+
+# ------------------------------------------------------------ tools/inspect_stages.py
+def _inspect():
+    spec = importlib.util.spec_from_file_location("inspect_stages", ROOT / "tools" / "inspect_stages.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _write(path: Path, data) -> None:
+    path.write_text(json.dumps(data, ensure_ascii=False), encoding="utf-8")
+
+
+def test_inspect_reads_the_new_formats(tmp_path, capsys):
+    ins = _inspect()
+    assert ins.STAGES[:2] == ["ingest", "script"] and "script.json" not in ins.INFO["ingest"][2]
+    assert set(ins.SHOW) == set(ins.STAGES)
+    w = tmp_path / "work"
+    w.mkdir()
+    src = tmp_path / "s.txt"
+    src.write_text("\n".join(["1. 포구 - 밤", "나래      (웃으며) 왔다.", "도윤      (학생들 폭소) 오랜만이야.",
+                              "나래      응.", "도윤(V.O)    거기 누구야?", "도윤      가자."]), encoding="utf-8")
+    doc = script.read(src)
+    _write(w / "project.json", {"title": "시험", "script": str(src), "t0": 0.0, "t1": 60.0, "fps": 24.0})
+    _write(w / "script.json", doc)
+    lines = [{**ln, "words": [], "match": 1.0, "timing": "asr", "status": "ok", "start": 1.0 + 3 * k, "end": 2.0 + 3 * k}
+             for k, ln in enumerate(doc["lines"])]
+    lines[1].update(status="unheard", timing="voice")
+    lines[2].update(status="absent", start=None, end=None, timing=None)
+    lines[4].update(status="out_of_range", start=None, end=None, timing=None)
+    _write(w / "dialogue.json", {"mode": "test", "lines": lines,
+                                 "extras": [{"id": "X0001", "start": 5.0, "end": 6.0, "text": "어", "words": []}]})
+    _write(w / "music.json", {"segments": [[10.0, 20.0]], "items": [
+        {"kind": "start", "onset": 10.0, "segment": [10.0, 20.0], "moods": [{"ko": "경쾌한", "score": 0.5}],
+         "instruments": [], "mood_strength": 0.4, "music_score": 0.8, "change": None},
+        {"kind": "stop", "onset": 20.0, "segment": [10.0, 20.0], "moods": [], "mood_strength": 0.0, "instruments": [],
+         "slope_db_s": 0.0, "change": None, "drop_db": 18.0, "music_score": 0.5}]})
+    _write(w / "speaker.json", {"lines": [
+        {"line_id": "L0001", "face": "visible", "n_faces": 1, "best": None, "tracks": [], "window": [1.0, 2.0]},
+        {"line_id": "L0004", "face": "not_visible", "n_faces": 0, "best": None, "tracks": [], "window": [10.0, 11.0],
+         "by": "script", "source": "offscreen"}]})
+    c = ins.Ctx(w)
+    for name in ins.STAGES:
+        ins.SHOW[name](c, None, None, True)                      # every stage, whole: nothing stops it
+    for name in ins.STAGES:
+        if name not in ins.NO_TIME:
+            ins.SHOW[name](c, 0.0, 30.0, False)                  # and around a time
+    out = capsys.readouterr().out
+    assert "version 2 · screenplay (gap)" in out and "장면 1 · 대사 줄 5" in out
+    assert "말투 웃으며" in out and "학생들의 소리 학생들 폭소" in out
+    assert "줄 상태: 맞음 2, 못 맞춤 1, 장면이 영상에 없음 1, 처리 구간 밖 1" in out and "대본에 없는 들린 말 1" in out
+    assert "음악이 멈춤 · 소리 18.0dB 떨어짐" in out and "대본에 적힌 출처 offscreen" in out
+    assert "시각 없어 건너뛴 대사 줄 2" in out
