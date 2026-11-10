@@ -94,9 +94,10 @@ A later piece of a heard line may then come after its words, and also before the
 after it need the room (each still after the piece before it has had its time): 5/6 s (General
 Requirements 1, a must for the checker) comes before the in-time "on the first frame of audio or as
 close to it as possible" (TG 1, should: 첫 소리 프레임에, 안 되면 될 수 있는 대로 가깝게), as in
-the scene rule below. Keeping every piece behind its words was measured in the 5th round: per 1000
-made-up scenes 143 pieces start early (in 127 groups), and holding them back gave 156 more cells
-under 5/6 s and 30 more flashes. When the gap cannot hold its pieces, a guessed line (not one matched
+the scene rule below. Keeping every piece behind its words was measured in the 5th round on 1000
+made-up scenes: 143 later pieces start before their first word; holding every piece behind its
+words leaves 127 groups of pieces in which no layout gives each piece 5/6 s, and it gave 156 more
+cells under 5/6 s and 30 more flashes. When the gap cannot hold its pieces, a guessed line (not one matched
 by the ASR) gets no cell and goes to ``no_room`` (the writer decides: a guessed line is no reason
 to show a few frames of text, 감사 2-m1); a heard line keeps its cells, and when the writer's cut
 points made them that short, the short cell says so in ``check.notes``.
