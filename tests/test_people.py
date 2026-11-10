@@ -241,3 +241,29 @@ def test_a_line_nobody_is_named_for_has_no_same_person():
     lines = [ln("L1", None, "a"), ln("L2", "가람", "b"), ln("L3", None, "c")]
     for which in ("from_here", "before", "scene", "person"):
         assert people.scope_lines(lines, "L1", which) == ["L1"]
+
+
+# ------------------------------------------------------------------ 6차: maybe the same person (3-m3)
+@pytest.mark.parametrize("a, b, why", [
+    ("김가람", "가람", "surname"), ("남궁가람", "가람", "surname"), ("김 가람", "가람", "surname"),
+    ("어린 김가람", "가람", "surname"), ("어린 가람", "가람", "age"), ("어린가람", "가람", "age"),
+    ("가람(아역)", "가람", "age"), ("가람 (17세)", "가람", "age"), ("20대 가람", "가람", "age"),
+    ("소년 가람", "가람", "age"), ("가람 아역", "가람", "age"), ("가람(성인)", "어린 가람", "age")])
+def test_two_names_that_may_be_one_person(a, b, why):
+    assert people.same_person_hint(a, b) == why and people.same_person_hint(b, a) == why
+
+
+@pytest.mark.parametrize("a, b", [
+    ("가람 엄마", "가람"), ("가람 친구", "가람"), ("가람모", "가람"),        # a relation is another person
+    ("김가람", "이가람"), ("김형사", "형사"), ("전남편", "남편"), ("경찰1", "경찰"),
+    ("소년가람", "가람"), ("가람이", "가람"), ("나래", "래"), ("가람", "가람"), ("", "가람")])
+def test_names_that_are_not_offered(a, b):
+    assert people.same_person_hint(a, b) is None
+
+
+def test_maybe_same_lists_both_ways_and_leaves_out_what_the_writer_said_no_to():
+    names = ["김가람", "가람", "어린 가람", "가람 엄마", "나래"]
+    assert people.maybe_same(names) == {"김가람": ["가람", "어린 가람"], "가람": ["김가람", "어린 가람"],
+                                        "어린 가람": ["김가람", "가람"]}
+    got = people.maybe_same(names, {"어린 가람": {"not_same": ["가람"]}})
+    assert got == {"김가람": ["가람", "어린 가람"], "가람": ["김가람"], "어린 가람": ["김가람"]}

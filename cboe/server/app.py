@@ -18,11 +18,16 @@ Sound phrases stored in an older notation ('♬ …') are shown in today's ('[�
 ``people`` (the people, when their name is told, the writer's decision, ``early``), ``added``
 (what the writer added) and the counts in ``summary.lines`` / ``summary.extras`` /
 ``summary.people``. Routes: ``/api/lines/{id}`` (in / out, text, name, language, sung, start /
-end, breaks, keep), ``/api/lines/bulk``, ``/api/lines/{id}/speaker`` (a name by scope),
+end, breaks, keep, source, join: one cell with the line before, pos: "top", manner: the manner of
+speech in the label), ``/api/lines/bulk``, ``/api/lines/{id}/speaker`` (a name by scope),
 ``/api/lines/aside`` (a decision kept aside since the script changed — state ``aside``, kind "line"
 or "speaker": put it on a line, or on the speaker item of a line, or let it go),
 ``/api/extras/{id}`` (line | ignore | clear), ``/api/added`` (+ ``/{id}`` to change, DELETE to
-remove), ``/api/people``. Unknown ids are 404, values that cannot be used 400, clashes 409.
+remove; ``pos``), ``/api/people`` (``not_same``: not the person a ``maybe_same`` offers), and
+``/api/items/{id}`` ``pos`` for a sound's cell. Unknown ids are 404, values that cannot be used 400,
+clashes 409. A line row also has ``delivery`` (the manner of speech the script writes, always a
+list) and ``joined``; ``export_check.heard_no_cell`` (``summary.heard_no_cell``) lists the speech
+heard where no dialogue cell is.
 ``/api/envelope`` gives the timeline the level of the separated tracks (env.npz, cut down).
 
 Video and frames are limited to the project window [t0, t1): the page never seeks
@@ -58,7 +63,7 @@ from pydantic import BaseModel, StrictInt
 
 from .. import export as export_mod
 from .. import proxy, style
-from ..state import EXCLUDED_KO, LINE_STATUSES, ORIGIN_KO, Conflict, Project, ReviewError
+from ..state import EXCLUDED_KO, LINE_STATUSES, ORIGIN_KO, Conflict, Project, ReviewError, label_extra
 from ..textutil import units
 from ..util import log, read_json
 
@@ -78,6 +83,7 @@ class ItemUpdate(BaseModel):
     short: str | None = None
     name: str | None = None
     scope: Scope | None = None
+    pos: str | None = None                 # a sound's cell: "top", null = the bottom (state.POSITIONS)
 
 
 class LineUpdate(BaseModel):
@@ -94,6 +100,9 @@ class LineUpdate(BaseModel):
     keep: bool | None = None
     show_name: bool | None = None          # only for a line without a speaker item
     source: str | None = None              # state.SOURCES (inner, phone …) or "" for none; null: the script's
+    join: bool | None = None               # true: one cell with the line before (false = null: not joined)
+    pos: str | None = None                 # "top"; null: the bottom
+    manner: str | None = None              # the manner of speech in the label ([하늘/속삭이며]); null: none
 
 
 class LinesBulk(BaseModel):
@@ -133,6 +142,7 @@ class AddedNew(BaseModel):
     show_name: bool | None = None
     breaks: list[StrictInt] | None = None
     keep: bool | None = None
+    pos: str | None = None                 # "top"; null: the bottom
 
 
 class AddedUpdate(BaseModel):
@@ -146,15 +156,18 @@ class AddedUpdate(BaseModel):
     show_name: bool | None = None
     breaks: list[StrictInt] | None = None
     keep: bool | None = None
+    pos: str | None = None                 # "top"; null: the bottom
 
 
 class PeopleUpdate(BaseModel):
-    """How people are labelled before their name is told (cboe.people): several at once."""
+    """How people are labelled before their name is told (cboe.people): several at once; ``not_same``:
+    people who are not these ones (no longer offered as ``maybe_same``; null clears what was said)."""
     names: list[str]
     mode: Literal["name", "generic"] | None = None
     before: str | None = None
     reveal: Literal["auto", "line", "never"] | None = None
     reveal_line: str | None = None
+    not_same: list[str] | None = None
 
 
 class BulkUpdate(BaseModel):
@@ -310,13 +323,17 @@ def export_warnings(chk: dict) -> list[str]:
                    + (f" · 그중 크레디트·인사·반복 의심 {sus}개)" if sus else ")"))
     if chk.get("names_early"):
         out.append(f"이름이 밝혀지기 전에 이름 표시가 나가는 인물 {len(chk['names_early'])}명")
+    if chk.get("heard_no_cell"):
+        out.append(f"말이 들리는데 자막 칸이 없는 구간 {len(chk['heard_no_cell'])}곳")
     return out
 
 
 ROW_KEYS = ("id", "idx", "seq", "origin", "speaker", "name", "label_name", "text", "text_from", "status", "timing",
-            "start", "end", "guess", "scene_id", "language", "source", "note", "hints", "match", "voice",
-            "speaker_item", "excluded", "extra", "breaks", "decision", "cells", "no_room", "source_label")
-ROW_FLAGS = ("include", "estimated", "pinned", "decided", "show_name", "name_early", "generic", "sung", "keep")
+            "start", "end", "guess", "scene_id", "language", "source", "note", "hints", "heard_language", "match",
+            "voice", "speaker_item", "excluded", "extra", "breaks", "decision", "cells", "no_room", "source_label",
+            "pos", "manner")
+ROW_FLAGS = ("include", "estimated", "pinned", "decided", "show_name", "name_early", "generic", "sung", "keep",
+             "joined")
 DIALOGUE_KEYS = ("id", "speaker", "text", "start", "end", "voice", "status", "timing")
 
 
@@ -326,9 +343,11 @@ def line_row(ln: dict) -> dict:
     "script" are left out; the script text, the raw script line and what was heard only where
     they say something (``script_text`` when the shown text differs, ``asr_text`` / ``diff`` for
     differs · unheard lines and for a text taken from what was heard); ``label`` = the label as
-    placed when the name is shown."""
+    placed when the name is shown; ``delivery`` (the manner of speech the script writes) always,
+    [] when there is none; ``joined``: in one cell with the line before it in the draft."""
     row = {k: ln[k] for k in ROW_KEYS if ln.get(k) not in (None, [], {}, "", "script")}
     row.update({k: True for k in ROW_FLAGS if ln.get(k)})
+    row["delivery"] = list(ln.get("delivery") or [])
     if ln.get("script_text") and ln["script_text"] != ln.get("text"):
         row["script_text"] = ln["script_text"]
     if ln.get("raw") and ln["raw"] != ln.get("script_text"):
@@ -344,8 +363,9 @@ def line_row(ln: dict) -> dict:
 
 
 def _source_extra(ln: dict) -> list[str]:
-    """The source word placement shows with the name ('[하늘/속마음]'; ``Project.placement_inputs``)."""
-    return [ln["source_label"]] if ln.get("source_label") and ln.get("label_name") else []
+    """The source word and the writer's manner of speech placement shows with the name
+    ('[하늘/속마음/속삭이며]'; ``Project.placement_inputs``, ``state.label_extra``)."""
+    return label_extra(ln, bool(ln.get("label_name")))
 
 
 def show_item(it: dict, lines: dict) -> dict:
@@ -622,11 +642,15 @@ class ReviewService:
             sus = [x["suspect"] for x in comp["extras"] if x["state"] == "open" and x.get("suspect")]
             summary["extras"]["suspect"] = len(sus)
             summary["extras"]["by_suspect"] = {k: sus.count(k) for k in ("credit", "greeting", "repeat")}
-            # decided = a way of labelling chosen (the screen counts the same); a reveal line alone is not
+            # decided = a way of labelling chosen (the screen counts the same); a reveal line alone is
+            # not, nor is a '같은 사람 아님' alone (not_same)
             summary["people"] = {"total": len(comp["people"]),
                                  "early": sum(1 for x in comp["people"] if x.get("early")),
                                  "decided": sum(1 for x in comp["people"] if x.get("mode")),
-                                 "reveal_only": sum(1 for x in comp["people"] if x.get("decision") and not x.get("mode"))}
+                                 "reveal_only": sum(1 for x in comp["people"] if not x.get("mode")
+                                                    and set(x.get("decision") or ()) - {"at", "not_same"})}
+            # speech heard where no dialogue cell is (export check)
+            summary["heard_no_cell"] = len((chk or {}).get("heard_no_cell") or [])
 
             video = meta.get("video")
             project = {"title": meta.get("title") or p.work.name, "fps": fps, "t0": t0, "t1": t1,
@@ -775,7 +799,7 @@ def create_app(work, media=None) -> FastAPI:
 
     def sent(body: BaseModel) -> dict:
         out = {k: getattr(body, k) for k in body.model_fields_set}
-        for k in ("text", "phrase", "name", "before"):
+        for k in ("text", "phrase", "name", "before", "manner"):
             if isinstance(out.get(k), str):
                 out[k] = out[k].strip() or None
         return out

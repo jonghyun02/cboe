@@ -39,6 +39,14 @@ every time from the lines and the decisions.
 
 ``scope_lines`` picks the lines a speaker change applies to — by person, never by the label text
 (two people shown as '남자' are two people, 감사 3-m2).
+
+``maybe_same`` offers two names that may be one person (감사 3-m3: a script writes one person under
+more than one speaker name) — offered only, never merged: the writer merges them by giving all the
+lines of one the other name (scope 'person') or says they are not (``not_same``). Kept narrow: (가) a
+family name in front of the given name ('김가람' and '가람'; not a title or a word of family:
+'김형사' and '형사', '전남편' and '남편'), (나) a word of age or time with the name ('어린 가람',
+'가람(아역)', '가람 (17세)' and '가람', or '가람(성인)'). A name of a relation ('가람 엄마', '가람
+친구', '가람모') is another person and never offered.
 """
 from __future__ import annotations
 
@@ -77,6 +85,27 @@ SCOPE_KO = {"line": "이 줄", "from_here": "이 줄부터 끝까지", "before":
             "person": "이 인물의 모든 줄", "voice": "같은 목소리"}
 MODES = ("name", "generic")
 REVEALS = ("auto", "line", "never")
+# maybe_same (감사 3-m3) — lists written by hand, not measured on data:
+# (가) family names that may stand in front of a given name ('김가람': 김 + 가람)
+SURNAMES = set("김이박최정강조윤장임한오서신권황안송류유전홍고문양손배백허남심노하곽성차주우구민진나지엄채원천방공"
+               "현함변염여추도소석선설마길연위표명기반라왕금옥육인맹제모탁국어은편용예경봉사부가복태목형피두감음빈동온호범"
+               "좌팽승간상시갈단견당")
+DOUBLE_SURNAMES = ("남궁", "제갈", "선우", "황보", "독고", "사공", "서문", "동방")
+# ... but not in front of a title or a word of family: '김형사' and '형사' are not one name told two
+# ways, and '전남편' (a former husband) or '양아버지' is not '남편' / '아버지'
+NOT_GIVEN_NAMES = {"남편", "아내", "부인", "엄마", "아빠", "어머니", "아버지", "남친", "여친", "애인", "아들", "딸내미",
+                   "오빠", "언니", "누나", "동생", "할머니", "할아버지", "삼촌", "이모", "고모", "외삼촌", "아저씨",
+                   "아줌마", "형사", "경찰", "경위", "경사", "순경", "반장", "팀장", "과장", "부장", "사장", "회장",
+                   "실장", "대리", "기사", "선생", "선생님", "의사", "교수", "박사", "검사", "판사", "기자", "감독",
+                   "주임", "계장", "소장", "원장", "국장", "차장", "대표", "이사", "비서", "사모", "학생", "손님",
+                   "주인", "직원", "대위", "중위", "소위", "병장", "상병", "일병", "이병", "하사", "중사", "상사",
+                   "소령", "중령", "대령", "장군", "남자", "여자"}
+# (나) words of age or time said with the name: before it with a space ('소년 가람'), or as a tail
+# ('가람(아역)', '가람 아역'); the adjectives also written onto the name ('어린가람')
+AGE_WORDS = ("어린 시절", "학창 시절", "어린시절", "학창시절", "어린", "젊은", "늙은", "꼬마", "아기", "아역", "성인",
+             "청년", "중년", "노년", "노인", "소년", "소녀", "과거", "현재", "미래")
+AGE_ATTACHED = ("어린", "젊은", "늙은")
+AGE_NUMBER = r"\d+\s*(?:대|살|세|년도|년)"       # '20대', '17살', '17세', '1986년'
 
 
 def _alt(words) -> str:
@@ -306,3 +335,62 @@ def scope_lines(lines, line_id, which="line") -> list[str]:
     if which == "scene":
         return [ln["id"] for i, ln in same if ln.get("scene_id") == me.get("scene_id")]
     return [ln["id"] for _, ln in same]
+
+
+_AGE = _alt(AGE_WORDS)
+_AGE_HEAD = re.compile(rf"^(?:(?:{_AGE}|{AGE_NUMBER})\s+|(?:{_alt(AGE_ATTACHED)})(?=[가-힣]{{2}}))(?P<base>.+)$")
+_AGE_TAIL = re.compile(rf"^(?P<base>.+?)(?:\s*[(（\[]\s*(?:{_AGE}|{AGE_NUMBER}|\d+)\s*[)）\]]|\s+(?:{_AGE}|{AGE_NUMBER}))$")
+
+
+def _core(name) -> str:
+    """The name without the words of age or time said with it ('어린 가람', '가람(아역)' -> '가람'),
+    without spaces."""
+    n = " ".join(str(name or "").split())
+    for _ in range(2):                                  # '어린 가람(아역)': both sides
+        m = _AGE_HEAD.match(n) or _AGE_TAIL.match(n)
+        if not m:
+            break
+        n = m.group("base").strip()
+    return n.replace(" ", "")
+
+
+def _surname_of(longer: str, shorter: str) -> bool:
+    """Whether ``longer`` is a family name and the given name ``shorter`` ('김가람', '가람')."""
+    if len(shorter) < 2 or shorter in NOT_GIVEN_NAMES or not re.fullmatch(r"[가-힣]+", longer + shorter):
+        return False
+    head = longer[:-len(shorter)] if longer.endswith(shorter) else None
+    return bool(head) and (head in SURNAMES or head in DOUBLE_SURNAMES)
+
+
+def same_person_hint(a, b) -> str | None:
+    """Why two names may be one person: "surname" (가), "age" (나), or None (module doc)."""
+    a, b = " ".join(str(a or "").split()), " ".join(str(b or "").split())
+    if not a or not b or a == b or is_role(a) or is_role(b):
+        return None
+    ca, cb = _core(a), _core(b)
+    if not ca or not cb:
+        return None
+    if ca == cb:
+        return "age"
+    if _surname_of(ca, cb) or _surname_of(cb, ca):
+        return "surname"
+    return None
+
+
+def maybe_same(names, decisions=None) -> dict:
+    """``{name: [other names that may be the same person]}`` among ``names`` (people, in their
+    order), leaving out the pairs the writer said are not (``decisions[name]["not_same"]``, either
+    way round). Only offered: nothing is merged (module doc)."""
+    names = list(dict.fromkeys(n for n in names or () if n))
+    decisions = decisions or {}
+
+    def told_apart(a, b):
+        return any(isinstance(decisions.get(x), dict) and y in (decisions[x].get("not_same") or ())
+                   for x, y in ((a, b), (b, a)))
+    out: dict = {}
+    for i, a in enumerate(names):
+        for b in names[i + 1:]:
+            if same_person_hint(a, b) and not told_apart(a, b):
+                out.setdefault(a, []).append(b)
+                out.setdefault(b, []).append(a)
+    return {n: [m for m in names if m in out[n]] for n in out}

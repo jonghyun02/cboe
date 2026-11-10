@@ -8,22 +8,28 @@ time a choice changes, ``Project.recompute()`` merges both, runs placement
 
 ``review.json`` (every section may be missing; an older file opens as it is)::
 
-    items     {item id: {decision, phrase, short, name, fp, ctx, at}}  후보 결정 (a speaker item's fp is
-                         'speaker@' + its line's line_fp, with the line's ctx: it follows the line;
-                         the older 'speaker@{line id}:{text}' is read and written anew on the next write)
+    items     {item id: {decision, phrase, short, name, pos, fp, ctx, at}}  후보 결정 (a speaker item's
+                         fp is 'speaker@' + its line's line_fp, with the line's ctx: it follows the
+                         line; the older 'speaker@{line id}:{text}' is read and written anew on the
+                         next write; pos "top": a sound's cell at the top, sounds only)
     placement {item id: {action "move", t, fp}}                        배치 고치기 (as before)
     lines     {line id: {fp, ctx, at, include, text, text_from, name, language, sung,
-                         start, end, breaks, keep, show_name, source}} 대사 줄 결정
+                         start, end, breaks, keep, show_name, source, join, pos, manner}} 대사 줄 결정
                          (show_name: only a line without a speaker item, e.g. one brought back;
                           source: where the line comes from, SOURCES or "" for none — the label
-                          shows it with the name, [하늘/속마음]; a decision kept aside under
-                          'fp:…', in ``items`` too, may carry not_on [{fp, ctx}]: lines it is
-                          not about)
+                          shows it with the name, [하늘/속마음]; join True: one cell with the line
+                          before (placement ``join``); pos "top": the cell at the top; manner: the
+                          manner of speech the label shows after the source, [하늘/속삭이며], or
+                          alone when the name is not shown, [속삭이며] — never by default; a
+                          decision kept aside under 'fp:…', in ``items`` too, may carry not_on
+                          [{fp, ctx}]: lines it is not about)
     added     {"A0001": {kind "line"|"sfx"|"music", start, end, text (line) | phrase (sound),
-                         name, language, sung, show_name, extra, extra_fp, at}}   작가가 넣은 것
+                         name, language, sung, show_name, pos, extra, extra_fp, at}}   작가가 넣은 것
     extras    {extra id: {fp, action "ignore", at}}                    무시하기로 한 '대본에 없는 말'
     people    {name: {mode "name"|"generic", before, reveal "auto"|"line"|"never",
-                      reveal_line, reveal_fp, reveal_ctx, at}}         인물별 표시
+                      reveal_line, reveal_fp, reveal_ctx, not_same [names], at}}   인물별 표시
+                      (not_same: people the writer says are not this one — no 'maybe the same
+                       person' between them, ``cboe.people.maybe_same``)
 
 A line decision is about the line with the same fingerprint (``line_fp``: speaker, text and the
 place among lines of the same speaker and text) and context (``ctx``: the script lines around it
@@ -84,7 +90,13 @@ EXCLUDED_KO = {"absent": "영화에 없음", "out_of_range": "처리 구간 밖"
 ORIGIN_KO = {"script": "대본", "heard": "들린 말", "writer": "작가"}
 TEXT_FROM = ("script", "heard", "writer")
 LINE_FIELDS = ("include", "text", "text_from", "name", "language", "sung", "start", "end", "breaks", "keep",
-               "show_name", "source")
+               "show_name", "source", "join", "pos", "manner")
+# a cell's place on screen (General Requirements 5: away from text on screen); bottom is the default
+# and is never stored (placement: cell "pos" "bottom" | "top")
+POSITIONS = ("top",)
+# letters of a manner of speech the writer gives a line (II.8 [영희/속삭임], II.9 [속삭이며]; the guide's
+# examples have 2-6 letters). The limit of the 6th-round contract, not measured
+MAX_MANNER = 20
 # where a line comes from (script.json ``source``; style.SOURCE_LABELS has the label words)
 SOURCES = ("offscreen", "inner", "video", "phone", "radio", "broadcast", "narration")
 ADDED_KINDS = ("line", "sfx", "music")
@@ -93,6 +105,14 @@ MAX_PHRASE = 200                              # letters of a sound or note the w
 CONTINUES = "같은 화자가 이어 말함"            # the reason of a speaker item whose name a run carries
 WAITS = "앞 줄을 먼저 정해야 함"               # the same speaker after a line still 확인 필요 (recommend)
 SETTLE_MAX = 64                              # placements of one settle at most (a chain ends far sooner)
+# heard_no_cell (export check; II.1 "Include as much of the original dialogue as possible"): heard
+# words with no dialogue cell at their time. Words this close make one stretch (the 6th-round
+# contract: '1초 안쪽'); a cell counts this far on either side (a cell may start up to 0.5 s before
+# its first word, TG2, and ends 0.5 s after its last one, TG1); a stretch of one word shorter than
+# HEARD_SHORT is left out (contract value, not measured)
+HEARD_GAP = 1.0
+HEARD_PAD = 0.5
+HEARD_SHORT = 0.3
 
 
 class ReviewError(ValueError):
@@ -132,6 +152,30 @@ def _check_name(name, what: str = "이름"):
         most = int(MAX_UNITS - units("[]"))
         raise ReviewError(f"{what}: 한글 {most}자까지 쓸 수 있습니다 (화자 표시가 한 줄 {MAX_UNITS:g}자 안에 들어야 함)")
     return name
+
+
+def _pos(v):
+    """A cell position the writer gives: "top", or None for the bottom (the default; "bottom" is
+    taken as None), else ReviewError."""
+    if v is None or v == "bottom":
+        return None
+    if v not in POSITIONS:
+        raise ReviewError("칸 위치는 top(위) 또는 null(아래, 기본) 입니다")
+    return v
+
+
+def _manner(v):
+    """A manner of speech for the label ('속삭이며'; the brackets and spaces around it go): at most
+    ``MAX_MANNER`` letters, no bracket inside (ReviewError); None for an empty one."""
+    if v is None:
+        return None
+    if not isinstance(v, str):
+        raise ReviewError("말투는 글자여야 합니다")
+    s = _norm(v).strip("[] ")
+    if "[" in s or "]" in s:
+        raise ReviewError("말투에는 [ ] 를 쓸 수 없습니다 (화자 표시의 괄호는 저절로 붙음)")
+    _check_len(s, MAX_MANNER, "말투")
+    return s or None
 
 
 def _breaks(v, n: int) -> list[int]:
@@ -547,6 +591,9 @@ class Project:
             if d.get("phrase"):
                 it["phrase"] = d["phrase"]
                 it["short"] = d.get("short") or d["phrase"]
+            if it["kind"] in ("sfx", "music"):
+                pos = d.get("pos") if d.get("pos") in POSITIONS else it.get("pos")
+                it["pos"] = pos if pos in POSITIONS else None          # None: the bottom
             if it["kind"] == "speaker":
                 sp = dict(it.get("speaker") or {})
                 line = lines.get(sp.get("line_id"), {})
@@ -578,12 +625,13 @@ class Project:
         return self.compose(review, draft)["lines"]
 
     def set_decision(self, item_id: str, **fields) -> dict:
-        """Store a writer decision. ``fields``: decision, phrase, short, name, scope.
+        """Store a writer decision. ``fields``: decision, phrase, short, name, scope, pos.
 
         A speaker item's ``name`` is the name of its line (``set_speaker``): ``scope`` ``line``
         (default), ``speaker`` (= ``person``: every line of the same person — by person, not by
         the label shown, 감사 3-m2), ``voice`` (same voice cluster, when lines carry ``voice``),
-        and the scopes of ``cboe.people.SCOPES``.
+        and the scopes of ``cboe.people.SCOPES``. ``pos`` "top" | None (the bottom): where a
+        sound's cell goes (sounds only: a line's cell has the line's ``pos``).
         """
         with self._lock:
             review = self.review()
@@ -592,6 +640,10 @@ class Project:
                 raise KeyError(item_id)
             scope = fields.pop("scope", "line") or "line"
             it = eff[item_id]
+            if "pos" in fields:
+                if it["kind"] not in ("sfx", "music"):
+                    raise ReviewError("칸 위치는 소리 후보에만 정합니다 · 대사 칸의 위치는 대사 줄에서 정합니다")
+                fields["pos"] = _pos(fields["pos"])
             changed = [item_id]
             if it["kind"] == "speaker" and "name" in fields:
                 name = fields.pop("name")
@@ -758,6 +810,26 @@ class Project:
                 cur.pop("breaks", None)
             else:
                 cur["breaks"] = _breaks(v, len((_norm(cur.get("text")) or _norm(ln.get("text"))).split()))
+        if "join" in f:                                    # one cell with the line before (placement join)
+            v = f.pop("join")
+            if v is True:
+                cur["join"] = True
+            elif v is None or v is False:                  # false: not joined, the default (nothing stored)
+                cur.pop("join", None)
+            else:
+                raise ReviewError("앞 줄과 한 칸(join)은 true 또는 null 입니다")
+        if "pos" in f:
+            v = _pos(f.pop("pos"))
+            if v:
+                cur["pos"] = v
+            else:
+                cur.pop("pos", None)
+        if "manner" in f:                                  # shown only when the writer gives it (II.8)
+            v = _manner(f.pop("manner"))
+            if v:
+                cur["manner"] = v
+            else:
+                cur.pop("manner", None)
         if f:
             raise ReviewError(f"모르는 칸입니다: {', '.join(sorted(f))}")
         if cur.get("include") is True and (ln.get("status") in NO_TIME or ln.get("start") is None) \
@@ -1001,6 +1073,12 @@ class Project:
                 a["breaks"] = _breaks(v, len(_norm(a.get("text")).split()))
             else:
                 a.pop("breaks", None)
+        if "pos" in f:                                     # the cell at the top (None: the bottom)
+            v = _pos(f.pop("pos"))
+            if v:
+                a["pos"] = v
+            else:
+                a.pop("pos", None)
         if f:
             raise ReviewError(f"모르는 칸입니다: {', '.join(sorted(f))}")
         if a.get("start") is None or a.get("end") is None:
@@ -1018,7 +1096,8 @@ class Project:
 
     def add(self, kind: str, **fields) -> dict:
         """Something the writer adds: a line (kind "line": start, end, text, name, language, sung,
-        show_name) or a sound or any other note (kind "sfx" | "music": start, end, phrase)."""
+        show_name) or a sound or any other note (kind "sfx" | "music": start, end, phrase); either
+        may have ``pos`` "top" (its cell at the top; None: the bottom)."""
         if kind not in ADDED_KINDS:
             raise ReviewError(f"넣을 수 있는 것은 {', '.join(ADDED_KINDS)} 입니다")
         with self._lock:
@@ -1050,7 +1129,8 @@ class Project:
 
     def set_extra(self, extra_id: str, action: str, **fields) -> dict:
         """A '대본에 없는 말' (dialogue.json extras): "line" makes it a line the writer added (its
-        heard words and times; ``fields`` may give text, name, language, sung, start, end),
+        heard words and times; ``fields`` may give text, name, language, sung, start, end — an
+        extra heard inside a singing part, ``sung`` true, is a sung line unless ``sung`` says no),
         "ignore" sets it aside (and takes back a line made from it), "clear" undoes both."""
         with self._lock:
             review = self.review()
@@ -1067,6 +1147,8 @@ class Project:
                 if made:
                     raise Conflict(f"이미 대사로 넣었습니다 ({made[0]})")
                 base = {"start": x.get("start"), "end": x.get("end"), "text": x.get("text")}
+                if x.get("sung") is True:              # heard inside a singing part (align): lyrics by default
+                    base["sung"] = True                # (II.7 ♪ … ♪); the writer may say otherwise
                 base.update(fields)
                 a = self._added_fields("line", {"extra": extra_id, "extra_fp": fp, "scene_id": x.get("scene_id")}, base)
                 aid = self._new_id(review)
@@ -1117,6 +1199,20 @@ class Project:
                     d.update(reveal_fp=lines_by_id[lid]["fp"], reveal_ctx=lines_by_id[lid].get("fp_ctx"))
             elif r == "never":
                 d["reveal"] = "never"
+        if "not_same" in f:
+            # '같은 사람 아님' (cboe.people.maybe_same): added to what was said before; None clears it
+            v = f.pop("not_same")
+            if v is None:
+                d.pop("not_same", None)
+            elif not isinstance(v, (list, tuple)) or not all(isinstance(x, str) for x in v):
+                raise ReviewError("같은 사람이 아닌 인물(not_same)은 이름 목록입니다")
+            else:
+                new = [n for n in (_norm(x) for x in v) if n]
+                for n in new:
+                    _check_name(n)
+                d["not_same"] = list(dict.fromkeys(list(d.get("not_same") or []) + new))
+                if not d["not_same"]:
+                    d.pop("not_same")
         if f:
             raise ReviewError(f"모르는 칸입니다: {', '.join(sorted(f))}")
         if d.get("mode") == "generic" and not d.get("before"):
@@ -1125,19 +1221,26 @@ class Project:
 
     def set_people(self, names: list[str], **fields) -> dict:
         """How people are labelled (module doc, ``cboe.people``): ``mode`` "name" | "generic" | None,
-        ``before`` (the generic label), ``reveal`` "auto" | "line" | "never" and ``reveal_line``.
-        Several people at once (role names: ``mode="name"``); nothing is stored when one is
-        unknown (KeyError)."""
+        ``before`` (the generic label), ``reveal`` "auto" | "line" | "never" and ``reveal_line``;
+        ``not_same`` [names]: people the writer says are not this one (no longer offered as
+        ``maybe_same``; added to those said before, None clears them). Several people at once
+        (role names: ``mode="name"``); nothing is stored when one is unknown (KeyError)."""
         with self._lock:
             review = self.review()
             comp = self.compose(review)
             known = {p["name"] for p in comp["people"]}
             names = list(dict.fromkeys(names))
-            missing = [n for n in names if n not in known]
+            others = fields.get("not_same") if isinstance(fields.get("not_same"), (list, tuple)) else []
+            missing = [n for n in names + [_norm(x) for x in others if isinstance(x, str)] if n and n not in known]
             if missing:
                 raise KeyError(", ".join(missing[:5]))
             by = {ln["id"]: ln for ln in comp["lines"]}
-            new = {n: self._person_fields(review["people"].get(n, {}), fields, by) for n in names}
+            new = {}
+            for n in names:
+                f = dict(fields)
+                if isinstance(f.get("not_same"), (list, tuple)):
+                    f["not_same"] = [x for x in f["not_same"] if not isinstance(x, str) or _norm(x) != n]
+                new[n] = self._person_fields(review["people"].get(n, {}), f, by)
             stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
             for n, d in new.items():
                 d = {k: v for k, v in d.items() if k != "at"}
@@ -1224,6 +1327,14 @@ class Project:
             out["sung"] = bool(d["sung"])
         if "source" in d:
             out["source"] = d["source"] or None
+        # the manner of speech the script writes (shown to the writer only; the label shows the
+        # writer's ``manner`` alone), one cell with the line before, the cell at the top
+        out["delivery"] = [str(x) for x in ln.get("delivery") or () if str(x or "").strip()] \
+            if isinstance(ln.get("delivery"), (list, tuple)) else []
+        out["join"] = d.get("join") is True
+        pos = d.get("pos") if d.get("pos") in POSITIONS else ln.get("pos")
+        out["pos"] = pos if pos in POSITIONS else None
+        out["manner"] = d.get("manner") or None
         out["decision"] = {k: d[k] for k in LINE_FIELDS if k in d}
         return out
 
@@ -1246,12 +1357,13 @@ class Project:
                     "name": _norm(a.get("name")) or None, "language": a.get("language") or None,
                     "sung": bool(a.get("sung")), "scene_id": a.get("scene_id") or x.get("scene_id"),
                     "breaks": list(a.get("breaks") or []), "keep": bool(a.get("keep")),
-                    "show_name_set": a.get("show_name"), "extra": a.get("extra"), "decision": {}}
+                    "show_name_set": a.get("show_name"), "extra": a.get("extra"), "delivery": [], "join": False,
+                    "pos": a.get("pos") if a.get("pos") in POSITIONS else None, "manner": None, "decision": {}}
         phrase = _norm(a.get("phrase")) or None
         return {"id": aid, "kind": a.get("kind"), "origin": "writer", "onset": start, "t0": start,
                 "t1": end if end is not None else start, "phrase": phrase, "short": phrase, "rec": "include",
                 "final": "include", "decided": True, "reason": "작가가 넣음", "evidence": [], "phrases": [],
-                "flags": [], "added": True}
+                "flags": [], "added": True, "pos": a.get("pos") if a.get("pos") in POSITIONS else None}
 
     def compose(self, review: dict | None = None, draft: dict | None = None) -> dict:
         """Everything merged (module doc): ``{"items", "lines", "extras", "added", "people",
@@ -1272,7 +1384,10 @@ class Project:
         ``text`` (what is shown) / ``script_text`` / ``text_from``, ``start`` ``end`` ``pinned``
         ``estimated`` ``include`` ``excluded`` (absent | out_of_range | writer | no_time)
         ``decided`` ``name`` (who speaks: the person) ``label_name`` (what the label shows)
-        ``name_early`` ``show_name`` ``speaker_item`` ``breaks`` ``keep`` ``decision``."""
+        ``name_early`` ``show_name`` ``speaker_item`` ``breaks`` ``keep`` ``delivery`` (the manner
+        of speech the script writes, a list) ``join`` ``pos`` ("top" | None) ``manner`` ``decision``.
+        A person (``people``) also has ``maybe_same``: the other people who may be the same
+        person (``cboe.people.maybe_same``; never merged here)."""
         from . import people as people_mod
         from . import style
         from .stages import recommend
@@ -1357,19 +1472,25 @@ class Project:
             for n in people_mod.parts(ln["name"]):
                 count[n] = count.get(n, 0) + 1
         prow = []
-        for p in people_mod.table(script.get("people") or (), names, people_mod.generic_labels(pdec)):
+        table = people_mod.table(script.get("people") or (), names, people_mod.generic_labels(pdec))
+        # people who may be one person under two names (감사 3-m3) — only the people some line still
+        # names: once the writer gives all the lines of one the other's name, that pair is gone
+        in_use = {n for x in names for n in people_mod.parts(x)}
+        same = people_mod.maybe_same([p["name"] for p in table if p["name"] in in_use], pdec)
+        for p in table:
             info = disp["people"].get(p["name"]) or {}
             told = info.get("told")
             prow.append(dict(p, lines=count.get(p["name"], 0), told=told, from_line=info.get("from_line"),
                              early=info.get("early"), mode=info.get("mode"), before=info.get("before"),
-                             decision=pdec.get(p["name"])))
+                             decision=pdec.get(p["name"]), maybe_same=same.get(p["name"], [])))
         comp = {"items": eff, "lines": lines, "extras": ex_rows, "added": added_rows, "people": prow,
                 "scenes": scenes, "review": review, "unplaced": sorted(unplaced), "aside": aside}
         return self.finish(comp, draft) if draft is not None else comp
 
     def finish(self, comp: dict, draft: dict) -> dict:
         """``comp`` after placement: an item whose root went to ``no_room`` is 확인 필요 again, and
-        every line carries its ``cells`` and ``no_room`` (a guessed line squeezed out, 2-m1)."""
+        every line carries its ``cells``, ``no_room`` (a guessed line squeezed out, 2-m1) and
+        ``joined`` (in one cell with the line before it that is in)."""
         _followers(comp["items"], draft)
         self._attach(comp, draft)
         return comp
@@ -1381,16 +1502,25 @@ class Project:
             for r in c.get("refs") or []:
                 cells.setdefault(r, []).append(c["id"])
         nr = {e.get("line"): e for e in draft.get("no_room") or [] if e.get("line")}
+        prev = None
         for ln in comp["lines"]:
             ln["cells"] = cells.get(ln["id"], [])
             ln["no_room"] = nr.get(ln["id"])
+            # in one cell with the line before it (the line before among those placement got, in
+            # the order it got them): the writer's join, or a hyphen cell of two speakers
+            ln["joined"] = bool(ln["include"] and prev is not None and set(ln["cells"]) & set(prev["cells"]))
+            if ln["include"]:
+                prev = ln
 
     # -------------------------------------------------------------- placement
     def placement_inputs(self, review: dict | None = None, comp: dict | None = None) -> tuple[list[dict], list[dict]]:
         """(lines, sounds) for ``placement.place``: the lines that are in, with the label to show
         (``name``) and who speaks (``person``: the line's name, else '#' + the script's ``turn``
-        for a nameless row of a two-speaker subtitle cell, else None), and the included sounds (a
-        sound the script writes down carries ``estimated``)."""
+        for a nameless row of a two-speaker subtitle cell, else None), ``label_extra`` (the source
+        with the name, then the writer's manner of speech: the function ``label_extra``), the
+        writer's ``join`` (True: one cell with the line before) and ``pos`` ("top"), and the
+        included sounds (a sound the script writes down carries ``estimated``; ``pos`` "top" when
+        the writer put its cell at the top)."""
         comp = comp or self.compose(review)
         lines = []
         for ln in comp["lines"]:
@@ -1403,10 +1533,18 @@ class Project:
             # two may share a hyphen cell again; for placement only — no label, no person anywhere else
             pl["person"] = ln.get("name") or (f"#{ln['turn']}" if ln.get("turn") else None)
             # II.8 [영희/속마음]: where the line comes from goes with the name, never alone (a line
-            # whose name is not shown goes on from the line before, of the same source)
+            # whose name is not shown goes on from the line before, of the same source); the
+            # writer's manner of speech after it, or alone ([속삭이며], II.9)
             pl.pop("label_extra", None)
-            if ln.get("show_name") and ln.get("source_label"):
-                pl["label_extra"] = [ln["source_label"]]
+            extra = label_extra(ln, bool(ln.get("show_name") and pl["name"]))
+            if extra:
+                pl["label_extra"] = extra
+            for k in ("join", "pos"):                       # placement: line join / pos (only when set)
+                pl.pop(k, None)
+            if ln.get("join"):
+                pl["join"] = True
+            if ln.get("pos") in POSITIONS:
+                pl["pos"] = ln["pos"]
             if not ln["estimated"]:                         # the writer fixed the time: not a guess any more
                 if pl.get("status") in ("unheard",) + NO_TIME:
                     pl["status"] = "ok"
@@ -1429,6 +1567,8 @@ class Project:
                      "move_to": pl.get("t") if pl.get("action") == "move" else None}
                 if it.get("estimated"):
                     s["estimated"] = True
+                if it.get("pos") in POSITIONS:
+                    s["pos"] = it["pos"]
                 sounds.append(s)
         return lines, sounds
 
@@ -1504,7 +1644,9 @@ class Project:
         ``aside`` (keys of the writer's line decisions on no line since the script changed).
         ``extras_open``: '대본에 없는 말' not decided yet (``extras_suspect``: those of them marked
         ``suspect`` — a credit, a greeting, a repeat). ``names_early``: people whose name is
-        shown before it is told (``{"person", "line", "told"}``; told None = never called)."""
+        shown before it is told (``{"person", "line", "told"}``; told None = never called).
+        ``heard_no_cell``: stretches of speech heard with no dialogue cell at that time
+        (``_heard_no_cell``)."""
         from . import check, style
         draft = draft if draft is not None else self.draft()
         profile = style.for_project(self.meta).profile
@@ -1547,7 +1689,102 @@ class Project:
                 "extras_open": [x["id"] for x in comp["extras"] if x["state"] == "open"],
                 # of those, the ones the align stage suspects (credit | greeting | repeat: dialogue.json suspect)
                 "extras_suspect": [x["id"] for x in comp["extras"] if x["state"] == "open" and x.get("suspect")],
-                "names_early": early}
+                "names_early": early, "heard_no_cell": self._heard_no_cell(comp, draft)}
+
+    def _heard_no_cell(self, comp: dict, draft: dict) -> list[dict]:
+        """Where speech is heard but no dialogue cell is on screen (감사 6-04; II.1 "Include as much
+        of the original dialogue as possible" = 원래 대사를 될 수 있는 대로 다 넣는다): the words of
+        ``asr.json`` (those alignment reads; a file without ``hint_echo`` — of an older version —
+        still has the hint echoes in them: a stretch made only of those goes) that no dialogue
+        cell covers (a cell of a line, ``HEARD_PAD`` s around it), words less than ``HEARD_GAP`` s
+        apart in one stretch. Left out: the words of a '대본에 없는 말' the writer set aside or the
+        align stage suspects (both counted apart), a stretch made only of interjections or
+        vocalisations (as alignment leaves them out of the extras), and a stretch of one word
+        shorter than ``HEARD_SHORT`` s. Each ``{"start", "end", "text" (what was heard), "words"
+        (how many), "extra" (the '대본에 없는 말' it is, or None), "line" (the script line over it, or
+        None)}``; [] without asr.json."""
+        import bisect
+
+        from .stages.align import INTERJECTIONS, is_vocalisation, norm_chars
+        asr = read_json(self.path("asr.json"), {}) or {}
+        t0, t1 = self._window()
+        ws = []
+        for w in asr.get("words") or []:
+            s, e = (_num(w.get("s")), _num(w.get("e"))) if isinstance(w, dict) else (None, None)
+            tok = str(w.get("w") or "").strip() if isinstance(w, dict) else ""
+            if s is not None and e is not None and e >= s and tok and e > t0 and s < t1:
+                ws.append((s, e, tok))
+        if not ws:
+            return []
+        ws.sort()
+        ids = {ln["id"] for ln in comp["lines"]}
+        spans = sorted((float(c["start"]) - HEARD_PAD, float(c["end"]) + HEARD_PAD)
+                       for c in draft.get("cells") or [] if set(c.get("refs") or ()) & ids
+                       and _num(c.get("start")) is not None and _num(c.get("end")) is not None)
+        merged: list = []
+        for a, b in spans:
+            if merged and a <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], b)
+            else:
+                merged.append([a, b])
+        starts = [a for a, _ in merged]
+
+        def covered(s, e):                                 # the word meets a cell (with its pad)
+            j = bisect.bisect_right(starts, e)
+            return j > 0 and merged[j - 1][1] >= s
+
+        def finder(rows):
+            """The extra of ``rows`` a word is in (by its middle, as the align stage grouped them)."""
+            rows = sorted(((float(x["start"]) - 0.05, float(x["end"]) + 0.05, x) for x in rows
+                           if _num(x.get("start")) is not None and _num(x.get("end")) is not None),
+                          key=lambda r: r[0])
+            heads = [r[0] for r in rows]
+
+            def find(s, e):
+                m, j = (s + e) / 2, bisect.bisect_right(heads, (s + e) / 2)
+                return next((x for a, b, x in reversed(rows[max(0, j - 8):j]) if a <= m <= b), None)
+            return find
+        gone = finder([x for x in comp["extras"] if x.get("state") == "ignored" or x.get("suspect")])
+        kept = finder([x for x in comp["extras"] if not (x.get("state") == "ignored" or x.get("suspect"))])
+        groups, cur = [], []
+        for s, e, tok in ws:
+            if covered(s, e) or gone(s, e):
+                if cur:
+                    groups.append(cur)
+                cur = []
+                continue
+            if cur and s - cur[-1][1] > HEARD_GAP:
+                groups.append(cur)
+                cur = []
+            cur.append((s, e, tok))
+        if cur:
+            groups.append(cur)
+        hotwords = None
+        if "hint_echo" not in asr:                         # an older asr.json: the echoes are in "words"
+            script = read_json(self.path("script.json"), {}) or {}
+            hotwords = asr["hotwords"] if "hotwords" in asr else script.get("characters")
+        script_lines = [ln for ln in comp["lines"] if ln.get("idx") is not None
+                        and _num(ln.get("start")) is not None and _num(ln.get("end")) is not None]
+        out = []
+        for g in groups:
+            toks = [t for _, _, t in g]
+            keys = ["".join(norm_chars(t)) for t in toks]
+            if all(not k or k in INTERJECTIONS or is_vocalisation(k) for k in keys):
+                continue
+            s, e = g[0][0], max(x[1] for x in g)
+            if len(g) == 1 and e - s < HEARD_SHORT:
+                continue
+            if hotwords:
+                from .stages.asr import hint_echo
+                if all(hint_echo(toks, hotwords)):
+                    continue
+            xs = [kept(a, b) for a, b, _ in g]
+            xid = max({x["id"] for x in xs if x}, key=lambda i: sum(1 for x in xs if x and x["id"] == i), default=None)
+            over = [(min(e, float(ln["end"])) - max(s, float(ln["start"])), ln["id"]) for ln in script_lines]
+            best = max(over, default=(0.0, None))
+            out.append({"start": round(s, 3), "end": round(e, 3), "text": " ".join(toks), "words": len(g),
+                        "extra": xid, "line": best[1] if best[0] > 0 else None})
+        return out
 
     def export(self, fmt: str = "srt", report: bool = False):
         """Write the draft as ``fmt`` (srt | vtt | ttml) into the work folder's ``export``.
@@ -1563,6 +1800,17 @@ class Project:
         res = ex.write(draft["cells"], out, fmt, fps=draft.get("fps"), cuts=self.cuts(),
                        profile=draft.get("profile"), title=self.meta.get("title") or self.work.name)
         return res if report else res["path"]
+
+
+def label_extra(ln: dict, show_name: bool) -> list[str]:
+    """What the label shows after the name (placement ``label_extra``) for a merged line ``ln``:
+    with the name (``show_name``) where the line comes from (``source_label``, II.8 [하늘/속마음])
+    and the manner of speech the writer gave (``manner``, [하늘/속마음/속삭이며]); without it the
+    manner alone ([속삭이며], II.9 "volume of sound (e.g. [속삭이며])") — the source never alone."""
+    out = [ln["source_label"]] if show_name and ln.get("source_label") else []
+    if ln.get("manner"):
+        out.append(ln["manner"])
+    return out
 
 
 # --------------------------------------------------------------------- what is worked out again

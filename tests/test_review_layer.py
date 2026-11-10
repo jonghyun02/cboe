@@ -10,7 +10,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 from cboe import placement, style
-from cboe.server.app import create_app, export_warnings
+from cboe.server.app import create_app, export_warnings, line_row
 from cboe.state import Conflict, Project, ReviewError, extra_fp, line_fp
 from cboe.util import read_json, write_json
 
@@ -1226,3 +1226,295 @@ def test_a_speaker_decision_kept_aside_gives_way_to_the_writers_decision_on_its_
     p.set_decision("P0002", decision="include")                  # the one candidate left
     assert p.compose()["aside"] == []
     assert by_id(p.effective_items())["P0002"]["final"] == "include"
+
+
+# =================================================================== 6차: 앞 줄과 한 칸 · 칸 위치 · 말투 (2-02 · 7-03 · 2-09 · 6-02)
+def manner_project(tmp_path):
+    ls = [line("L0001", "하늘", "어디 가는 거야", 10.0, 11.5, delivery=["속삭이며"]),
+          line("L0002", "바다", "몰라 나도", 13.0, 14.0, source="inner"),
+          line("L0003", "바다", "그냥 걸어", 14.5, 15.5, source="inner")]
+    items = [speaker_item(x) for x in ls]
+    items[2].update(rec="exclude", reason="같은 화자가 이어 말함 · 앞 줄에 이름 표시", follows="P0002")
+    return make(tmp_path, lines=ls, items=items, extras=[])
+
+
+def test_the_writers_manner_of_speech_goes_into_the_label_and_never_by_default(tmp_path):
+    p = manner_project(tmp_path)
+    pl = by_id(p.placement_inputs()[0])
+    # the manner the script writes is only shown to the writer (II.8 "You may combine …"): no label
+    assert "label_extra" not in pl["L0001"] and pl["L0002"]["label_extra"] == ["속마음"]
+    assert "label_extra" not in pl["L0003"]                          # goes on: no name, no source
+    heads = {r: c["lines"][0] for c in p.recompute()["cells"] for r in c["refs"]}
+    assert heads["L0001"].startswith("[하늘] ") and heads["L0003"] == "그냥 걸어"
+    p.set_line("L0002", manner=" [힘겹게] ")
+    p.set_line("L0003", manner="속삭이며")
+    assert read_json(p.path("review.json"))["lines"]["L0002"]["manner"] == "힘겹게"
+    pl = by_id(p.placement_inputs()[0])
+    # II.8 [영희/속마음] [영희/속삭임]: the manner after the source; a line whose name is not shown
+    # gets the manner alone (II.9 "[속삭이며]"), never the source alone
+    assert pl["L0002"]["label_extra"] == ["속마음", "힘겹게"] and pl["L0003"]["label_extra"] == ["속삭이며"]
+    heads = {r: c["lines"][0] for c in p.recompute()["cells"] for r in c["refs"]}
+    assert heads["L0002"].startswith("[바다/속마음/힘겹게] ") and heads["L0003"].startswith("[속삭이며] ")
+    with TestClient(create_app(p.work)) as c:
+        st = c.get("/api/state").json()
+        rows = by_id(st["lines"])
+        assert rows["L0002"]["label"] == "[바다/속마음/힘겹게]" and rows["L0002"]["manner"] == "힘겹게"
+        sp = by_id(st["items"])["P0002"]["speaker"]
+        assert (sp["label"], sp["label_tail"]) == ("[바다/속마음/힘겹게]", "/속마음/힘겹게")
+        assert rows["L0001"]["delivery"] == ["속삭이며"] and rows["L0002"]["delivery"] == []
+        st = c.post("/api/lines/L0002", json={"manner": None}).json()            # back to none
+        assert by_id(st["lines"])["L0002"]["label"] == "[바다/속마음]"
+
+
+def test_join_and_pos_go_to_placement_and_a_cell_at_the_top(tmp_path):
+    p = manner_project(tmp_path)
+    assert not any(k in x for x in p.placement_inputs()[0] for k in ("join", "pos"))
+    p.set_line("L0003", join=True)
+    p.set_line("L0001", pos="top")
+    st = read_json(p.path("review.json"))["lines"]
+    assert st["L0003"]["join"] is True and st["L0001"]["pos"] == "top"
+    pl = by_id(p.placement_inputs()[0])
+    assert pl["L0003"]["join"] is True and "join" not in pl["L0002"] and "join" not in pl["L0001"]
+    assert pl["L0001"]["pos"] == "top" and "pos" not in pl["L0002"]
+    cells = p.recompute()["cells"]
+    assert {c["pos"] for c in cells if "L0001" in c["refs"]} == {"top"}
+    assert {c["pos"] for c in cells if "L0002" in c["refs"]} == {"bottom"}
+    p.set_line("L0003", join=False)                                   # false = null: not joined
+    p.set_line("L0001", pos="bottom")                                 # the default: nothing stored
+    st = read_json(p.path("review.json"))["lines"]
+    assert "L0003" not in st and "L0001" not in st
+
+
+def test_join_pos_and_manner_values_that_cannot_be_used(client):
+    c, p = client
+    for body, word in (({"pos": "middle"}, "칸 위치는 top"), ({"manner": "가" * 21}, "말투: 20자까지"),
+                       ({"manner": "[속삭이며] [크게]"}, "[ ] 를 쓸 수 없습니다")):
+        r = c.post("/api/lines/L0001", json=body)
+        assert r.status_code == 400 and word in r.json()["detail"] and "\n" not in r.json()["detail"]
+    assert c.post("/api/lines/L0001", json={"join": "maybe"}).status_code == 422
+    for bad in ({"join": "yes"}, {"manner": 3}, {"pos": 1}):
+        with pytest.raises(ReviewError):
+            p.set_line("L0001", **bad)
+    assert c.post("/api/lines/L0001", json={"manner": "가" * 20}).status_code == 200
+    st = c.post("/api/lines/L0001", json={"manner": ""}).json()               # empty: none
+    assert "manner" not in by_id(st["lines"])["L0001"].get("decision", {})
+
+
+def test_join_pos_and_manner_go_every_way_a_line_decision_goes(tmp_path):
+    new = {"join": True, "pos": "top", "manner": "속삭이며"}
+    p = make(tmp_path, lines=TWICE, items=[], extras=[])
+    p.set_line("L0003", **new)
+
+    def kept(lid):
+        return {k: by_id(p.effective_lines())[lid]["decision"].get(k) for k in new}
+    # the script read again with one more line in front: the decision follows its line
+    again = renumbered([line("L0000", "구름", "먼저 온 줄", 5.0, 5.8)] + TWICE)
+    write_json(p.path("dialogue.json"), {"mode": "scenes", "extras": [], "lines": again})
+    assert kept("L0004") == new and kept("L0002") == {"join": None, "pos": None, "manner": None}
+    p.set_lines(["L0004"], include=False)                              # several lines out at once
+    p.set_speaker("L0004", "한별", scope="person")                      # the person's name
+    assert kept("L0004") == new and by_id(p.effective_lines())["L0004"]["name"] == "한별"
+    assert not by_id(p.effective_lines())["L0004"]["include"]           # the line out: the fields stay
+    p.set_lines(["L0004"], include=None)
+    assert kept("L0004") == new
+    # the script's words of that line fixed: the decision is kept aside with them, and put back
+    reread(p, again[:3] + [dict(again[3], text="가자 가자", raw="가자 가자")])
+    (row,) = p.compose()["aside"]
+    assert {k: row["decision"].get(k) for k in new} == new and row["candidates"] == ["L0004"]
+    p.set_aside(row["key"], "L0004")
+    assert kept("L0004") == new and p.compose()["aside"] == []
+
+
+def test_state_rows_carry_the_scripts_manner_the_new_decisions_and_joined(tmp_path):
+    ls = [line("L0001", "하늘", "어디 가", 10.0, 11.0, delivery=["속삭이며", "웃으며"]),
+          line("L0002", "바다", "집에", 11.2, 11.8), line("L0003", "하늘", "그래", 20.0, 21.0)]
+    p = make(tmp_path, lines=ls, items=[], extras=[])
+    p.set_line("L0002", join=True, pos="top", manner="힘겹게")
+    # a made-up draft: L0001 and L0002 in one cell (as placement makes it once it knows join)
+    draft = {"cells": [{"id": "C0001", "start": 10.0, "end": 12.0, "lines": ["- 어디 가", "- 집에"],
+                        "refs": ["L0001", "L0002"]},
+                       {"id": "C0002", "start": 20.0, "end": 21.0, "lines": ["그래"], "refs": ["L0003"]}],
+             "no_room": []}
+    comp = p.compose(draft=draft)
+    assert {ln["id"]: (ln["joined"], ln["delivery"]) for ln in comp["lines"]} == \
+        {"L0001": (False, ["속삭이며", "웃으며"]), "L0002": (True, []), "L0003": (False, [])}
+    rows = by_id(line_row(ln) for ln in comp["lines"])
+    assert rows["L0002"]["joined"] and "joined" not in rows["L0001"] and rows["L0003"]["delivery"] == []
+    assert rows["L0002"]["decision"] == {"join": True, "pos": "top", "manner": "힘겹게"}
+    # the line before is the one before among the lines that are in
+    p.set_line("L0002", include=False)
+    comp = p.compose(draft={"cells": [{"id": "C0001", "start": 10.0, "end": 21.0, "lines": ["- 어디 가", "- 그래"],
+                                       "refs": ["L0001", "L0003"]}], "no_room": []})
+    assert [ln["joined"] for ln in comp["lines"]] == [False, False, True]
+    # from a draft placement made: the two rows of one subtitle cell share a hyphen cell
+    p = make(tmp_path / "turns", lines=turn_lines(), items=[], extras=[])
+    with TestClient(create_app(p.work)) as c:
+        rows = by_id(c.get("/api/state").json()["lines"])
+    assert [bool(rows[x].get("joined")) for x in ("L0001", "L0002", "L0003")] == [False, True, False]
+    assert all(r["delivery"] == [] for r in rows.values())
+
+
+def test_a_sound_or_an_added_cell_at_the_top(client):
+    c, p = client
+    st = c.post("/api/items/S0001", json={"pos": "top"}).json()
+    assert by_id(st["items"])["S0001"]["pos"] == "top" and by_id(st["items"])["M0001"]["pos"] is None
+    assert next(x for x in st["draft"]["cells"] if "S0001" in x["refs"])["pos"] == "top"
+    assert by_id(p.placement_inputs()[1])["S0001"]["pos"] == "top"
+    r = c.post("/api/items/P0001", json={"pos": "top"})
+    assert r.status_code == 400 and "소리 후보에만" in r.json()["detail"]
+    assert c.post("/api/items/S0001", json={"pos": "middle"}).status_code == 400
+    st = c.post("/api/items/S0001", json={"pos": None}).json()
+    assert by_id(st["items"])["S0001"]["pos"] is None
+    assert next(x for x in st["draft"]["cells"] if "S0001" in x["refs"])["pos"] == "bottom"
+    st = c.post("/api/added", json={"kind": "sfx", "start": 45.0, "end": 46.0, "phrase": "[쿵]", "pos": "top"}).json()
+    snd = next(a for a in st["added"] if a["kind"] == "sfx")
+    assert snd["pos"] == "top" and by_id(st["items"])[snd["id"]]["pos"] == "top"
+    assert {x["pos"] for x in st["draft"]["cells"] if snd["id"] in x["refs"]} == {"top"}
+    st = c.post("/api/added", json={"kind": "line", "start": 50.0, "end": 51.0, "text": "위에 뜨는 말",
+                                    "pos": "top"}).json()
+    said = next(a for a in st["added"] if a["kind"] == "line")
+    assert said["pos"] == "top" and by_id(st["lines"])[said["id"]]["pos"] == "top"
+    assert {x["pos"] for x in st["draft"]["cells"] if said["id"] in x["refs"]} == {"top"}
+    st = c.post(f"/api/added/{said['id']}", json={"pos": None}).json()
+    assert "pos" not in by_id(st["added"])[said["id"]]
+    assert {x["pos"] for x in st["draft"]["cells"] if said["id"] in x["refs"]} == {"bottom"}
+    assert c.post(f"/api/added/{snd['id']}", json={"pos": "left"}).status_code == 400
+    st = c.post("/api/lines/L0007", json={"pos": "top"}).json()                 # a script line
+    assert by_id(st["lines"])["L0007"]["decision"] == {"pos": "top"}
+    assert {x["pos"] for x in st["draft"]["cells"] if "L0007" in x["refs"]} == {"top"}
+
+
+# =================================================================== 6차: 같은 사람일 수 있는 인물 (3-m3)
+def same_people_project(tmp_path):
+    ls = [line("L0001", "김가람", "어디 가", 10.0, 11.0), line("L0002", "가람", "집에 가", 13.0, 14.0),
+          line("L0003", "어린 가람", "같이 가", 40.0, 41.0, scene="SC003"),
+          line("L0004", "가람 엄마", "밥 먹어", 42.0, 43.0, scene="SC003"),
+          line("L0005", "나래", "응 알았어", 44.0, 45.0, scene="SC003")]
+    return make(tmp_path, lines=ls, items=[], extras=[])
+
+
+def test_people_who_may_be_one_person_are_offered_and_never_merged(tmp_path):
+    p = same_people_project(tmp_path)
+    same = {x["name"]: x["maybe_same"] for x in p.compose()["people"]}
+    assert same["김가람"] == ["가람", "어린 가람"] and same["가람"] == ["김가람", "어린 가람"]
+    assert same["어린 가람"] == ["김가람", "가람"]
+    assert same["가람 엄마"] == [] and same["나래"] == [] and same["하늘"] == []   # a relation; no lines
+    assert [ln["name"] for ln in p.effective_lines()] == ["김가람", "가람", "어린 가람", "가람 엄마", "나래"]
+    with TestClient(create_app(p.work)) as c:
+        st = c.post("/api/people", json={"names": ["가람"], "not_same": ["김가람"]}).json()
+        same = {x["name"]: x["maybe_same"] for x in st["people"]}
+        assert same["가람"] == ["어린 가람"] and same["김가람"] == ["어린 가람"]          # either way round
+        assert read_json(p.path("review.json"))["people"]["가람"]["not_same"] == ["김가람"]
+        assert st["summary"]["people"]["reveal_only"] == 0 and st["summary"]["people"]["decided"] == 0
+        assert c.post("/api/people", json={"names": ["가람"], "not_same": ["유령"]}).status_code == 404
+        assert c.post("/api/people", json={"names": ["가람"], "not_same": "김가람"}).status_code == 422
+        # the writer merges by the way there is: every line of '어린 가람' gets the name '가람'
+        st = c.post("/api/lines/L0003/speaker", json={"name": "가람", "scope": "person"}).json()
+        same = {x["name"]: x["maybe_same"] for x in st["people"]}
+        assert "어린 가람" not in same and same == {"김가람": [], "가람": [], "가람 엄마": [], "나래": [],
+                                                    "하늘": [], "바다": [], "구름": [], "경찰1": []}
+        st = c.post("/api/people", json={"names": ["가람"], "not_same": None}).json()   # taken back
+        assert {x["name"]: x["maybe_same"] for x in st["people"]}["가람"] == ["김가람"]
+
+
+# =================================================================== 6차: 들리는데 칸이 없는 구간 (6-04 · II.1)
+def heard(text, s, e):
+    return words(text, s, e)
+
+
+HEARD_EXTRAS = [{"id": "X0001", "start": 20.0, "end": 21.2, "text": "저기요 잠깐만", "scene_id": "SC001",
+                 "words": heard("저기요 잠깐만", 20.0, 21.2)},
+                {"id": "X0002", "start": 30.0, "end": 30.8, "text": "여보세요 여보세요", "scene_id": "SC001",
+                 "words": heard("여보세요 여보세요", 30.0, 30.8)},
+                {"id": "X0003", "start": 40.0, "end": 41.0, "text": "구독 좋아요", "scene_id": "SC003",
+                 "suspect": "credit", "suspect_by": {"speech": 0.1}, "words": heard("구독 좋아요", 40.0, 41.0)}]
+HEARD_ASR = (heard("누구 세요", 10.1, 10.9) + heard("있어요", 11.8, 12.3)            # under the cell (+ 0.5 s)
+             + heard("정말 옆집이요", 12.6, 13.5)                                       # over a line taken out
+             + heard("저기요 잠깐만", 20.0, 21.2)                                       # an extra not decided
+             + heard("어서", 22.5, 22.9)                                              # more than 1 s after it
+             + heard("이리 와", 25.2, 25.8)                                           # under a sound cell only
+             + heard("여보세요 여보세요", 30.0, 30.8)                                   # an extra set aside
+             + heard("구독 좋아요", 40.0, 41.0)                                         # a suspect extra
+             + heard("가", 50.0, 50.2)                                                # one word, 0.2 s
+             + heard("음 아", 55.0, 55.6)                                             # interjections only
+             + heard("하늘 바다", 70.0, 71.0)                                          # the hint names only
+             + heard("밖의 말", 125.0, 126.0))                                        # outside the window
+
+
+def heard_project(tmp_path, echo_key=True):
+    ls = [line("L0001", "하늘", "누구세요", 10.0, 11.0), line("L0002", "바다", "옆집이요", 13.0, 14.0)]
+    p = make(tmp_path, lines=ls, items=[], extras=HEARD_EXTRAS)
+    write_json(p.path("asr.json"), dict({"words": HEARD_ASR}, **({"hint_echo": []} if echo_key else {})))
+    p.set_line("L0002", include=False)
+    p.set_extra("X0002", "ignore")
+    return p
+
+
+HEARD_WANT = [{"start": 12.6, "end": 13.5, "text": "정말 옆집이요", "words": 2, "extra": None, "line": "L0002"},
+              {"start": 20.0, "end": 21.2, "text": "저기요 잠깐만", "words": 2, "extra": "X0001", "line": None},
+              {"start": 22.5, "end": 22.9, "text": "어서", "words": 1, "extra": None, "line": None},
+              {"start": 25.2, "end": 25.8, "text": "이리 와", "words": 2, "extra": None, "line": None}]
+
+
+def test_speech_heard_where_no_dialogue_cell_is(tmp_path):
+    p = heard_project(tmp_path)
+    draft = {"cells": [{"id": "C0001", "start": 10.0, "end": 11.5, "lines": ["누구세요"], "refs": ["L0001"]},
+                       {"id": "C0002", "start": 25.0, "end": 26.0, "lines": ["[쿵]"], "refs": ["S0001"]}],
+             "no_room": []}
+    got = p._heard_no_cell(p.compose(draft=draft), draft)
+    # a newer asr.json keeps the hint echoes apart: the hint names said here are speech
+    assert got == HEARD_WANT + [{"start": 70.0, "end": 71.0, "text": "하늘 바다", "words": 2, "extra": None,
+                                 "line": None}]
+    old = heard_project(tmp_path / "old", echo_key=False)              # an older one: they are echoes
+    assert old._heard_no_cell(old.compose(draft=draft), draft) == HEARD_WANT
+    p.path("asr.json").unlink()
+    assert p._heard_no_cell(p.compose(draft=draft), draft) == []
+
+
+def test_the_export_check_and_the_state_list_speech_heard_without_a_cell(tmp_path):
+    p = make(tmp_path, extras=[])
+    write_json(p.path("asr.json"), {"words": ASR + heard("거기 누구 있어", 33.0, 34.2), "hint_echo": []})
+    with TestClient(create_app(p.work)) as c:
+        st = c.get("/api/state").json()
+        (row,) = st["export_check"]["heard_no_cell"]
+        assert (row["start"], row["end"], row["text"], row["words"]) == (33.0, 34.2, "거기 누구 있어", 3)
+        assert st["summary"]["heard_no_cell"] == 1
+        assert "말이 들리는데 자막 칸이 없는 구간 1곳" in export_warnings(st["export_check"])
+        r = c.post("/api/export", json={"format": "srt"}).json()
+        assert len(r["export_check"]["heard_no_cell"]) == 1 and "말이 들리는데 자막 칸이 없는 구간 1곳" in r["warnings"]
+        st = c.post("/api/added", json={"kind": "line", "start": 33.0, "end": 34.2, "text": "거기 누구 있어"}).json()
+        assert st["export_check"]["heard_no_cell"] == [] and st["summary"]["heard_no_cell"] == 0
+        assert not any("자막 칸이 없는 구간" in w for w in export_warnings(st["export_check"]))
+
+
+# =================================================================== 6차: 노래 구간의 말 · 정렬의 새 힌트
+def test_an_extra_heard_inside_a_song_becomes_a_sung_line_unless_the_writer_says_no(tmp_path):
+    p = make(tmp_path, extras=[dict(EXTRAS[0], sung=True), dict(EXTRAS[1])])
+    with TestClient(create_app(p.work)) as c:
+        st = c.get("/api/state").json()
+        assert by_id(st["extras"])["X0001"]["sung"] is True and "sung" not in by_id(st["extras"])["X0002"]
+        st = c.post("/api/extras/X0001", json={"action": "line"}).json()
+        aid = by_id(st["extras"])["X0001"]["added"]
+        assert by_id(st["lines"])[aid]["sung"] and by_id(st["added"])[aid]["sung"] is True
+        assert all(x.startswith("♪") for cl in st["draft"]["cells"] if aid in cl["refs"] for x in cl["lines"])
+        c.post("/api/extras/X0001", json={"action": "clear"})
+        st = c.post("/api/extras/X0001", json={"action": "line", "sung": False}).json()
+        aid = by_id(st["extras"])["X0001"]["added"]
+        assert not by_id(st["lines"])[aid].get("sung") and by_id(st["added"])[aid]["sung"] is False
+        st = c.post("/api/extras/X0002", json={"action": "line"}).json()
+        assert not by_id(st["lines"])[by_id(st["extras"])["X0002"]["added"]].get("sung")
+
+
+def test_rows_carry_the_new_hints_of_alignment_and_the_language_heard(tmp_path):
+    ls = [line("L0001", "하늘", "가온아 어디 가", 10.0, 11.5, status="differs", asr_text="가운아 어디 가",
+               hints=["name"], diff=[{"kind": "word", "script": "가온아", "heard": "가운아", "at": [0, 1]}]),
+          line("L0002", "바다", "헬로 반가워", 13.0, 14.0, status="differs", asr_text="hello 반가워",
+               hints=["language"], heard_language="영어",
+               diff=[{"kind": "word", "script": "헬로", "heard": "hello", "at": [0, 1]}]),
+          line("L0003", "구름", "응 알았어", 15.0, 15.8)]
+    p = make(tmp_path, lines=ls, items=[], extras=[])
+    with TestClient(create_app(p.work)) as c:
+        rows = by_id(c.get("/api/state").json()["lines"])
+    assert rows["L0001"]["hints"] == ["name"] and "heard_language" not in rows["L0001"]
+    assert (rows["L0002"]["hints"], rows["L0002"]["heard_language"]) == (["language"], "영어")
+    assert "hints" not in rows["L0003"] and "heard_language" not in rows["L0003"]
