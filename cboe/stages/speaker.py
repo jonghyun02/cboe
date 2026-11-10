@@ -36,14 +36,13 @@ import contextlib
 import hashlib
 import json
 import math
-import re
 import sys
 import time
 
 import cv2
 import numpy as np
 
-from .. import paths
+from .. import paths, people
 from ..media import Media
 from ..util import device, free_gpu, gpu_lock, log, read_json, write_json
 from .recommend import has_time, timing_estimated      # what a dialogue line's time is worth (shared rules)
@@ -238,18 +237,11 @@ def asd_scores(model, head, faces: np.ndarray, mfcc: np.ndarray) -> np.ndarray:
 
 
 def name_revealed(lines: list[dict], idx: int, name: str | None) -> bool | None:
+    """Whether a line up to ``idx`` told ``name`` (``people.revealed_at``: someone calls it as a word,
+    or the person says it of themselves); lines without a time in the video are not heard."""
     if not name:
         return None
-    keys = {name, name.replace(" ", "")}
-    keys |= {w for w in name.split() if len(w) >= 2}
-    keys = {k for k in keys if k and not re.fullmatch(r"[A-Za-z]{1,3}", k)}
-    for ln in lines[:idx + 1]:
-        if ln.get("status") == "absent":          # a scene that is not in the video was not heard
-            continue
-        t = (ln.get("text") or "").replace(" ", "")
-        if any(k.replace(" ", "") in t for k in keys):
-            return True
-    return False
+    return people.revealed_at([ln for ln in lines[:idx + 1] if has_time(ln)], name, key="speaker") is not None
 
 
 # ------------------------------------------------------------- decisions without the models
