@@ -35,7 +35,12 @@ good judgement as many timing decisions may feel subjective" = 타이밍 판단�
 change, the in-time must be at least half a second before the shot change" (대사가 전환 전에 시작하면
 시작 시각은 전환보다 0.5초 이상 앞이어야 한다) binds dialogue that crosses the cut, but a file only
 shows that the cell crosses it — a short line that ends before the cut may stay half a second into
-the new shot (TG 1) — so "cut_in_before" is reported as a recommendation.
+the new shot (TG 1) — so "cut_in_before" is reported as a recommendation. A gap of 3 frames to
+half a second with a shot change in it ("short_gap_cut") is should for the same reason: TG 5 has no
+exception for it, and placement closes it where TG 2 allows (dialogue starts on the cut, the cell
+before ends 2 frames before it); what is left is a sound caption that starts on its sound (placement
+never shows a sound before it is heard, BBC 5.5), where closing the gap would mean crossing the cut
+with the cell before (TG 1, TG 2) or showing the sound early. That choice is the writer's.
 
 What it cannot see: whether the words are what is heard (II.1), whether a sound needed a caption or
 its wording is the best one (most (X) examples of II.9), and the Netflix glyph list (GR 3; the list
