@@ -5,8 +5,10 @@
 Runs after the alignment (it needs the aligned dialogue lines and, from the scene-first
 alignment, ``scenes.json``) and before the recommendation, which attaches the cues to the
 detected candidates or makes 확인 필요 candidates of the ones the detectors did not find
-(``recommend.build``). A cue without a window (its scene is not in the video, or no time is
-known around it) stays in cues.json only.
+(``recommend.build``). A cue without a window (its scene is not in the video, it lies past
+lines out of the processed stretch, or no time is known around it) stays in cues.json only.
+A window may reach the lines of the scene next to it or the edge of the processed stretch
+(project ``t0``/``t1``, ``span``) when its own scene has no timed line on that side.
 
 The stage is cheap and pure, so it is made again on every run instead of being cleared with
 the alignment; the recommendation reads the same cues through ``load`` and never a stale file,
