@@ -380,11 +380,14 @@ def cue_like(text: str) -> bool:
         and heading_candidate(t) is None
 
 
+ABBREVIATION = re.compile(r"(?<![A-Za-z])[A-Za-z](?:\.[A-Za-z])+\.?(?![A-Za-z.])")      # D.J, P.D., M.C
+
+
 def name_like(text: str) -> bool:
     """Looks like a speaker name on its own (stricter than ``cue_like``): no sentence
-    punctuation, a few short words."""
+    punctuation (the dots of an abbreviation like ``D.J`` are none), a few short words."""
     t = clean(text)
-    core = PAREN_RE.sub(" ", t).strip()
+    core = ABBREVIATION.sub(lambda m: m.group().replace(".", ""), PAREN_RE.sub(" ", t)).strip()
     if not cue_like(t) or len(t) > NAME_MAX + 8 or len(core) > NAME_MAX:
         return False
     return not re.search(r"[.!?…~\"'“”‘’:：;]|,$", core) and len(core.split()) <= 3 and not re.match(r"[-–—]", t)
@@ -533,12 +536,15 @@ def _cue_key(text: str) -> str:
 def plain_evidence(texts: list[str]) -> dict:
     """What makes a text a shooting script: lines whose speaker cell is set off by a tab
     (``tab``), by a wide gap (``gap``, names that come back) or stands on the line above
-    (``stacked``, in a text with scene headings), and the scene headings found."""
+    (``stacked``, in a text with scene headings), and the scene headings found. What comes
+    before the first scene heading (the title page: ``각본<TAB>이름``) is no evidence."""
     stripped = [clean(t) for t in texts]
     cands = [(i, c) for i, t in enumerate(texts) if "\t" not in t.strip() for c in [heading_candidate(t)] if c]
     heads = accept_headings(cands)
-    tab = sum(1 for t in texts for m in [TAB_CUE.fullmatch(t)] if m and cue_like(m.group(1)))
-    gap_names = Counter(_cue_key(m.group(1)) for t in texts if "\t" not in t
+    first = min(heads) if heads else 0
+    body = list(enumerate(texts))[first:]
+    tab = sum(1 for _, t in body for m in [TAB_CUE.fullmatch(t)] if m and cue_like(m.group(1)))
+    gap_names = Counter(_cue_key(m.group(1)) for _, t in body if "\t" not in t
                         for m in [GAP_CUE.fullmatch(t)] if m and name_like(m.group(1)))
     gap_ok = {k for k, n in gap_names.items() if n >= 2}
     gap = sum(n for k, n in gap_names.items() if k in gap_ok) if len(gap_ok) >= 2 else 0
@@ -546,7 +552,7 @@ def plain_evidence(texts: list[str]) -> dict:
     stacked = 0
     scene_heads = sum(1 for c in heads.values() if c["kind"] != "mark")
     if scene_heads >= 2:
-        alone = Counter(_cue_key(s) for i, s in enumerate(stripped) if s and i not in heads and name_like(s)
+        alone = Counter(_cue_key(s) for i, s in enumerate(stripped) if s and i >= first and i not in heads and name_like(s)
                         and i + 1 < len(stripped) and stripped[i + 1] and "\t" not in texts[i])
         names = {k: n for k, n in alone.items() if n >= 3}
         filled = sum(1 for s in stripped if s)
@@ -556,9 +562,35 @@ def plain_evidence(texts: list[str]) -> dict:
             "_heads": heads, "_gap_names": gap_ok if gap else set(), "_stacked_names": stacked_names}
 
 
+def _gap_once(texts: list[str], i: int, names: set[str]) -> bool:
+    """In a script whose speaker cells are set off by a gap, a name written only once is a
+    speaker cell too when its dialogue goes on below it (an indented line) or it stands
+    right next to the speaker cell of a name that comes back (an exchange). Only a single
+    short word is taken so (``판사``, ``일진1``, ``사장/복희``): words of a sentence set apart by a
+    gap are no name."""
+    m = GAP_CUE.fullmatch(texts[i])
+    core = clean(PAREN_RE.sub(" ", m.group(1))) if m else ""
+    if not core or " " in core or len(core) > 8 or core.endswith("다"):
+        return False
+    nxt = texts[i + 1] if i + 1 < len(texts) else ""
+    if clean(nxt) and (GAP_INDENT.fullmatch(nxt) or TAB_INDENT.fullmatch(nxt)):
+        return True
+    for j in (i - 1, i + 1):
+        m = GAP_CUE.fullmatch(texts[j]) if 0 <= j < len(texts) and "\t" not in texts[j] else None
+        if m and name_like(m.group(1)) and _cue_key(m.group(1)) in names:
+            return True
+    return False
+
+
 def _plain_rows(texts: list[str], ev: dict) -> list[dict]:
     tab_mode, gap_names, stacked = ev["tab"] >= MIN_CUES, ev["_gap_names"], ev["_stacked_names"]
     out: list[dict] = []
+
+    def in_dialogue() -> bool:
+        return bool(out) and not out[-1].get("blank") and (out[-1]["cue"] is not None or out[-1]["col"] != "left")
+
+    first = min(ev["_heads"]) if ev["_heads"] else -1
+
     pending = None        # a name line whose dialogue is on the next line
     running = False       # the dialogue under a name line goes on
     for i, t in enumerate(texts):
@@ -571,6 +603,11 @@ def _plain_rows(texts: list[str], ev: dict) -> list[dict]:
             running = False
             out.append({**base, "text": "", "col": "left", "blank": True})
             continue
+        if i < first:     # the title page: a credit set off like a speaker cell is kept apart (no dialogue, ``_assemble``)
+            m = TAB_CUE.fullmatch(t) or GAP_CUE.fullmatch(t)
+            if m and cue_like(m.group(1)):
+                out.append({**base, "cue": clean(m.group(1)), "text": clean(m.group(2)), "col": "dialogue"})
+                continue
         if pending is not None:
             if i in ev["_heads"] or is_transition(s):
                 out.append({**base, "text": pending, "col": "left"})
@@ -579,17 +616,19 @@ def _plain_rows(texts: list[str], ev: dict) -> list[dict]:
                 out.append({**base, "cue": pending, "text": s, "col": "dialogue"})
                 pending, running = None, True
                 continue
-        m = TAB_CUE.fullmatch(t) if tab_mode else None
-        if m and cue_like(m.group(1)):
+        # a script set off by gaps may use a tab here and there: after a known name, or to go on
+        m = TAB_CUE.fullmatch(t) if tab_mode or gap_names else None
+        if m and cue_like(m.group(1)) and (tab_mode or _cue_key(m.group(1)) in gap_names):
             out.append({**base, "cue": clean(m.group(1)), "text": clean(m.group(2)), "col": "dialogue"})
             running = False
             continue
-        m = TAB_INDENT.fullmatch(t) if tab_mode else None
+        m = TAB_INDENT.fullmatch(t) if tab_mode or (gap_names and in_dialogue()) else None
         if m:      # two tabs reach the dialogue column; one stops at the speaker's (a mark like F.O may sit there)
-            out.append({**base, "text": clean(m.group(2)), "col": "dialogue" if m.group(1).count("\t") > 1 else "indent"})
+            deep = tab_mode and m.group(1).count("\t") > 1
+            out.append({**base, "text": clean(m.group(2)), "col": "dialogue" if deep else "indent"})
             continue
         m = GAP_CUE.fullmatch(t) if gap_names and "\t" not in t else None
-        if m and name_like(m.group(1)) and _cue_key(m.group(1)) in gap_names:
+        if m and name_like(m.group(1)) and (_cue_key(m.group(1)) in gap_names or _gap_once(texts, i, gap_names)):
             out.append({**base, "cue": clean(m.group(1)), "text": clean(m.group(2)), "col": "dialogue"})
             running = False
             continue
@@ -663,11 +702,16 @@ def _assemble(rows: list[dict], right: float | None = None, looks: list | None =
     cands = [(i, c) for i, r in enumerate(rows) if r["cue"] is None and not r.get("blank") and r["col"] != "dialogue"
              for c in [heading_candidate(r["text"])] if c]
     heads = accept_headings(cands, looks)
+    first = min(heads) if heads else -1      # before the first scene heading: the title page, a cast list
     items: list[dict] = []
     cur = None            # the dialogue being read
     last = None           # (index of the row before, its item)
     for i, r in enumerate(rows):
         if r.get("blank"):
+            cur = last = None
+            continue
+        if i < first and r["cue"] is not None:      # no dialogue there: "각본<TAB>이름" names no speaker
+            items.append({"type": "other", "text": clean(f"{r['cue']} {r['text']}"), "page": r["page"]})
             cur = last = None
             continue
         prev_row, prev_item = last if last else (None, None)

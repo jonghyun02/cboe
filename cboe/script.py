@@ -427,7 +427,8 @@ def summary(doc: dict) -> dict:
                         "그 파일을 넣어 주세요")
         if not out["scenes"]:
             warn.append("장면 머리를 찾지 못했습니다")
-        other = sum(1 for e in elements if e.get("type") == "other")
+        # what comes before the first scene (title page, cast list) is no line left unread
+        other = sum(1 for e in elements if e.get("type") == "other" and (e.get("scene_id") or not out["scenes"]))
         if other > max(10, 0.05 * len(elements)):
             warn.append(f"무엇인지 가르지 못한 줄이 {other}개 있습니다")
     long_lines = sum(1 for ln in lines if len(ln.get("text") or "") > 600)
