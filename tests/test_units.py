@@ -287,12 +287,16 @@ def test_align_lines_anchors_and_interpolation(tmp_path):
              {"id": "L3", "speaker": "B", "text": "내 얼굴 나오잖아"}]
     words = [{"w": "안녕하세요", "s": 10.0, "e": 10.6}, {"w": "여러분", "s": 10.6, "e": 11.0},
              {"w": "내", "s": 20.0, "e": 20.2}, {"w": "얼굴", "s": 20.2, "e": 20.5}, {"w": "나오잖아", "s": 20.5, "e": 21.0}]
-    out = align_lines = align.align_lines(_P(tmp_path), lines, words, 0.0, 30.0)
+    heard: dict = {}
+    out = align_lines = align.align_lines(_P(tmp_path), lines, words, 0.0, 30.0, heard=heard)
     assert out[0]["aligned"] and out[0]["start"] == pytest.approx(10.0, abs=0.01)
     assert out[2]["aligned"] and out[2]["start"] == pytest.approx(20.0, abs=0.01)
     assert not out[1]["aligned"] and 11.0 <= out[1]["start"] < 20.0     # placed in the gap
     assert len(out[0]["words"]) == 2 and out[0]["words"][1]["w"] == "여러분"
     assert align_lines is out
+    assert heard == {0: [0, 1], 2: [2, 3, 4]}                            # the ASR words each line's anchors came from
+    left = align.align_lines(_P(tmp_path), lines, words, 0.0, 30.0, place=False)
+    assert left[1]["start"] is None and left[0]["start"] == out[0]["start"]   # the caller places it
 
 
 # ------------------------------------------------------------------ 계층
