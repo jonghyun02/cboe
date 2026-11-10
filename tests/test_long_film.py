@@ -1,6 +1,7 @@
 # -*- coding: utf-8 -*-
 """A feature film in one go (감사 6-09): the separation streams the mix through a rolling
-buffer, writes the tracks as it goes, and a stopped run goes on from its saved point.
+buffer, writes the tracks as it goes, and a stopped run goes on from its saved point; the level
+of the tracks (sed.py, env.npz) is summed a block at a time.
 
 A fake model stands in for Bandit v2 (it depends on where a sample sits in its chunk, so a
 wrong chunk grid or a wrong overlap-add shows). The reference is the whole-array code of
@@ -19,7 +20,7 @@ import soxr
 import torch
 
 from cboe.media import write_wav
-from cboe.stages import separate
+from cboe.stages import sed, separate
 from cboe.util import read_json
 
 SR = 48000
@@ -310,3 +311,66 @@ def test_finished_tracks_with_part_files_left_are_skipped_and_cleaned(tmp_path, 
     p = types.SimpleNamespace(work=adir.parent, meta={}, path=lambda name: adir.parent / name)
     assert separate.run(p, {}) == {"skipped": True}
     assert _leftovers(adir) == []
+
+
+# ------------------------------------------------------------------ C. the level of the tracks (sed.py)
+def _old_level_db(x: np.ndarray, sr: int = 16000) -> np.ndarray:
+    """cboe/stages/sed.py:level_db at round-f-base, unchanged."""
+    hop, win = int(sed.ENV_HOP * sr), int(sed.ENV_WIN * sr)
+    n = int(np.ceil(len(x) / hop))
+    xp = np.pad(x, (win // 2, win))
+    sq = np.concatenate([[0.0], np.cumsum(xp.astype(np.float64) ** 2)])
+    idx = np.arange(n) * hop
+    e = (sq[idx + win] - sq[idx]) / win
+    return (10 * np.log10(e + 1e-10)).astype(np.float32)
+
+
+def _track16k(n: int, channels: int = 1, seed: int = 1) -> np.ndarray:
+    rng = np.random.default_rng(seed)
+    t = np.arange(n) / 16000
+    burst = (np.sin(2 * np.pi * 0.7 * t) > 0.6) * 0.4 * np.sin(2 * np.pi * 900 * t)
+    return np.stack([burst + 0.01 * rng.standard_normal(n) for _ in range(channels)], 1).astype(np.float32)
+
+
+@pytest.mark.parametrize("n", [0, 1, 159, 160, 161, 16000 * 3 + 7])
+def test_level_by_blocks_gives_the_numbers_of_the_whole_track(n):
+    x = _track16k(n).mean(axis=1)
+    old = _old_level_db(x)
+    for block_s in (0.05, 0.3, 1.0, None):           # blocks of 5 frames up to the default minute
+        assert np.array_equal(sed._level_frames(lambda a, b: x[a:b], n, 16000, block_s), old), block_s
+    assert np.array_equal(sed.level_db(x), old)
+
+
+@pytest.mark.parametrize("channels", [1, 2])
+def test_level_of_a_wav_file_is_read_a_block_at_a_time(tmp_path, channels):
+    n = 16000 * 125 + 33                              # three blocks of the default minute
+    sf.write(str(tmp_path / "t.wav"), _track16k(n, channels), 16000, subtype="PCM_16")
+    x, _ = sf.read(str(tmp_path / "t.wav"), dtype="float32", always_2d=True)
+    assert np.array_equal(sed.level_db_file(tmp_path / "t.wav"), _old_level_db(x.mean(axis=1)))
+
+
+def test_sed_env_needs_no_copy_of_the_whole_track(tmp_path):
+    """env.npz of 5-minute tracks: the numbers of the whole-track version, with numpy holding
+    a block, not the track 3 times plus 2 float64 copies (5 min: 134 MB)."""
+    adir = tmp_path / "audio"
+    adir.mkdir()
+    n = 16000 * 300 + 5
+    old = {}
+    for i, stem in enumerate(("effects", "music", "speech")):
+        sf.write(str(adir / f"{stem}_16k.wav"), _track16k(n, seed=i), 16000, subtype="PCM_16")
+        x, _ = sf.read(str(adir / f"{stem}_16k.wav"), dtype="float32", always_2d=True)
+        old[stem] = _old_level_db(x.mean(axis=1))
+    for k in sed.TRACKS:                              # the frame scores are there already
+        (tmp_path / f"sed_{k}.npz").write_bytes(b"")
+    p = types.SimpleNamespace(work=tmp_path, meta={"t0": 12.0}, path=lambda name: tmp_path / name)
+    tracemalloc.start()
+    try:
+        assert sed.run(p, {}) == {"frames": {}}
+        peak = tracemalloc.get_traced_memory()[1]
+    finally:
+        tracemalloc.stop()
+    env = sed.load_env(p)
+    for stem in old:
+        assert np.array_equal(env[stem], old[stem]), stem
+    assert float(env["t0"]) == 12.0 and float(env["hop"]) == np.float32(sed.ENV_HOP)
+    assert peak < 40e6, peak

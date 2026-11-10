@@ -84,7 +84,7 @@ class Plan:
 
     def __init__(self, n: int):
         self.C, self.H = int(round(CHUNK_S * SR)), int(round(HOP_S * SR))
-        self.k = self.C // self.H                       # chunks over one sample
+        self.k = self.C // self.H                       # how many chunks cover a sample
         self.n = int(n)
         self.front = self.C - self.H
         self.n_chunks = int(np.ceil((self.n + self.front) / self.H))

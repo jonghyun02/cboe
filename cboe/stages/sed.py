@@ -26,6 +26,8 @@ SEG_F, HOP_F = SEG_S * FPS, HOP_S * FPS
 TRACKS = {"effects": "effects_16k", "mix": "mix_16k", "music": "music_16k"}
 ENV_HOP = 0.01
 ENV_WIN = 0.04
+# the level is summed a minute of the track at a time (16 kHz float64: 7.7 MB a block; 재지 않은 값)
+ENV_BLOCK_S = 60.0
 
 
 def _vendor():
@@ -90,15 +92,47 @@ def infer(model, x: np.ndarray, dev: str | None = None, batch: int = 16) -> np.n
     return (acc / norm[:, None])[:n_frames]
 
 
+def _level_frames(read, n_samples: int, sr: int = SR, block_s: float | None = None) -> np.ndarray:
+    """level_db of x, where ``read(a, b)`` gives x[a:b], a block of frames at a time (감사 6-09:
+    the whole-track version held the track three times and two float64 copies, 4.05 GB for a
+    137-minute film). The running sum of squares goes on from block to block in the order of one
+    np.cumsum over the whole zero-padded track, so every frame gets the same number."""
+    hop, win = int(ENV_HOP * sr), int(ENV_WIN * sr)
+    lead = win // 2
+    n = int(np.ceil(n_samples / hop))
+    per = max(int((ENV_BLOCK_S if block_s is None else block_s) * sr) // hop, 1)   # frames a block
+    out = np.empty(n, dtype=np.float32)
+    carry = 0.0                                          # sum of squares before frame k0's window
+    for k0 in range(0, n, per):
+        k1 = min(k0 + per, n)
+        m0, m1 = k0 * hop, (k1 - 1) * hop + win          # padded samples [m0, m1) of these frames
+        xp = np.zeros(m1 - m0, dtype=np.float64)         # xp = pad(x, (lead, win)) as float64
+        a, b = max(m0, lead), min(m1, lead + n_samples)
+        if a < b:
+            xp[a - m0:b - m0] = read(a - lead, b - lead)
+        sq = np.cumsum(np.concatenate([[carry], xp ** 2]))  # sq[i] = sum of xp[:m0 + i] ** 2
+        idx = np.arange(k1 - k0) * hop
+        e = (sq[idx + win] - sq[idx]) / win
+        out[k0:k1] = (10 * np.log10(e + 1e-10)).astype(np.float32)
+        carry = sq[k1 * hop - m0]                        # hop <= win: inside this block
+    return out
+
+
 def level_db(x: np.ndarray, sr: int = SR) -> np.ndarray:
     """Short-time RMS level (dB), 10 ms hop, 40 ms window, frame k centred at k * 10 ms."""
-    hop, win = int(ENV_HOP * sr), int(ENV_WIN * sr)
-    n = int(np.ceil(len(x) / hop))
-    xp = np.pad(x, (win // 2, win))
-    sq = np.concatenate([[0.0], np.cumsum(xp.astype(np.float64) ** 2)])
-    idx = np.arange(n) * hop
-    e = (sq[idx + win] - sq[idx]) / win
-    return (10 * np.log10(e + 1e-10)).astype(np.float32)
+    return _level_frames(lambda a, b: x[a:b], len(x), sr)
+
+
+def level_db_file(path, sr: int = SR) -> np.ndarray:
+    """level_db of a wav file (channels averaged), read a block at a time."""
+    with sf.SoundFile(str(path)) as f:
+        def read(a: int, b: int) -> np.ndarray:
+            f.seek(a)
+            y = f.read(b - a, dtype="float32", always_2d=True)
+            if len(y) != b - a:
+                raise RuntimeError(f"{path}: read {len(y)} of {b - a} samples at {a}")
+            return y.mean(axis=1)
+        return _level_frames(read, f.frames, sr)
 
 
 def load(p, track: str) -> tuple[np.ndarray, list[str], float]:
@@ -140,7 +174,6 @@ def run(p, cfg: dict) -> dict:
         from ..util import save_npz
         env = {"hop": np.float32(ENV_HOP), "t0": np.float32(t0)}
         for stem in ("effects", "music", "speech"):
-            x, sr = sf.read(str(p.path("audio") / f"{stem}_16k.wav"), dtype="float32", always_2d=True)
-            env[stem] = level_db(x.mean(axis=1))
+            env[stem] = level_db_file(p.path("audio") / f"{stem}_16k.wav")
         save_npz(p.path("env.npz"), **env)
     return {"frames": out}
