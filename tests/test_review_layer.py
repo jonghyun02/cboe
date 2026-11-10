@@ -158,6 +158,34 @@ def test_a_line_without_a_time_comes_back_with_a_start_and_an_end(tmp_path):
     assert cells and cells[0]["start"] == pytest.approx(30.0) and "timing_estimated" not in cells[0]["flags"]
 
 
+def test_a_start_and_an_end_alone_bring_a_line_without_a_time_back(tmp_path):
+    p = make(tmp_path)
+    p.set_line("L0008", start=50.0, end=51.5)                                   # out_of_range, no include sent
+    ln = by_id(p.effective_lines())["L0008"]
+    assert (ln["include"], ln["excluded"], ln["pinned"], ln["decided"]) == (True, None, True, False)
+    assert "L0008" in refs(p.recompute())
+    p.set_line("L0008", include=False)                                          # the writer can still leave it out
+    assert by_id(p.effective_lines())["L0008"]["excluded"] == "writer"
+    p.set_line("L0008", include=None, start=None, end=None)                     # back: no time, out
+    assert by_id(p.effective_lines())["L0008"]["excluded"] == "out_of_range"
+
+
+def test_a_text_too_long_to_be_a_line_is_refused(tmp_path):
+    p = make(tmp_path)
+    huge = "가나다라 " * 4000                                                     # 20,000 letters on a 1 s line
+    with pytest.raises(ReviewError, match="1000자까지"):
+        p.set_line("L0001", text=huge)
+    with pytest.raises(ReviewError, match="1000자까지"):
+        p.add("line", start=30.0, end=31.0, text=huge)
+    with pytest.raises(ReviewError, match="200자까지"):
+        p.add("sfx", start=30.0, end=31.0, phrase="쿵" * 300)
+    assert "lines" not in read_json(p.path("review.json"), {}) or not read_json(p.path("review.json"))["lines"]
+    p.set_line("L0001", text="누구세요 거기 누구 있어요?")                          # a normal one is fine
+    with TestClient(create_app(p.work)) as c:
+        r = c.post("/api/lines/L0001", json={"text": huge})
+        assert r.status_code == 400 and "1000자까지" in r.json()["detail"]
+
+
 def test_fixing_the_time_of_an_unheard_line_makes_it_no_guess(tmp_path):
     p = make(tmp_path)
     p.set_line("L0003", start=14.2, end=15.4)

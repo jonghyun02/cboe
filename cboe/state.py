@@ -69,6 +69,8 @@ TEXT_FROM = ("script", "heard", "writer")
 LINE_FIELDS = ("include", "text", "text_from", "name", "language", "sung", "start", "end", "breaks", "keep",
                "show_name")
 ADDED_KINDS = ("line", "sfx", "music")
+MAX_TEXT = 1000                               # letters of a line the writer writes (a long speech is ~300)
+MAX_PHRASE = 200                              # letters of a sound or note the writer writes
 CONTINUES = "같은 화자가 이어 말함"            # the reason of a speaker item whose name a run carries
 
 
@@ -90,6 +92,14 @@ def _num(x):
 
 def _norm(text) -> str:
     return " ".join(str(text or "").split())
+
+
+def _check_len(text, most: int, what: str):
+    """``text`` when it is at most ``most`` letters, else ReviewError (a line of 20,000 letters would
+    be placed as a thousand cells)."""
+    if text is not None and len(str(text)) > most:
+        raise ReviewError(f"{what}: {most}자까지 쓸 수 있습니다 (지금 {len(str(text))}자)")
+    return text
 
 
 def _line_base(ln: dict) -> str:
@@ -464,6 +474,7 @@ class Project:
             text = _norm(f.pop("text", None)) or None
             if src not in (None,) + TEXT_FROM:
                 raise ReviewError(f"글의 출처는 {', '.join(TEXT_FROM)} 가운데 하나입니다")
+            _check_len(text, MAX_TEXT, "대사 글")
             if src == "heard":
                 text = _norm(ln.get("asr_text"))
                 if not text:
@@ -651,9 +662,9 @@ class Project:
                 else:
                     raise ReviewError(f"{k} 는 참·거짓이어야 합니다")
         if "text" in f:
-            a["text"] = _norm(f.pop("text"))
+            a["text"] = _check_len(_norm(f.pop("text")), MAX_TEXT, "대사 글")
         if "phrase" in f:
-            a["phrase"] = style.bracket(f.pop("phrase"))      # a sound or a note is a label: [일어로 말한다]
+            a["phrase"] = style.bracket(_check_len(_norm(f.pop("phrase")), MAX_PHRASE, "문구"))  # a label: [일어로 말한다]
         if "breaks" in f:
             v = f.pop("breaks") or []
             n = len(_norm(a.get("text")).split())
@@ -842,7 +853,8 @@ class Project:
         pinned = ps is not None and pe is not None
         timed = start is not None and end is not None and end >= start
         estimated = (ln.get("timing") in ESTIMATED or status == "unheard") and not pinned
-        default = status not in NO_TIME and s0 is not None and e0 is not None
+        # in by default: a line with a time, and a line without one the writer gave a start and an end
+        default = (status not in NO_TIME and s0 is not None and e0 is not None) or pinned
         include = d["include"] if isinstance(d.get("include"), bool) else default
         if include and not timed:
             include, excluded = False, (status if status in NO_TIME else "no_time")
