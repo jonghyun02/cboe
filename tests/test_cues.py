@@ -476,6 +476,33 @@ def test_first_and_last_scenes_without_dialogue_reach_the_edge_of_the_stretch():
     assert got[0]["window"] is None
 
 
+def test_scenes_without_dialogue_in_a_row_at_the_head_and_tail_share_the_edge_of_the_stretch():
+    from cboe.stages.align import _scene_rows
+    d = Doc()
+    s = [d.scene(k, f"지어낸 곳 {k}") for k in range(1, 8)]
+    d.act(s[0], "새벽. 멀리서 문이 쾅 닫힌다.")                # three scenes without dialogue open the film
+    d.act(s[1], "자동차 경적이 빵빵 울린다.")
+    d.act(s[2], "전화벨이 울린다.")
+    d.say(s[3], "일어나.")
+    d.say(s[4], "여보세요.")
+    d.act(s[5], "쿵! 대문이 닫힌다.")                          # and two close it
+    d.act(s[6], "멀리서 천둥 소리가 들린다.")
+    out = [_timed("L0001", s[3], 40.0, 41.0), _timed("L0002", s[4], 200.0, 201.0)]
+    rows = _scene_rows(d.doc(), out, None)
+    starts = cues.scene_starts(out, rows, (0.0, 600.0))
+    assert starts == [(0.0, s[0]), (13.333, s[1]), (26.667, s[2]), (40.0, s[3]), (200.0, s[4]),
+                      (201.0, s[5]), (400.5, s[6])]
+    assert [cues.scene_at(t, starts) for t in (5.0, 15.0, 35.0, 250.0, 450.0)] == [s[0], s[1], s[2], s[5], s[6]]
+    # their cues: each in its own scene's part, in script order (not all at one guess)
+    got = cues.build(d.doc(), out, rows, (0.0, 600.0))
+    assert [c["scene_id"] for c in got] == [s[0], s[1], s[2], s[5], s[6]]
+    assert [c["window"] for c in got] == [[0.0, 40.0]] * 3 + [[201.0, 600.0]] * 2
+    assert [c["guess"] for c in got] == [6.667, 20.0, 33.333, 201.0, 400.5]
+    assert all(cues.scene_at(c["guess"], starts) == c["scene_id"] for c in got)
+    # the stretch unknown: the head has no time, the tail cannot be shared
+    assert cues.scene_starts(out, rows) == [(40.0, s[3]), (200.0, s[4]), (201.0, s[5]), (201.0, s[6])]
+
+
 def _two_doors():
     """SC001: a line at 10–12 s, then a door slammed; SC002: a door opens before its line at
     100–102 s. One window [12, 100] for both cues (each reaches into the other scene)."""

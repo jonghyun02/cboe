@@ -802,6 +802,32 @@ def scene_times(scenes) -> dict[str, dict]:
     return out
 
 
+def _quiet_ids(scenes) -> set[str]:
+    """The scenes of scenes.json without dialogue lines."""
+    return {s["id"] for s in scenes or [] if isinstance(s, dict) and s.get("id") and not s.get("lines")}
+
+
+def _quiet_parts(st: dict[str, dict], quiet: set[str], t0=None, t1=None) -> dict[str, tuple[float, float]]:
+    """{scene id: (start, end) of its part} for scenes without dialogue whose place is not found
+    (``scene_times`` ``st``, status 'unknown'): those in a row hold the same gap between their
+    neighbours and share it in script order. A first (last) one has only its end (start): the
+    start ``t0`` (end ``t1``) of the processed stretch is its other end."""
+    gaps: dict[tuple, list[str]] = {}
+    for sid, v in st.items():                          # script order
+        if sid not in quiet or v["status"] != "unknown" or (v["start"] is None and v["end"] is None):
+            continue
+        lo = v["start"] if v["start"] is not None else t0
+        hi = v["end"] if v["end"] is not None else t1
+        if lo is not None and hi is not None and float(hi) >= float(lo):
+            gaps.setdefault((float(lo), float(hi)), []).append(sid)
+    out = {}
+    for (lo, hi), share in gaps.items():
+        step = (hi - lo) / len(share)
+        for k, sid in enumerate(share):
+            out[sid] = (lo + step * k, lo + step * (k + 1))
+    return out
+
+
 EDGE_TOL_S = 0.05         # a scene start / end this close to its own first / last line says nothing more
 NO_SCENE_TIME = ("absent", "out_of_range")         # scenes.json: the scene is not in the processed video
 FAR_ENDS = ("other_scene", "range")                # window ends that are no bound of the cue's own scene
@@ -965,14 +991,22 @@ def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None, span=No
     # before (or to the start): spread inside it, none on the far end. After a scene's last line:
     # one after another from that line (써니 앞 30분: sounds written after a scene's last line
     # followed it within 4 s; those before a first line came 1–82 s before it). Scenes without
-    # dialogue in a row share the time between their neighbours: their cues share it in order.
+    # dialogue in a row share the time between their neighbours (or, at the head / tail of the
+    # film, between the edge of the stretch and their neighbour) in script order, as
+    # ``scene_starts`` places them: the cues of each share its part.
+    parts = _quiet_parts(st, _quiet_ids(scenes), *edge)
     groups: dict[tuple, list[dict]] = {}
     for c in cues:
         if c.get("window") and c["type"] != "vocal":
-            key = None if c["window_by"] == ["scene", "scene"] and c["scene_id"] not in own else c["scene_id"]
-            groups.setdefault((key, tuple(c["window"])), []).append(c)
-    for group in groups.values():
-        lo, hi = group[0]["window"]
+            key, (lo, hi) = c["scene_id"], c["window"]
+            if c["scene_id"] not in own and set(c["window_by"]) <= {"scene", "range"}:
+                p = parts.get(c["scene_id"])
+                if p and max(lo, p[0]) <= min(hi, p[1]):
+                    lo, hi = max(lo, p[0]), min(hi, p[1])
+                elif c["window_by"] == ["scene", "scene"]:
+                    key = None                         # no part known: the cues of the row share the gap
+            groups.setdefault((key, lo, hi), []).append(c)
+    for (_, lo, hi), group in groups.items():
         n, far = len(group), _far_end(group[0])
         for k, c in enumerate(group):
             if far < 0:
@@ -1009,25 +1043,19 @@ def scene_starts(lines: list[dict], scenes=None, span=None) -> list[tuple[float,
 
     Scenes without dialogue in a row hold the same gap between their neighbours in scenes.json:
     they share it in script order (each its part, as ``windows`` shares it among their cues). A
-    first scene without dialogue, which has only its end, starts at the start of the processed
-    stretch ``span`` = (t0, t1)."""
+    first (last) scene without dialogue has only its end (start): the start (end) of the
+    processed stretch ``span`` = (t0, t1) is its other end, so such scenes in a row at the head
+    (tail) of the film share the time between that edge and their neighbour the same way."""
     st = scene_times(scenes)
-    quiet = {s["id"] for s in scenes or [] if isinstance(s, dict) and s.get("id") and not s.get("lines")}
     t0 = span[0] if span and span[0] is not None else None
-    rows = []
+    t1 = span[1] if span and span[1] is not None else None
+    parts = _quiet_parts(st, _quiet_ids(scenes), t0, t1)
+    out = []
     for sid, v in st.items():                          # script order
-        start = v["start"] if v["start"] is not None else t0 if v["end"] is not None else None
+        start = parts[sid][0] if sid in parts else v["start"] if v["start"] is not None else \
+            t0 if v["end"] is not None else None
         if start is not None:
-            rows.append([float(start), sid, v])
-    gaps: dict[tuple, list[list]] = {}
-    for row in rows:
-        v = row[2]
-        if row[1] in quiet and v["status"] == "unknown" and v["start"] is not None and v["end"] is not None:
-            gaps.setdefault((float(v["start"]), float(v["end"])), []).append(row)
-    for (lo, hi), share in gaps.items():
-        for k, row in enumerate(share):
-            row[0] = lo + (hi - lo) * k / len(share)
-    out = [(round(s, 3), sid) for s, sid, _ in rows]
+            out.append((round(float(start), 3), sid))
     if not out:
         first: dict[str, float] = {}
         for ln in lines or []:
