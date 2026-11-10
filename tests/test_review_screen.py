@@ -13,7 +13,6 @@ import os
 import shutil
 import subprocess
 import sys
-import tempfile
 import threading
 import time
 from pathlib import Path
@@ -176,7 +175,7 @@ def browser(tmp_path_factory):
     if not (EDGE and NODE and HAVE_FFMPEG):
         pytest.skip("headless Edge, Node and ffmpeg are needed to drive the page")
     root = tmp_path_factory.mktemp("page")
-    prof = Path(tempfile.mkdtemp(prefix="cboe-edge-"))            # an ASCII path: Edge writes its port here
+    prof = tmp_path_factory.mktemp("edge")                        # its profile; Edge writes its port here
     proc = subprocess.Popen([EDGE, "--headless=new", "--remote-debugging-port=0", f"--user-data-dir={prof}",
                              "--no-first-run", "--no-default-browser-check", "--mute-audio",
                              "--autoplay-policy=no-user-gesture-required", "--disable-renderer-backgrounding",
@@ -196,7 +195,11 @@ def browser(tmp_path_factory):
         else:
             proc.kill()
         proc.wait(timeout=20)
-        shutil.rmtree(prof, ignore_errors=True)
+        for _ in range(40):                     # its helper processes let go of the profile a moment later
+            shutil.rmtree(prof, ignore_errors=True)
+            if not prof.exists():
+                break
+            time.sleep(0.25)
 
 
 def run_page(browser, url, scenario, size=(1280, 800)):
