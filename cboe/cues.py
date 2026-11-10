@@ -804,13 +804,14 @@ def scene_times(scenes) -> dict[str, dict]:
 
 EDGE_TOL_S = 0.05         # a scene start / end this close to its own first / last line says nothing more
 NO_SCENE_TIME = ("absent", "out_of_range")         # scenes.json: the scene is not in the processed video
-FAR_ENDS = ("other_scene", "range")                # window ends outside the cue's own scene
+FAR_ENDS = ("other_scene", "range")                # window ends that are no bound of the cue's own scene
 GUESS_STEP_S = 5.0         # guessed onsets of sounds written after a scene's last line, one after another
 
 
 def _far_end(cue: dict) -> int:
-    """-1: only the window's start lies outside the cue's own scene (``window_by``), +1: only its
-    end, 0: neither or both."""
+    """-1: only the window's start is no bound of the cue's own scene (``window_by`` 'other_scene' /
+    'range': the guess and ``anchor`` lean to the other end), +1: only its end, 0: neither or both.
+    Whether such an end lies past another scene is ``window_out``."""
     by = cue.get("window_by") or [None, None]
     far = [b in FAR_ENDS for b in by]
     return -1 if far[0] and not far[1] else 1 if far[1] and not far[0] else 0
@@ -837,7 +838,11 @@ def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None, span=No
 
     A dialogue.json line counts only when it carries the same ``scene_id`` as the script line
     (an older dialogue.json without it gives no window). ``window_by``: what each end came from
-    ('line' | 'scene' | 'other_scene' | 'range'); ``window_lines``: [line before, line after]
+    ('line' | 'scene' | 'other_scene' | 'range'); ``window_out``: whether each end lies past
+    another scene of the script — always for 'other_scene'; for 'range' when a scene that is not
+    marked absent comes between the cue's scene and that edge in script order (the script's first
+    scene reaches the start of the stretch, its last the end: no scene next to it there);
+    ``window_lines``: [line before, line after]
     used; ``window_estimated``: an end rests on a line whose time is a guess (align ``timing``
     voice / even, ``status`` unheard) or on a scene whose place was not found for sure (status
     other than 'found')."""
@@ -863,6 +868,18 @@ def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None, span=No
         seq = [(k, ln.get("id")) for k, ln in enumerate(script_lines)]
     at = {lid: k for k, (_, lid) in enumerate(seq)}
     idx = [i for i, _ in seq]
+    # the scenes in script order that may be in the video: one before (after) the cue's scene may
+    # lie between it and the start (end) of the stretch
+    order = [s.get("id") for s in doc.get("scenes") or [] if isinstance(s, dict) and s.get("id")] or \
+        list(dict.fromkeys([e.get("scene_id") for e in elements] + [ln.get("scene_id") for ln in script_lines]))
+    rank = {sid: k for k, sid in enumerate(s for s in order if s and st.get(s, {}).get("status") != "absent")}
+
+    def out_end(by, side, scene):
+        if by != "range":
+            return by == "other_scene"
+        k = rank.get(scene)
+        return k is None or (k > 0 if side < 0 else k < len(rank) - 1)
+
     own: dict[str, list[dict]] = {}                    # the timed lines of each scene
     for _, lid in seq:
         if usable(lid) is not None:
@@ -909,13 +926,13 @@ def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None, span=No
 
     for c in cues:
         c["window"], c["window_by"], c["window_lines"] = None, None, [None, None]
-        c["window_estimated"] = False
+        c["window_out"], c["window_estimated"] = None, False
         scene = c.get("scene_id")
         if c["type"] == "vocal" and c.get("line_id"):
             ln = usable(c["line_id"])
             if ln is not None:
                 c["window"] = [round(float(ln["start"]), 3), round(float(ln["end"]), 3)]
-                c["window_by"] = ["line", "line"]
+                c["window_by"], c["window_out"] = ["line", "line"], [False, False]
                 c["window_lines"] = [c["line_id"], c["line_id"]]
                 c["window_estimated"] = _estimated(ln)
             continue
@@ -939,6 +956,7 @@ def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None, span=No
             lo, hi = hi, lo
         c["window"] = [round(lo, 3), round(hi, 3)]
         c["window_by"] = [lo_by, hi_by]
+        c["window_out"] = [out_end(lo_by, -1, scene), out_end(hi_by, 1, scene)]
         c["window_lines"] = [prev["id"] if prev else None, nxt["id"] if nxt else None]
         c["window_estimated"] = any(_estimated(ln) for ln in (prev, nxt) if ln) or \
             ("scene" in (lo_by, hi_by) and sc.get("status") != "found")
@@ -1131,12 +1149,19 @@ def _wide(cue: dict) -> bool:
 
 
 def off_scene(cue: dict, onset: float) -> bool:
-    """A sound in a wide window (> ``WIDE_S``) that reaches into another scene or to the edge of
-    the processed stretch, farther than ``WIDE_S`` from the end in the cue's own scene
-    (``anchor``): it may be a sound of the scene next to it (where one scene ends inside the
-    window is not known)."""
+    """A sound in a wide window (> ``WIDE_S``) whose other end lies past another scene of the
+    script (``window_out``: the lines of another scene, or the edge of the processed stretch with
+    another scene between), farther than ``WIDE_S`` from the end in the cue's own scene
+    (``anchor``): it may be a sound of that scene (where one scene ends inside the window is not
+    known). Measured from that end even for cues that share it (``places`` looks near each one's
+    ``guess``, which spreads over the part that may be the other scene's). Not off: a window of the
+    script's first (last) scene that only reaches the start (end) of the stretch — no scene lies
+    there. A cue without ``window_out`` (made before it): its 'other_scene' / 'range' end counts."""
     a = anchor(cue)
-    return a is not None and _wide(cue) and abs(float(onset) - a) > WIDE_S
+    if a is None or not _wide(cue) or abs(float(onset) - a) <= WIDE_S:
+        return False
+    out = cue.get("window_out")
+    return out is None or bool(out[0 if _far_end(cue) < 0 else 1])
 
 
 def places(cues: list[dict]) -> dict[int, float]:

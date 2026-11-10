@@ -39,12 +39,14 @@ speaker's own sound the script writes down, with the window between the aligned 
   say which sound it is (a cue with only a '…소리' description takes no named sound at all),
   when its window rests on guessed line times (``cue_estimated``, 감사 1-08), when the sound lies
   in a wide window that reaches into the next scene, far from the cue's own (``cue_far``,
-  ``cues.off_scene``: 확인 필요 says '대본 단서의 장면에서 먼 소리'), and for a person's
+  ``cues.off_scene``: 확인 필요 says '대본 단서의 장면에서 먼 소리'; not for a window of the
+  script's first or last scene that only reaches the edge of the stretch), and for a person's
   own sound — a speaker's '(한숨)' (it ties the sound to its line, ``source_line``) or a laugh,
   a cough written in an action line that is not off screen: the person is mostly in view (감사 8-12).
   In a wide window the cue takes the sound nearest its own scene (``cues.match_sounds``).
   The '대본' evidence and a cue's own candidate carry ``window_by`` (what each end of the window
-  came from: 'other_scene' / 'range' reach out of the cue's scene).
+  came from) and ``window_out`` (whether that end lies past another scene: 'other_scene' always,
+  'range' only with a scene between).
 - A music cue adds its wording (a song title: "[가수의 '곡명']") to the music candidate there as
   a choice; a silence cue joins the music-stop candidate at the same place.
 - A cue no detected candidate fits becomes a candidate of its own: ``origin`` 'script', the id
@@ -398,8 +400,10 @@ def script_evidence(cue: dict, t: float, polarity: str = "include") -> dict:
     e = ev("대본", t, txt, polarity, "script")
     if w:
         e["window"] = list(w)
-        if cue.get("window_by"):                    # what each end came from: 'other_scene' / 'range' reach out of the scene
+        if cue.get("window_by"):                    # what each end came from, and whether it lies past another scene
             e["window_by"] = list(cue["window_by"])
+            if cue.get("window_out"):
+                e["window_out"] = list(cue["window_out"])
     return e
 
 
@@ -464,6 +468,8 @@ def script_candidate(cue: dict) -> dict | None:
           "flags": ["script", "timing_estimated"]}
     if cue.get("window_by"):
         it["window_by"] = list(cue["window_by"])
+        if cue.get("window_out"):
+            it["window_out"] = list(cue["window_out"])
     if kind == "music":
         it["music"] = {"moods": [], "change": None, "instruments": [], "segment": [it["t0"], it["t1"]],
                        "event": "stop" if cue.get("music_stop") else "script", "strength": None}
