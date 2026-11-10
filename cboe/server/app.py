@@ -21,6 +21,7 @@ Sound phrases stored in an older notation ('♬ …') are shown in today's ('[�
 end, breaks, keep), ``/api/lines/bulk``, ``/api/lines/{id}/speaker`` (a name by scope),
 ``/api/extras/{id}`` (line | ignore | clear), ``/api/added`` (+ ``/{id}`` to change, DELETE to
 remove), ``/api/people``. Unknown ids are 404, values that cannot be used 400, clashes 409.
+``/api/envelope`` gives the timeline the level of the separated tracks (env.npz, cut down).
 
 Video and frames are limited to the project window [t0, t1): the page never seeks
 outside it and ``/api/frame`` clamps into it, so sealed parts of a test video are
@@ -851,4 +852,49 @@ def create_app(work) -> FastAPI:
             raise HTTPException(500, f"프레임을 읽지 못했습니다 · {exc}") from None
         return Response(data, media_type="image/jpeg", headers={"Cache-Control": "max-age=86400"})
 
+    @app.get("/api/envelope")
+    def envelope(step: float = Query(0.1, gt=0, le=60)):
+        """The level of the separated tracks for the timeline (감사 9-x3: '파형을 기준으로'):
+        env.npz of the sed stage cut down to the loudest value of each ``step`` seconds of the
+        processed part, in whole dB. 404 when the stage has not run."""
+        with svc.lock:
+            t0, t1, _fps = svc.window()
+            try:
+                env = level_buckets(svc.project.path("env.npz"), t0, t1, step)
+            except FileNotFoundError:
+                raise HTTPException(404, "소리 세기 파일(env.npz)이 없습니다 · 소리 검출 단계를 돌리면 생깁니다") from None
+        return env
+
     return app
+
+
+ENV_TRACKS = ("speech", "effects", "music")
+ENV_MAX_BUCKETS = 20000                  # a long film still comes as a few hundred kilobytes
+ENV_FLOOR_DB = -90
+
+
+def level_buckets(path: Path, t0: float, t1: float, step: float) -> dict:
+    """``{"t0", "step", "tracks": {speech | effects | music: [dB, ...]}}`` — the loudest level of
+    each ``step`` seconds from ``t0`` to ``t1`` (step widened so there are at most
+    ``ENV_MAX_BUCKETS``); before the file starts, after it ends or silent: ``ENV_FLOOR_DB``."""
+    import numpy as np
+
+    if not path.is_file():
+        raise FileNotFoundError(path)
+    with np.load(path, allow_pickle=False) as d:
+        hop = round(float(d["hop"]), 6) if "hop" in d.files else 0.01        # stored as float32
+        e0 = round(float(d["t0"]), 6) if "t0" in d.files else 0.0
+        raw = {k: np.asarray(d[k], dtype=np.float64) for k in ENV_TRACKS if k in d.files}
+    span = max(0.0, t1 - t0)
+    per = max(1, round(max(step, span / ENV_MAX_BUCKETS) / hop))      # samples per bucket
+    n = max(1, math.ceil(span / (per * hop))) if span else 0
+    tracks = {}
+    for name, x in raw.items():
+        x = np.where(np.isfinite(x), x, ENV_FLOOR_DB)
+        i0 = round((t0 - e0) / hop)
+        idx = np.arange(n * per) + i0
+        ok = (idx >= 0) & (idx < len(x))
+        v = np.full(n * per, float(ENV_FLOOR_DB))
+        v[ok] = x[idx[ok]]
+        tracks[name] = np.clip(np.round(v.reshape(n, per).max(axis=1)), ENV_FLOOR_DB, 0).astype(int).tolist() if n else []
+    return {"t0": t0, "step": round(per * hop, 6), "tracks": tracks}
