@@ -108,7 +108,8 @@ def music_candidates(p) -> list[dict]:
                         "label": {"class": "Music", "ko": "음악 멈춤", "score": m.get("music_score", 0.0),
                                   "confident": False},
                         "music": {"moods": [], "change": None, "instruments": [], "segment": m["segment"],
-                                  "event": "stop", "strength": None, "drop_db": m.get("drop_db")},
+                                  "event": "stop", "strength": None, "drop_db": m.get("drop_db"),
+                                  "next_music_s": m.get("next_music_s")},
                         "phrases": [opt], "phrase": opt["text"], "short": opt["short"], "flags": []})
             continue
         nxt = items[i]["onset"] if i < len(items) else None
@@ -538,6 +539,10 @@ def build(p, agent_results: dict | None = None) -> list[dict]:
             rec, reason, why = decide_music(m, None, ag)
             drop = f" (세기 {mus['drop_db']:.0f}dB 떨어짐)" if mus.get("drop_db") is not None else ""
             evid = [ev("소리", m["onset"], "음악이 갑자기 멈춤" + drop, "neutral", "rule")]
+            if mus.get("next_music_s") is not None:     # a pause between two pieces (music.STOP_NEXT_S)
+                gap = float(mus["next_music_s"])
+                evid.append(ev("소리", m["onset"] + gap, f"{gap:.1f}초 뒤 다른 음악이 시작함", "neutral", "rule"))
+                reason += f" · {gap:.1f}초 뒤 곧 다른 음악이 시작함"
             cue = stop_hits.get(m["id"])
             if cue:                     # the script writes the silence here too: one candidate
                 attach_music(m, [cue])

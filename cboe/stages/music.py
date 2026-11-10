@@ -20,7 +20,8 @@
 ④ 멈춤: where a segment ends with the level falling steeply within a fraction of a second
   (``stop_at``) → a 'stop' candidate, '[음악이 멈춘다]' (넷플릭스 II.9: 줄거리에 필요한 음악이
   갑자기 끝날 때). Whether that silence matters to the plot is the writer's call, so the
-  recommendation is always 확인 필요.
+  recommendation is always 확인 필요. When another music segment starts within STOP_NEXT_S
+  the stop carries ``next_music_s`` (a pause between two pieces, shown in its reason).
 Candidates: music start, a new cue, a mood change and an abrupt stop. When to caption
 music is this tool's own rule — II.7 describes how to write the caption, not when.
 """
@@ -49,6 +50,10 @@ START_NEAR_DB = 20.0                         # the music has started once the le
 STOP_SEARCH_S, STOP_WIN_S = 1.0, 0.3         # the fall is looked for within 1 s of the segment end, 0.3 s windows
 STOP_DROP_DB = 20.0                          # level before - level after to call the end abrupt
 STOP_HOLD_S = 1.0                            # ... and it has to stay that quiet for this long
+# another music segment starting this soon after a stop: a pause between two pieces rather than
+# the music falling silent. The stop is kept (the writer decides) with ``next_music_s``. Read off
+# two stored runs (2.7 s and 5.5 s pauses before the next piece), not validated.
+STOP_NEXT_S = 6.0
 
 
 def near_silent(lev: np.ndarray, hop: float, t0: float, a: float, b: float) -> bool:
@@ -136,6 +141,15 @@ def stop_at(lev: np.ndarray, hop: float, t0: float, b: float) -> tuple[float, fl
     if len(rest) < n // 2 or float(np.percentile(rest, 75)) > before - STOP_DROP_DB:
         return None
     return round(t0 + k * hop, 3), round(best, 1)
+
+
+def next_music(segs: list[list[float]], k: int, t: float) -> float | None:
+    """Seconds from a stop at ``t`` (the end of segment ``k``) to the start of the next music
+    segment when that is at most STOP_NEXT_S, else None."""
+    if k + 1 >= len(segs):
+        return None
+    gap = round(float(segs[k + 1][0]) - float(t), 3)          # the times are kept to 1 ms
+    return round(max(gap, 0.0), 1) if gap <= STOP_NEXT_S else None
 
 
 def _cue_onsets(lev: np.ndarray, hop: float, t0: float, a: float, b: float) -> list[float]:
@@ -265,7 +279,7 @@ def run(p, cfg: dict) -> dict:
     inst_idx = [labels.index(k) for k in inst_keys]
     st = np.array(starts)
     items = []
-    for a, b in segs:
+    for si, (a, b) in enumerate(segs):
         sel = np.where((st >= a - 1e-6) & (st < b))[0]
         if len(sel) == 0:
             continue
@@ -322,12 +336,15 @@ def run(p, cfg: dict) -> dict:
                           "instruments": [], "slope_db_s": 0.0, "change": None, "drop_db": stop[1],
                           "music_score": round(float(m[max(int((ts - t0 - 2) * sed.FPS), 0):
                                                        max(int((ts - t0) * sed.FPS), 0)].max(initial=0)), 3)})
+            gap = next_music(segs, si, ts)
+            if gap is not None:
+                items[-1]["next_music_s"] = gap
     items.sort(key=lambda it: it["onset"])
     write_json(p.path("music.json"), {"segments": segs, "silent_segments": silent, "items": items,
                                       "params": {"T_ON": T_ON, "T_OFF": T_OFF, "WIN_S": WIN_S, "HOP_S": HOP_S,
                                                  "SILENT_DB": SILENT_DB, "START_NEAR_DB": START_NEAR_DB,
                                                  "STOP_DROP_DB": STOP_DROP_DB, "STOP_WIN_S": STOP_WIN_S,
-                                                 "STOP_HOLD_S": STOP_HOLD_S}})
+                                                 "STOP_HOLD_S": STOP_HOLD_S, "STOP_NEXT_S": STOP_NEXT_S}})
     n_stop = sum(1 for it in items if it["kind"] == "stop")
     log.info("music: %d segments (%d near-silent ones dropped), %d candidates (%d of them a stop)",
              len(segs), len(silent), len(items), n_stop)

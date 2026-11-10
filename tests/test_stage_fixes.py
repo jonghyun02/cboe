@@ -317,6 +317,26 @@ def test_music_stop_candidate_is_always_the_writers_call(tmp_path):
     assert "34dB" in stop["evidence"][0]["text"]
     assert a["rec"] == "include" and a["t1"] == 40.0                    # the start still ends with its segment
     assert c["rec"] == "include" and "follows" not in c                 # the stop does not join a chain
+    assert "다른 음악" not in stop["reason"]                              # the next music is 10 s later
+
+
+def test_music_stop_right_before_the_next_music_says_so(tmp_path):
+    segs = [[0.0, 30.0], [32.7, 50.0], [60.0, 80.0]]
+    assert music.next_music(segs, 0, 30.0) == 2.7
+    assert music.next_music(segs, 0, 26.7) == 6.0                        # STOP_NEXT_S itself still counts
+    assert music.next_music(segs, 0, 26.6) is None
+    assert music.next_music(segs, 1, 50.0) is None                       # 10 s of quiet: the music stopped
+    assert music.next_music(segs, 2, 80.0) is None and music.next_music([], 0, 1.0) is None
+    assert music.next_music(segs, 0, 33.0) == 0.0                        # a stop found after the next start: 0, not negative
+    items = [_music("start", 0.0, segs[0], SURE),
+             {"kind": "stop", "onset": 30.0, "segment": segs[0], "moods": [], "mood_strength": 0.0, "instruments": [],
+              "change": None, "music_score": 0.6, "drop_db": 30.0, "next_music_s": 2.7},
+             _music("start", 32.7, segs[1], SURE)]
+    p = _project(tmp_path, music={"items": items})
+    stop = next(it for it in recommend.build(p, {}) if it["kind"] == "music" and it["music"]["event"] == "stop")
+    assert stop["rec"] == "check" and "2.7초 뒤 곧 다른 음악이 시작함" in stop["reason"]
+    assert stop["music"]["next_music_s"] == 2.7
+    assert any(e["text"] == "2.7초 뒤 다른 음악이 시작함" and e["t"] == pytest.approx(32.7) for e in stop["evidence"])
 
 
 def test_no_mood_phrase_comes_from_phrases(tmp_path):
@@ -723,7 +743,8 @@ def test_music_stage_with_made_up_tracks(tmp_path, monkeypatch):
     assert first["segment"][0] <= first["onset"] and first["moods"][0]["key"] == "Scary music"
     assert stop["onset"] == pytest.approx(30.0, abs=0.011) and stop["drop_db"] >= music.STOP_DROP_DB and stop["moods"] == []
     assert last["onset"] == pytest.approx(60.0, abs=0.011)             # runs to the end of the window: no stop
-    assert out["params"]["SILENT_DB"] == music.SILENT_DB
+    assert "next_music_s" not in stop                                  # the next music is 30 s later
+    assert out["params"]["SILENT_DB"] == music.SILENT_DB and out["params"]["STOP_NEXT_S"] == music.STOP_NEXT_S
     # ... and what the recommendation makes of it
     m = [it for it in recommend.build(p, {}) if it["kind"] == "music"]
     assert [it["rec"] for it in m] == ["include", "check", "include"] and m[1]["phrase"] == "[음악이 멈춘다]"
