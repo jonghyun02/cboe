@@ -21,6 +21,8 @@ onnxruntime
 av
 pillow
 kiwipiepy
+pdfminer.six
+olefile
 filelock
 requests
 tqdm

@@ -190,6 +190,11 @@
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
 }
 .preview div { overflow: hidden; text-overflow: ellipsis; }
+.smarks { margin-top: 2px; }
+.swarn {
+  margin: 6px 0 0; padding: 7px 11px 7px 26px; border-radius: 9px; background: var(--chk-bg); color: var(--chk-fg);
+  font-size: 12.5px; line-height: 1.55;
+}
 .row2 { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 14px; }
 .opts { display: flex; flex-direction: column; gap: 10px; padding: 12px 14px; border-radius: 12px; background: var(--well); border: 1px solid var(--line-2); }
 .check { display: flex; gap: 10px; align-items: flex-start; cursor: pointer; border-radius: 8px; }

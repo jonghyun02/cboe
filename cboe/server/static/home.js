@@ -95,7 +95,7 @@
   };
   // deck 5.1 전체 처리 흐름
   const GROUPS = [
-    { title: '① 후보 검출 · 근거 수집', stages: ['ingest', 'separate', 'cuts', 'sed', 'asr', 'align', 'sfx', 'music', 'speaker', 'screen', 'dialog_ev'] },
+    { title: '① 후보 검출 · 근거 수집', stages: ['ingest', 'script', 'separate', 'cuts', 'sed', 'asr', 'align', 'sfx', 'music', 'speaker', 'screen', 'dialog_ev'] },
     { title: '② 추천 · 에이전트 재확인', stages: ['recommend', 'agent'] },
     { title: '③ 초안 배치', stages: ['placement'] },
   ];
@@ -146,7 +146,7 @@
     if (p.total) {
       return `<span class="prog-bar"><i style="width:${pct(p.decided, p.total)}%"></i></span><span class="tnum">작가 결정 ${p.decided} / ${p.total}</span>${(p.exports || []).length ? '<span class="pdone">· 내보냄</span>' : ''}`;
     }
-    if (p.status === 'partial') return `<span class="pnote">${(p.stages_done || []).length} / 14 단계 끝남</span>`;
+    if (p.status === 'partial') return `<span class="pnote">${(p.stages_done || []).length} / ${Object.keys((S.data && S.data.stage_labels) || {}).length} 단계 끝남</span>`;
     return '';
   }
   function statusOf(p, j) { return j && j.state === 'running' ? 'running' : p.status; }
@@ -196,7 +196,7 @@
 
   function introHtml() {
     return `<div class="intro"><h2>이렇게 씁니다</h2><ol>
-      <li><span class="n">1</span><div><b>새 작업</b><span class="muted">영상과 대본을 고른다 · 대본은 한 줄에 <code>이름: 대사</code> (txt · docx · srt)</span></div></li>
+      <li><span class="n">1</span><div><b>새 작업</b><span class="muted">영상과 대본을 고른다 · 대본은 촬영 대본(pdf · hwp)이나 한 줄에 <code>이름: 대사</code> (txt · docx · srt)</span></div></li>
       <li><span class="n">2</span><div><b>분석</b><span class="muted">음원 분리 · 후보 검출 · 화면 · 화자 · 대사 근거 · 추천 · 에이전트 재확인 · 초안 배치</span></div></li>
       <li><span class="n">3</span><div><b>검수</b><span class="muted">근거를 보고 포함 · 제외를 정하고 문구 · 화자 · 자리를 고친다</span></div></li>
       <li><span class="n">4</span><div><b>내보내기</b><span class="muted">가독성 검사 뒤 SRT · VTT 로 저장</span></div></li>
@@ -456,13 +456,28 @@
     if (!el) return;
     $('#f-script-clear').hidden = !f.script;
     let prev = '';
-    if (!f.script) el.innerHTML = '한 줄에 <code>이름: 대사</code>, 또는 SRT · VTT · CSV · JSON';
-    else if (!s) el.innerHTML = '읽는 중…';
+    if (!f.script) el.innerHTML = '촬영 대본 PDF · HWP, 한 줄에 <code>이름: 대사</code> (TXT · DOCX), 또는 SRT · VTT · CSV · JSON';
+    else if (!s) el.innerHTML = '읽는 중… (PDF 는 십여 초 걸릴 수 있다)';
     else if (s.ok) {
       const cs = s.characters || [];
-      el.innerHTML = `<span class="ok">✓ ${num(s.lines)}줄 · 이름 있는 줄 ${num(s.named)}${s.timed ? ' · 시각 있음' : ''}</span>${cs.length ? ` · 인물 ${esc(cs.slice(0, 8).join(', '))}${cs.length > 8 ? ` 외 ${cs.length - 8}` : ''}` : ''}`;
+      const nc = num(s.n_characters, cs.length);
+      const parts = [];
+      if (s.format === 'screenplay') parts.push(`촬영 대본 · 장면 ${num(s.scenes)}개`);
+      parts.push(`대사 ${num(s.lines)}줄`, `이름 있는 줄 ${num(s.named)} (${pct(num(s.named), num(s.lines))}%)`);
+      if (num(s.actions)) parts.push(`지문 ${num(s.actions)}`);
+      if (s.timed) parts.push('시각 있음');
+      const marks = [];                                 // what the script itself marks: no detection needed for these
+      if (num(s.language)) marks.push(`외국어 ${Object.entries(s.languages || {}).map(([k, v]) => `${k} ${v}`).join(' · ')}줄`);
+      if (num(s.sung)) marks.push(`노래 ${num(s.sung)}줄`);
+      if (num(s.offscreen)) marks.push(`화면 밖 · 전화 · 방송 ${num(s.offscreen)}줄`);
+      el.innerHTML = `<span class="ok">✓ ${esc(parts.join(' · '))}</span>${cs.length ? ` · 인물 ${nc}명 ${esc(cs.slice(0, 8).join(', '))}${nc > 8 ? ` 외 ${nc - 8}` : ''}` : ''}${marks.length
+        ? `<div class="smarks">대본에 적힌 표시 · ${esc(marks.join(' · '))}</div>` : ''}`;
       prev = (s.preview || []).length ? `<div class="preview">${s.preview.map((x) => `<div>${esc(x)}</div>`).join('')}</div>` : '';
-    } else el.innerHTML = `<span class="err">${esc(s.error || '읽지 못한 대본입니다')}</span>`;
+      if ((s.warnings || []).length) prev += `<ul class="swarn">${s.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>`;
+    } else {
+      el.innerHTML = `<span class="err">${esc(s.error || '읽지 못한 대본입니다')}</span>${num(s.lines)
+        ? ` <span class="muted">· 읽힌 것: 대사 ${num(s.lines)}줄 · 이름 있는 줄 ${num(s.named)}</span>` : ''}`;
+    }
     $('#f-preview').innerHTML = prev;
     $('#f-script').classList.toggle('is-bad', !!(s && !s.ok));
   }

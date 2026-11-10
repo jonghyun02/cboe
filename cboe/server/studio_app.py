@@ -3,7 +3,7 @@
 
     /                 시작 화면 (static/home.html)
     /api/studio       작업 목록, 지금 분석, 환경 점검
-    /api/inspect      고른 영상·대본 미리 보기 (길이, 줄 수)
+    /api/inspect      고른 영상·대본 미리 보기 (길이; 대본은 장면·대사·화자 수와 경고)
     /api/projects     새 작업 만들기 (+ 바로 분석)
     /api/projects/{id}/run   분석 시작·이어서·다시
     /api/job, /api/job/cancel
@@ -34,7 +34,8 @@ from ..studio import STAGE_LABELS, JobBusy, JobManager, Workspace, open_folder
 from ..util import NO_WINDOW, log
 from .app import STATIC, LocalOnly, SafeJSONResponse, create_app
 
-SCRIPT_TYPES = {".txt", ".docx", ".srt", ".vtt", ".csv", ".tsv", ".json"}
+SCRIPT_TYPES = {".pdf", ".hwp", ".txt", ".docx", ".srt", ".vtt", ".csv", ".tsv", ".json"}
+SCRIPT_TYPES_TEXT = "pdf · hwp · txt · docx · srt · vtt · csv · tsv · json"
 SCRIPT_MAX_BYTES = 20 * 1024 * 1024
 
 RUN_MODES = {"continue": [], "all": ["all"]}     # 이어서 (끝난 단계 건너뜀) / 처음부터 다시
@@ -83,7 +84,7 @@ kind = sys.argv[1]
 if kind == "video":
     p = filedialog.askopenfilename(title="영상 파일 고르기", filetypes=[("영상", "*.mp4 *.mkv *.mov *.avi *.webm *.m4v *.ts *.wmv"), ("모든 파일", "*.*")])
 elif kind == "script":
-    p = filedialog.askopenfilename(title="대본 파일 고르기", filetypes=[("대본", "*.txt *.docx *.srt *.vtt *.csv *.tsv *.json"), ("모든 파일", "*.*")])
+    p = filedialog.askopenfilename(title="대본 파일 고르기", filetypes=[("대본", "*.pdf *.hwp *.txt *.docx *.srt *.vtt *.csv *.tsv *.json"), ("모든 파일", "*.*")])
 else:
     p = filedialog.askdirectory(title="폴더 고르기")
 sys.stdout.write(p or "")
@@ -134,6 +135,26 @@ def _torch_gpu() -> tuple[str | None, str | None]:
         return None, None
     dev, _, gpu = line.partition("|")
     return (dev.strip() or None), (gpu.strip() or None)
+
+
+def script_preview(path) -> dict:
+    """대본 미리 보기: what a script file reads as, for the new-project form. ``ok`` False
+    (with ``error``) means an analysis must not start with it."""
+    from .. import script as script_mod
+    p = Path(path)
+    if not p.is_file():
+        return {"ok": False, "error": "파일이 없습니다"}
+    if p.suffix.lower() not in SCRIPT_TYPES:
+        return {"ok": False, "error": f"대본은 {SCRIPT_TYPES_TEXT} 파일입니다"}
+    if p.stat().st_size > SCRIPT_MAX_BYTES:
+        return {"ok": False, "error": "대본 파일이 너무 큽니다"}
+    try:
+        d = script_mod.read(p)
+        s = script_mod.summary(d)
+    except Exception as exc:
+        return {"ok": False, "error": f"대본을 읽지 못했습니다 · {exc}"}
+    return {**s, "name": p.name, "n_characters": s["characters"], "characters": d["characters"][:20],
+            "preview": [f"{ln.get('speaker') or '?'}: {ln['text']}" for ln in d["lines"][:4]]}
 
 
 def environment() -> dict:
@@ -226,6 +247,8 @@ def create_studio_app(workspace: Path | None = None) -> LocalOnly:
     jobs = JobManager(ws)
     projects = ProjectApps(ws)
     cache: dict = {}
+    scripts: dict = {}
+    script_lock = threading.Lock()
     home = FastAPI(title="CBoE", default_response_class=SafeJSONResponse, docs_url="/api/docs", redoc_url=None,
                    openapi_url="/api/openapi.json")
     home.state.ws, home.state.jobs, home.state.projects = ws, jobs, projects
@@ -265,9 +288,22 @@ def create_studio_app(workspace: Path | None = None) -> LocalOnly:
     def cancel():
         return {"job": jobs.cancel()}
 
+    def script_info(path: str) -> dict:
+        """script_preview, remembered for the file as it is now (the form asks, then creating asks again)."""
+        p = Path(path)
+        try:
+            st = p.stat()
+            key = (str(p.resolve()), st.st_mtime, st.st_size)
+        except OSError:
+            return script_preview(p)
+        with script_lock:
+            if key not in scripts:
+                scripts.clear()                       # one file at a time is enough
+                scripts[key] = script_preview(p)
+            return scripts[key]
+
     @home.post("/api/inspect")
     def inspect(body: InspectRequest):
-        from .. import script as script_mod
         from ..util import ffprobe
         out: dict = {}
         if body.video:
@@ -285,23 +321,7 @@ def create_studio_app(workspace: Path | None = None) -> LocalOnly:
                 except Exception as exc:
                     out["video"] = {"ok": False, "error": f"영상을 읽지 못했습니다 · {exc}"}
         if body.script:
-            p = Path(body.script)
-            if not p.is_file():
-                out["script"] = {"ok": False, "error": "파일이 없습니다"}
-            elif p.suffix.lower() not in SCRIPT_TYPES:
-                out["script"] = {"ok": False, "error": "대본은 txt · docx · srt · vtt · csv · tsv · json 파일입니다"}
-            elif p.stat().st_size > SCRIPT_MAX_BYTES:
-                out["script"] = {"ok": False, "error": "대본 파일이 너무 큽니다"}
-            else:
-                try:
-                    d = script_mod.read(p)
-                    named = sum(1 for ln in d["lines"] if ln.get("speaker"))
-                    out["script"] = {"ok": bool(d["lines"]), "name": p.name, "lines": len(d["lines"]), "named": named,
-                                     "characters": d["characters"][:20], "timed": d["timed"],
-                                     "preview": [f"{ln.get('speaker') or '?'}: {ln['text']}" for ln in d["lines"][:4]],
-                                     "error": None if d["lines"] else "대사 줄을 찾지 못했습니다"}
-                except Exception as exc:
-                    out["script"] = {"ok": False, "error": f"대본을 읽지 못했습니다 · {exc}"}
+            out["script"] = script_info(body.script)
         return out
 
     @home.post("/api/projects")
@@ -310,6 +330,10 @@ def create_studio_app(workspace: Path | None = None) -> LocalOnly:
             raise HTTPException(400, "끝 시각이 시작보다 빨라요")
         if body.run and jobs.running():
             raise HTTPException(409, "다른 작업을 분석하는 중입니다. 끝난 뒤에 시작하세요")
+        if body.script and Path(body.script).is_file():       # a script that did not read as one starts no analysis
+            info = script_info(body.script)
+            if not info["ok"]:
+                raise HTTPException(400, f"대본 · {info['error']}")
         try:
             pid = ws.create(body.video, body.script, body.title, body.start, body.end)
         except ValueError as exc:

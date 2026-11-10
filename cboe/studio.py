@@ -27,7 +27,7 @@ from . import pipeline
 from .util import NO_WINDOW, ROOT, log, read_json, write_json
 
 STAGE_LABELS = {
-    "ingest": "영상 준비", "separate": "음원 분리", "cuts": "장면 나누기", "sed": "소리 검출",
+    "ingest": "영상 준비", "script": "대본 읽기", "separate": "음원 분리", "cuts": "장면 나누기", "sed": "소리 검출",
     "asr": "받아쓰기", "align": "대본 정렬", "sfx": "효과음 후보", "music": "음악 후보",
     "speaker": "화자 근거", "screen": "화면 근거", "dialog_ev": "대사 근거", "recommend": "추천",
     "agent": "재확인 에이전트", "placement": "초안 배치",
@@ -35,7 +35,7 @@ STAGE_LABELS = {
 ALL_STAGES = pipeline.STAGES + ["placement"]
 # the file each stage writes last (sed: env.npz after the three score files)
 KEY_OUTPUT = {
-    "ingest": "audio/mix_16k.wav", "separate": "audio/effects_16k.wav", "cuts": "cuts.json",
+    "ingest": "audio/mix_16k.wav", "script": "script.json", "separate": "audio/effects_16k.wav", "cuts": "cuts.json",
     "sed": "env.npz", "asr": "asr.json", "align": "dialogue.json", "sfx": "sfx.json",
     "music": "music.json", "speaker": "speaker.json", "screen": "screen.json", "dialog_ev": "dialog_ev.json",
     "recommend": "items.json", "agent": "agent_done.json", "placement": "draft.json",
@@ -134,7 +134,8 @@ class Workspace:
         w = self.work(pid)
         p = Project(w)
         meta = p.meta
-        done = [s for s in pipeline.STAGES if _finished(w, s)]
+        # a project without a script has nothing to read: its script stage counts as done
+        done = [s for s in pipeline.STAGES if _finished(w, s) or (s == "script" and not meta.get("script"))]
         items, draft = w / "items.json", w / "draft.json"
         if items.exists() and draft.exists() and draft.stat().st_mtime >= items.stat().st_mtime:
             done.append("placement")                  # a draft older than the candidates is stale
@@ -148,7 +149,7 @@ class Workspace:
             status = "analysed"
         elif last and last.get("state") in ("failed", "cancelled"):
             status = last["state"]
-        elif any(s != "ingest" for s in done):
+        elif any(s not in ("ingest", "script") for s in done):
             status = "partial"
         else:
             status = "new"
@@ -516,6 +517,8 @@ def _note(stage: str, info: dict) -> str:
     """Short Korean result line for a finished stage."""
     if info.get("skipped"):
         return "이전 결과 사용"
+    if stage == "script" and "lines" in info:
+        return f"대사 {info['lines']}줄 · 장면 {info.get('scenes', 0)}개" + (" · 바뀐 대본을 다시 읽음" if info.get("changed") else "")
     if stage == "sfx" and "candidates" in info:
         return f"후보 {info['candidates']}개 (목록 밖 {info.get('unknown', 0)})"
     if stage == "music" and "candidates" in info:

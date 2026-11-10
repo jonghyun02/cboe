@@ -1,79 +1,184 @@
 # -*- coding: utf-8 -*-
-"""대본 읽기: dialogue lines with speaker names.
+"""대본 읽기: the script of a film as a document (version 2).
 
-Accepted formats
-- ``.txt`` / ``.docx``: one dialogue line per text line (a Word paragraph, a line break inside
-  one, or a table row ``이름 | 대사``). ``이름: 대사`` (``:`` or ``：``) names the speaker; a tag
-  in parentheses next to the name, as in ``(NA)호타로:`` or ``호타로(E):``, is dropped from it.
-  A line without a name has no speaker. Dubbing-script conventions are understood:
-  - skipped lines: empty, starting with ``#``, wholly in parentheses/brackets (stage directions
-    such as ``(문 열리는 소리)`` or ``<회상>``), without letters (``—``), scene headings ``S#1 [...]``;
-  - when there are scene headings, everything before the first one (title, cast list) is skipped;
-  - directions inside a line (``(한숨)``, ``(호)``) and ``/`` pause marks are taken out of the text,
-    and a line left empty by that is skipped;
+Accepted files
+- ``.pdf`` / ``.hwp``: a shooting script (촬영 대본) — scene headings, action, speaker cells with
+  the dialogue beside them, directions in parentheses. Read by ``cboe.screenplay``.
+- ``.txt`` / ``.docx``: told apart by what is in them. A text whose speaker cells are set off by
+  a tab or a wide gap (or stand on the line above, under scene headings) is a shooting script.
+  Otherwise one dialogue line per text line (a Word paragraph, a line break inside one, or a
+  table row ``이름 | 대사``): ``이름: 대사`` (``:`` or ``：``) names the speaker and a line
+  without a name has no speaker. Dubbing-script conventions are understood:
+  - not dialogue: empty lines, comments starting with ``#``, lines without letters (``—``),
+    lines that are nothing but directions (``(문 열리는 소리)``, ``<회상>`` — kept as action),
+    scene headings ``S#1 [...]`` / ``#1`` (kept as scenes);
+  - when there are scene headings, everything before the first one (title, cast list) is no
+    dialogue;
+  - directions inside a line (``(한숨)``, ``(호)``) and ``/`` pause marks are taken out of
+    ``text`` (kept in ``raw`` and ``directions``); a line left without words is no line;
   - a line that starts with ``/`` continues the previous line.
 - ``.tsv`` / ``.csv``: columns ``speaker`` and ``text`` (header required).
 - ``.json``: ``[{"speaker": ..., "text": ...}]`` or ``{"lines": [...]}``.
-- ``.srt`` / ``.vtt``: a timed dialogue subtitle; ``(이름) 대사`` or ``이름: 대사``
-  prefixes give the speaker. Times are kept (``start``/``end``) so alignment can
-  be skipped.
+- ``.srt`` / ``.vtt``: a timed dialogue subtitle; ``[이름] 대사``, ``[이름/영어] 대사``,
+  ``(이름) 대사`` or ``이름: 대사`` give the speaker (and language), ``♪ 가사 ♪`` is sung, a row
+  that is only ``[...]`` is a sound and no dialogue. Times are kept (``start``/``end``) so
+  alignment can be skipped.
+Text files are read as UTF-8, UTF-16 (with a byte order mark) or CP949.
 
-Output: ``{"lines": [{"id", "speaker", "text", "start"?, "end"?}], "characters": [...]}``
+Output (``read``)::
+
+    {"version": 2, "format": "screenplay" | "lines" | "timed",
+     "source": {"path", "sha1", "size", "mtime"}, "timed": bool,
+     "characters": [names in order of appearance],
+     "people": [{"id": "P01", "name", "cues": [the speaker cells written for this person]}],
+     "scenes": [{"id": "SC001", "number", "heading", "place", "time"}],
+     "elements": [{"id": "E0001", "type": "heading" | "action" | "dialogue" | "onscreen" |
+                   "transition" | "other", "scene_id", "text", "line_id"?, ...}],
+     "lines": [{"id": "L0001", "speaker", "text", "raw", "scene_id", "element_id", "language",
+                "sung", "source", "delivery", "vocal", "directions", "start"?, "end"?}]}
+
+``lines`` are the dialogues only, in order, as before: ``text`` is what is spoken (no
+directions), ``raw`` the dialogue as written. ``language`` is the foreign language named by
+``(영)``, ``(영어로)`` ...; ``sung`` is set by ``(노래)``; ``source`` (offscreen, narration, inner,
+phone, radio, broadcast, video) comes from the speaker cell — ``길동(V.O)``, ``(NA)길동``, a cell
+in parentheses ``(길동)`` — or a direction; ``delivery`` and ``vocal`` list directions on the
+manner of speech and on sounds the speaker makes; ``directions`` lists every direction with
+its kind. ``summary`` gives the counts and warnings shown before an analysis starts.
 """
 from __future__ import annotations
 
+import codecs
 import csv
+import hashlib
+import io
 import json
 import re
+from collections import Counter
 from pathlib import Path
 
+from . import screenplay as sp
+
+VERSION = sp.VERSION
 _TAG = r"[\(（][^()（）]{1,10}[\)）]"
 NAME_RE = re.compile(rf"^\s*((?:{_TAG}\s*)?[^:：()\[\]（）]{{1,20}}?(?:\s*{_TAG})?)\s*[:：]\s*(.+?)\s*$")
+PAREN_CUE_RE = re.compile(r"^\s*([\(（][^()（）]{1,12}[\)）])\s*[:：]\s*(.+?)\s*$")       # (소리): ...
 TAG_RE = re.compile(_TAG)
 PAREN_NAME_RE = re.compile(r"^\s*\(([^()]{1,30})\)\s*(.*)$")
-DIRECTION_RE = re.compile(r"^\s*[\(\[（【<〈《].*[\)\]）】>〉》]\s*$")
-SCENE_RE = re.compile(r"^\s*S\s*#\s*\d+", re.I)
-INLINE_DIRECTION_RE = re.compile(r"[\(（][^()（）]*[\)）]")
-LETTER_RE = re.compile(r"[0-9A-Za-z가-힣ㄱ-ㅎㅏ-ㅣぁ-んァ-ン一-龥]")
+BRACKET_NAME_RE = re.compile(r"^\s*\[([^\[\]]{1,30})\]\s*(.*)$")
+SCENE_RE = re.compile(r"^\s*(?:S\s*)?#\s*\d+", re.I)       # S#1, #1
+BRACKETS_RE = re.compile(r"\[[^\[\]]*\]|<[^<>]*>|【[^【】]*】|〈[^〈〉]*〉|《[^《》]*》")
+INLINE_DIRECTION_RE = sp.PAREN_RE
+LETTER_RE = sp.LETTER_RE
 TIME_RE = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)")
+SOUND_LABEL_RE = re.compile(r"\s[-–—]\s|\s.*(?:다|소리|음|음악|효과음)$")      # [달칵 - 문], [문이 열린다]
+MANY_LINES = 30       # from this many dialogue lines a script without speakers is not started
+
+_clean = sp.clean
+_spoken = sp.spoken
 
 
-def _clean(text: str) -> str:
-    return re.sub(r"\s+", " ", text).strip()
+# ------------------------------------------------------------------ text files
+def decode(data: bytes) -> str:
+    """Text of a script file: UTF-8 (with or without a mark), UTF-16 with a mark, CP949 — and
+    UTF-16 without a mark when that reads as plain Korean text."""
+    if data.startswith(codecs.BOM_UTF8):
+        data, order = data[3:], ("utf-8", "cp949")
+    elif data.startswith((codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE)):
+        order = ("utf-16",)
+    else:
+        order = ("utf-8", "cp949")
+    for enc in order:
+        try:
+            return data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+    for enc in ("utf-16-le", "utf-16-be") if len(data) % 2 == 0 and len(order) > 1 else ():
+        try:
+            text = data.decode(enc)
+        except UnicodeDecodeError:
+            continue
+        plain = sum(1 for ch in text if ch in "\r\n\t…“”‘’·" or " " <= ch <= "~" or "가" <= ch <= "힣")
+        if text and plain >= 0.95 * len(text):
+            return text
+    raise ValueError("글 파일로 읽지 못했습니다. 메모장에서 '다른 이름으로 저장 → 인코딩: UTF-8'로 저장해 주세요")
 
 
-def _spoken(text: str) -> str:
-    """Dialogue text without in-line directions and ``/`` pause marks."""
-    return _clean(re.sub(r"(?<!\d)\s*/\s*(?!\d)", " ", INLINE_DIRECTION_RE.sub(" ", text)))   # keeps "1/2"
+def read_text(path) -> str:
+    return decode(Path(path).read_bytes())
+
+
+# ---------------------------------------------------------- 이름: 대사 줄 대본
+def _split_named(s: str, known: set | None = None):
+    """(speaker cell, dialogue) of an ``이름: 대사`` line, or None when the colon names nobody:
+    ``12:30 회의`` (digits only), ``지금 3:30 이야`` (a time — unless the words before it are a
+    name used elsewhere), ``http://...``."""
+    m = PAREN_CUE_RE.match(s)
+    if m:
+        return m.group(1), m.group(2)
+    m = NAME_RE.match(s)
+    if not m:
+        return None
+    name = _clean(TAG_RE.sub(" ", m.group(1)))
+    if not name or re.fullmatch(r"[\d\s]+", name) or m.group(2).startswith("//"):
+        return None
+    if re.search(r"\d\s*$", m.group(1)) and re.match(r"\d", m.group(2)) and re.search(r"\d[:：]\d", s):
+        if known is None or re.sub(r"\s+", "", name) not in known:
+            return None
+    return m.group(1), m.group(2)
+
+
+def _direction_only(s: str) -> bool:
+    """Nothing but directions: ``(문 열리는 소리)``, ``<회상>``, ``[천둥] (잠시 뒤)``."""
+    return not LETTER_RE.search(BRACKETS_RE.sub(" ", INLINE_DIRECTION_RE.sub(" ", s)))
+
+
+def lines_document(raw_lines: list[str]) -> dict:
+    """Text lines of an ``이름: 대사`` script (.txt, .docx) -> the document, format ``lines``."""
+    rows = [r.strip() for r in raw_lines]
+    heads = [i for i, s in enumerate(rows) if SCENE_RE.match(s)]
+    start = heads[0] if heads else 0                  # title and cast list come before the first scene
+    known = {re.sub(r"\s+", "", _clean(TAG_RE.sub(" ", m.group(1))))
+             for s in rows[start:] for m in [NAME_RE.match(s)] if m and not re.search(r"\d[:：]\d", s)}
+    b = sp.Builder("lines")
+    for i, s in enumerate(rows):
+        scene = SCENE_RE.match(s)
+        if not s or not LETTER_RE.search(s) or (s.startswith("#") and not scene):     # "# ...": a comment
+            continue
+        if i < start:
+            b.other("other", s)
+        elif scene:
+            h = sp.heading_candidate(s) or {"number": re.search(r"\d+", s).group()}
+            b.heading(s, h.get("number"), h.get("place"), h.get("time"))
+        elif _direction_only(s):
+            b.other("transition" if sp.is_transition(s) else "action", s)
+        elif s.startswith("/"):                       # the previous line goes on
+            b.extend_last(s)
+        else:
+            cue, text = _split_named(s, known) or (None, s)
+            b.dialogue(cue, text)
+    return b.document()
 
 
 def parse_lines(raw_lines: list[str]) -> list[dict]:
-    """Script text lines (from .txt or .docx) -> [{"speaker", "text"}]."""
-    rows = [r.strip() for r in raw_lines]
-    scenes = [i for i, s in enumerate(rows) if SCENE_RE.match(s)]
-    if scenes:                                        # title and cast list come before S#1
-        rows = rows[scenes[0]:]
-    out: list[dict] = []
-    for s in rows:
-        if not s or s.startswith("#") or SCENE_RE.match(s) or DIRECTION_RE.match(s) or not LETTER_RE.search(s):
-            continue
-        if s.startswith("/"):                         # the previous line goes on
-            if out:
-                out[-1]["text"] = _clean(out[-1]["text"] + " " + _spoken(s))
-            continue
-        m = NAME_RE.match(s)
-        name = _clean(TAG_RE.sub(" ", m.group(1))) if m else ""
-        if m and name and not re.fullmatch(r"[\d\s]+", name):     # "12:30 회의" is not a name
-            speaker, text = name, _spoken(m.group(2))
-        else:
-            speaker, text = None, _spoken(s)
-        if text and LETTER_RE.search(text):
-            out.append({"speaker": speaker, "text": text})
-    return out
+    """Script text lines (from .txt or .docx) -> [{"speaker", "text"}] (the dialogues only)."""
+    return [{"speaker": ln["speaker"], "text": ln["text"]} for ln in lines_document(raw_lines)["lines"]]
 
 
-def _read_txt(path: Path) -> list[dict]:
-    return parse_lines(path.read_text(encoding="utf-8-sig").splitlines())
+def read_rows(rows: list[str]) -> dict:
+    """Text lines of a script of either kind: a shooting script when its speaker cells are
+    set off from the dialogue (``cboe.screenplay.plain_evidence``) on more lines than name
+    their speaker with a colon, else an ``이름: 대사`` script."""
+    ev = sp.plain_evidence(rows)
+    colon = sum(1 for r in rows if _split_named(r.strip()))
+    if ev["cues"] >= sp.MIN_CUES and ev["cues"] > colon:
+        doc = sp.build(sp.classify_plain(rows, ev))
+        doc["layout"] = max(("tab", "gap", "stacked"), key=lambda k: ev[k])
+    else:
+        doc = lines_document(rows)
+    filled = [r for r in rows if r.strip()]
+    if len(filled) >= 50:                             # text copied out of a PDF comes in pieces
+        doc["fragments"] = round(sum(1 for r in filled if not LETTER_RE.search(r)) / len(filled), 3)
+    return doc
 
 
 _W = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
@@ -123,81 +228,211 @@ def docx_lines(path: Path) -> list[str]:
     return out
 
 
-def _read_docx(path: Path) -> list[dict]:
-    return parse_lines(docx_lines(path))
+# ------------------------------------------------- tables, JSON, timed subtitles
+def _times(r: dict) -> dict:
+    return {"start": float(r["start"]), "end": float(r["end"])} if r.get("start") is not None \
+        and r.get("end") is not None else {}
 
 
-def _read_table(path: Path) -> list[dict]:
+def _read_table(path: Path) -> dict:
     delim = "\t" if path.suffix.lower() == ".tsv" else ","
-    with path.open(encoding="utf-8-sig", newline="") as f:
-        rows = list(csv.DictReader(f, delimiter=delim))
-    out = []
+    rows = list(csv.DictReader(io.StringIO(read_text(path), newline=""), delimiter=delim))
+    b = sp.Builder("lines")
     for r in rows:
         text = _clean(r.get("text") or r.get("대사") or "")
         if text:
-            sp = _clean(r.get("speaker") or r.get("화자") or "") or None
-            out.append({"speaker": sp, "text": text})
-    return out
+            b.line(sp.parse_cue(r.get("speaker") or r.get("화자") or ""), text)
+    return b.document()
 
 
-def _read_json(path: Path) -> list[dict]:
-    data = json.loads(path.read_text(encoding="utf-8-sig"))
+LINE_KEYS = ("raw", "language", "sung", "source", "delivery", "vocal", "directions", "scene_id")
+
+
+def _read_json(path: Path) -> dict:
+    data = json.loads(read_text(path))
     rows = data.get("lines", []) if isinstance(data, dict) else data
-    return [{"speaker": (_clean(r.get("speaker") or "") or None), "text": _clean(r["text"]),
-             **({"start": float(r["start"]), "end": float(r["end"])} if "start" in r and "end" in r else {})}
-            for r in rows if _clean(r.get("text", ""))]
+    b = sp.Builder("lines")
+    for r in rows:
+        text = _clean(r.get("text") or "")
+        if not text:
+            continue
+        ln = b.line(sp.parse_cue(r.get("speaker") or ""), text, **_times(r))
+        ln.update({k: r[k] for k in LINE_KEYS if k in r})          # a script.json written by read()
+    doc = b.document()
+    if isinstance(data, dict) and isinstance(data.get("scenes"), list):
+        doc["scenes"] = data["scenes"]
+    return doc
 
 
 def _secs(h, m, s, ms) -> float:
     return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / (10 ** len(ms))
 
 
-def _read_subtitle(path: Path) -> list[dict]:
-    out = []
-    blocks = re.split(r"\n\s*\n", path.read_text(encoding="utf-8-sig").replace("\r\n", "\n").strip())
+def _label(text: str, cue: dict) -> bool:
+    """Read a speaker label of a subtitle (``피터/영어``, ``영희/속마음``, ``영어``) into
+    ``cue``. False when it is a sound label (``달칵 - 문``, ``문이 열린다``) and names nobody."""
+    parts = [p.strip() for p in text.split("/") if p.strip()]
+    kinds = [sp.direction_type(p) for p in parts]
+    if len(parts) == 1 and (kinds[0][0] == "vocal" or (kinds[0][0] == "action" and SOUND_LABEL_RE.search(parts[0]))):
+        if kinds[0][0] == "vocal":
+            cue["vocal"].append(parts[0])
+        return False
+    for part, (kind, value) in zip(parts, kinds):
+        if kind == "language":
+            cue["language"] = value
+        elif kind == "source":
+            cue["source"] = cue["source"] or value
+        elif kind == "sung":
+            cue["sung"] = True
+        elif cue["name"] is None and kind in ("action", "to"):
+            cue.update(name=sp.parse_cue(part)["name"], raw=part)
+        else:
+            cue["delivery" if kind != "vocal" else "vocal"].append(part)
+    return True
+
+
+def _read_subtitle(path: Path) -> dict:
+    b = sp.Builder("timed")
+    blocks = re.split(r"\n\s*\n", read_text(path).replace("\r\n", "\n").replace("\r", "\n").strip())
     for block in blocks:
         rows = block.strip().splitlines()
         tl = next((i for i, r in enumerate(rows) if TIME_RE.search(r)), None)
         if tl is None:
             continue
         g = TIME_RE.search(rows[tl]).groups()
-        a, b = _secs(*g[:4]), _secs(*g[4:])
-        speaker, texts = None, []
+        cue = sp.parse_cue("")
+        texts = []
         for r in rows[tl + 1:]:
             r = re.sub(r"<[^>]+>", "", r).strip().lstrip("-").strip()
-            if not r or r.startswith("[") or r.startswith("♬") or r.startswith("♪"):
-                continue
-            m = PAREN_NAME_RE.match(r) or NAME_RE.match(r)
+            if not r or r.startswith("♬") or (r.startswith("[") and _direction_only(r)):
+                continue                              # a music or sound line
+            if r.startswith("♪"):                     # ♪ 가사 ♪
+                r = r.strip("♪ ").strip()
+                cue["sung"] = True
+            m = BRACKET_NAME_RE.match(r) or PAREN_NAME_RE.match(r)
             if m:
-                speaker = TAG_RE.sub(" ", m.group(1)).split("/")[0].strip()
+                _label(m.group(1), cue)
                 r = m.group(2).strip()
-            if r:
+                if r.startswith("♪"):                 # [영희] ♪ 가사 ♪
+                    r = r.strip("♪ ").strip()
+                    cue["sung"] = True
+            else:
+                named = _split_named(r)
+                if named:
+                    named_cue = sp.parse_cue(named[0])
+                    cue.update({k: v for k, v in named_cue.items() if v})
+                    r = named[1].strip()
+            if r and LETTER_RE.search(r):
                 texts.append(r)
         if texts:
-            out.append({"speaker": speaker, "text": _clean(" ".join(texts)), "start": a, "end": b})
-    return out
+            b.line(cue, _clean(" ".join(texts)), start=_secs(*g[:4]), end=_secs(*g[4:]))
+    return b.document()
+
+
+# ------------------------------------------------------------------------ read
+SUFFIXES = (".pdf", ".hwp", ".txt", ".docx", ".srt", ".vtt", ".csv", ".tsv", ".json")
+FREE_TEXT = (".pdf", ".hwp", ".txt", ".docx")       # files that had to be told apart line by line
+
+
+def file_signature(path) -> dict:
+    """What identifies the script file a reading was made from."""
+    path = Path(path)
+    data = path.read_bytes()
+    return {"path": str(path), "sha1": hashlib.sha1(data).hexdigest(), "size": len(data),
+            "mtime": path.stat().st_mtime}
 
 
 def read(path) -> dict:
+    """The script document of a file (module doc)."""
     path = Path(path)
     ext = path.suffix.lower()
     if ext in (".srt", ".vtt"):
-        rows = _read_subtitle(path)
+        doc = _read_subtitle(path)
     elif ext in (".tsv", ".csv"):
-        rows = _read_table(path)
+        doc = _read_table(path)
     elif ext == ".json":
-        rows = _read_json(path)
+        doc = _read_json(path)
+    elif ext == ".pdf":
+        doc = sp.read_pdf(path)
+        if not isinstance(doc, dict):                 # a PDF without a speaker column: read its text
+            doc = read_rows(doc)
+    elif ext == ".hwp":
+        doc = read_rows(sp.hwp_paragraphs(path))
+    elif ext == ".hwpx":
+        raise ValueError("HWPX(.hwpx) 는 아직 읽지 못합니다. 한글에서 HWP 나 PDF 로 저장해 주세요")
     elif ext == ".docx":
-        rows = _read_docx(path)
+        doc = read_rows(docx_lines(path))
     else:
-        rows = _read_txt(path)
-    lines, chars = [], []
-    for i, r in enumerate(rows, 1):
-        r = {"id": f"L{i:04d}", **r}
-        lines.append(r)
-        for name in (r.get("speaker") or "").split("/"):       # "에루/마야카": both speak
-            name = name.strip()
-            if name and name not in chars:
-                chars.append(name)
-    return {"source": str(path), "timed": bool(lines) and all("start" in r for r in lines),
-            "lines": lines, "characters": chars}
+        doc = read_rows(read_text(path).splitlines())
+    lines = doc["lines"]
+    doc["source"] = file_signature(path)
+    doc["timed"] = bool(lines) and all("start" in r for r in lines)
+    if doc["timed"]:
+        doc["format"] = "timed"
+    return doc
+
+
+def summary(doc: dict) -> dict:
+    """Counts and warnings of a script document for the preview before an analysis.
+
+    ``ok`` is False when starting an analysis with it would only waste the run: no dialogue,
+    many dialogue lines of a text none of which names its speaker (a shooting script pasted
+    as plain text), or "speakers" that are scene headings.
+    """
+    lines = doc.get("lines") or []
+    elements = doc.get("elements") or []
+    names = doc.get("characters") or []
+    fmt = doc.get("format") or ("timed" if doc.get("timed") else "lines")
+    n = len(lines)
+    named = sum(1 for ln in lines if ln.get("speaker"))
+    src = doc.get("source")
+    ext = Path(src["path"] if isinstance(src, dict) else src or "").suffix.lower()
+    free = ext in FREE_TEXT and fmt != "timed"
+    languages = Counter(ln["language"] for ln in lines if ln.get("language"))
+    sources = Counter(ln["source"] for ln in lines if ln.get("source"))
+    out = {"ok": True, "error": None, "warnings": [], "format": fmt, "timed": bool(doc.get("timed")),
+           "scenes": len(doc.get("scenes") or []), "lines": n, "named": named,
+           "named_ratio": round(named / n, 3) if n else 0.0,
+           "actions": sum(1 for e in elements if e.get("type") == "action"), "characters": len(names),
+           "language": sum(languages.values()), "languages": dict(languages),
+           "sung": sum(1 for ln in lines if ln.get("sung")),
+           "offscreen": sum(sources.values()), "sources": dict(sources)}
+    warn = out["warnings"]
+
+    def fail(msg: str) -> dict:
+        out.update(ok=False, error=msg)
+        return out
+
+    if not n:
+        return fail("대사 줄을 찾지 못했습니다")
+    if (doc.get("fragments") or 0.0) >= 0.3:
+        return fail("글이 조각나 있습니다 (문장부호만 있는 줄이 많음). PDF 에서 글을 복사한 파일이면 PDF 파일을 그대로 넣어 주세요")
+    heading_names = [nm for nm in names if sp.heading_candidate(nm)]
+    heading_lines = sum(1 for ln in lines if ln.get("speaker") and sp.heading_candidate(
+        f"{ln['speaker']} : {ln.get('raw') or ln.get('text') or ''}"))
+    if free and (heading_names or heading_lines >= max(3, 0.2 * named)):
+        eg = heading_names[0] if heading_names else next(
+            ln["speaker"] for ln in lines if ln.get("speaker")
+            and sp.heading_candidate(f"{ln['speaker']} : {ln.get('raw') or ln.get('text') or ''}"))
+        return fail(f"인물 이름 자리에 장면 머리가 읽혔습니다 (예: {eg}). 촬영 대본은 PDF 나 HWP 파일을 그대로 넣어 주세요")
+    if free and n >= MANY_LINES and not named:
+        return fail(f"대사 {n}줄에 화자가 하나도 없습니다. 촬영 대본을 글로 옮긴 파일이면 PDF 나 HWP 원본을 넣고, "
+                    "아니면 줄마다 '이름: 대사'로 적어 주세요")
+    if named < n:
+        share = round(100 * (n - named) / n)
+        warn.append(f"화자 없는 대사가 {n - named}줄 있습니다" + (f" ({share}%)" if share else ""))
+    if fmt == "screenplay":
+        if doc.get("layout") == "stacked":
+            warn.append("이름 줄 아래에 대사가 오는 글로 읽었습니다. 대사가 끝나는 곳은 어림한 것이니 PDF 나 HWP 원본이 있으면 "
+                        "그 파일을 넣어 주세요")
+        if not out["scenes"]:
+            warn.append("장면 머리를 찾지 못했습니다")
+        other = sum(1 for e in elements if e.get("type") == "other")
+        if other > max(10, 0.05 * len(elements)):
+            warn.append(f"무엇인지 가르지 못한 줄이 {other}개 있습니다")
+    long_lines = sum(1 for ln in lines if len(ln.get("text") or "") > 600)
+    if long_lines:
+        warn.append(f"아주 긴 대사가 {long_lines}줄 있습니다 (지문이 대사에 붙었을 수 있음)")
+    if doc.get("version") != VERSION:
+        warn.append("예전 형식으로 읽은 대본입니다 (장면·괄호 지시 정보 없음)")
+    return out

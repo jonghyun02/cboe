@@ -224,7 +224,8 @@ def test_job_follows_stage_log(client, ws_root, monkeypatch):
     assert st["agent"]["state"] == "pending" and j["current"] is None
     assert any("PROGRESS separate 2/3" in ln for ln in j["log_tail"])
     saved = json.loads((ws_root / "sample" / "gui_job.json").read_text(encoding="utf-8"))
-    assert saved["state"] == "done" and saved["stages"][1]["name"] == "separate"
+    assert saved["state"] == "done" and [s["name"] for s in saved["stages"]][:3] == ["ingest", "script", "separate"]
+    assert st["script"]["label"] == "대본 읽기" and st["script"]["state"] == "pending"
     assert "== stage separate" in (ws_root / "sample" / "gui_run.log").read_text(encoding="utf-8")
     s = next(p for p in client.get("/api/studio").json()["projects"] if p["id"] == "sample")
     assert s["last_run"]["state"] == "done"
@@ -364,6 +365,82 @@ def test_inspect_reads_only_script_files(client, tmp_path):
     f.write_text("token: abc\n", encoding="utf-8")
     r = client.post("/api/inspect", json={"script": str(f)}).json()["script"]
     assert r["ok"] is False and "preview" not in r
+
+
+# ------------------------------------------------- 대본 미리 보기, 대본 읽기 단계
+@pytest.fixture()
+def bare(tmp_path):
+    """The studio server on an empty work space (needs no sample data)."""
+    with TestClient(studio_app.create_studio_app(tmp_path / "ws"), base_url="http://127.0.0.1") as c:
+        yield c
+
+
+SHOOTING_SCRIPT = ["포구 / 밤", "배가 들어온다.", "\t나래\t(영) 왔다.", "\t도윤\t(노래) 오랜만이야.", "\t(할머니)\t밥은 먹었니?",
+                   "\t(소리)\t거기 누구요?", "선창가 / 낮", "\t나래\t가자."]
+
+
+def test_inspect_shows_what_a_shooting_script_read_as(bare, tmp_path):
+    f = tmp_path / "s.txt"
+    f.write_text("\n".join(SHOOTING_SCRIPT), encoding="utf-8")
+    r = bare.post("/api/inspect", json={"script": str(f)}).json()["script"]
+    assert r["ok"] and r["error"] is None and r["name"] == "s.txt" and r["format"] == "screenplay" and not r["timed"]
+    assert (r["scenes"], r["lines"], r["named"], r["actions"], r["n_characters"]) == (2, 5, 4, 1, 3)
+    assert r["characters"] == ["나래", "도윤", "할머니"] and r["named_ratio"] == 0.8
+    assert (r["language"], r["languages"], r["sung"], r["offscreen"]) == (1, {"영어": 1}, 1, 2)
+    assert r["warnings"] == ["화자 없는 대사가 1줄 있습니다 (20%)"] and r["preview"][0] == "나래: 왔다."
+
+
+def test_a_script_that_did_not_read_starts_no_analysis(bare, tmp_path):
+    f = tmp_path / "pasted.txt"
+    f.write_text("\n".join(f"화자 없이 적은 줄 {k}" for k in range(40)), encoding="utf-8")
+    r = bare.post("/api/inspect", json={"script": str(f)}).json()["script"]
+    assert r["ok"] is False and "화자가 하나도 없습니다" in r["error"] and r["lines"] == 40 and r["named"] == 0
+    # the form does not send it, and the server refuses it too
+    r = bare.post("/api/projects", json={"video": str(tmp_path / "none.mp4"), "script": str(f), "run": True})
+    assert r.status_code == 400 and r.json()["detail"].startswith("대본 · ") and "화자" in r.json()["detail"]
+    assert not any((tmp_path / "ws").iterdir())
+    f.write_text("미나: 안녕하세요\n", encoding="utf-8")                 # the file was fixed: asked again, not remembered
+    r = bare.post("/api/projects", json={"video": str(tmp_path / "none.mp4"), "script": str(f), "run": False})
+    assert r.status_code == 400 and "영상 파일이 없습니다" in r.json()["detail"]
+
+
+def test_inspect_takes_pdf_and_hwp(bare, tmp_path):
+    for name, data in (("s.pdf", b"not a pdf at all"), ("s.hwp", b"not an hwp at all")):
+        f = tmp_path / name
+        f.write_bytes(data)
+        r = bare.post("/api/inspect", json={"script": str(f)}).json()["script"]
+        assert r["ok"] is False and r["error"].startswith("대본을 읽지 못했습니다"), name       # read, not turned away
+    f = tmp_path / "s.hwpx"
+    f.write_bytes(b"PK")
+    r = bare.post("/api/inspect", json={"script": str(f)}).json()["script"]
+    assert r["ok"] is False and "pdf · hwp · txt" in r["error"]
+    assert ".pdf" in studio_app.SCRIPT_TYPES and ".hwp" in studio_app.SCRIPT_TYPES and "*.pdf *.hwp" in studio_app.PICK_CODE
+
+
+def test_script_stage_on_the_start_screen(tmp_path):
+    assert studio.ALL_STAGES[:3] == ["ingest", "script", "separate"] and studio.STAGE_LABELS["script"] == "대본 읽기"
+    assert set(studio.STAGE_LABELS) == set(studio.KEY_OUTPUT) == set(studio.ALL_STAGES)
+    assert studio._note("script", {"lines": 827, "scenes": 110}) == "대사 827줄 · 장면 110개"
+    assert studio._note("script", {"lines": 3, "scenes": 0, "changed": True}).endswith("바뀐 대본을 다시 읽음")
+    assert studio._note("script", {"skipped": True, "lines": 3}) == "이전 결과 사용"
+    page = (ROOT / "cboe" / "server" / "static" / "home.js").read_text(encoding="utf-8")
+    assert "'ingest', 'script', 'separate'" in page and "s.warnings" in page
+
+    ws = Workspace(tmp_path / "ws")
+    work = ws.root / "p1"
+    work.mkdir()
+    meta = {"title": "p1", "video": "", "script": None, "t0": 0.0, "t1": 10.0}
+    (work / "project.json").write_text(json.dumps(meta), encoding="utf-8")
+    s = ws.summary("p1")                                   # no script: nothing to read, and still a new project
+    assert s["status"] == "new" and s["stages_done"] == ["script"]
+    meta["script"] = str(tmp_path / "s.txt")
+    (work / "project.json").write_text(json.dumps(meta), encoding="utf-8")
+    assert ws.summary("p1")["stages_done"] == []
+    (work / "script.json").write_text('{"lines": []}', encoding="utf-8")
+    s = ws.summary("p1")
+    assert s["status"] == "new" and s["stages_done"] == ["script"]
+    (work / "cuts.json").write_text("{}", encoding="utf-8")
+    assert ws.summary("p1")["status"] == "partial"
 
 
 def test_guard_knows_renamed_copies():

@@ -53,10 +53,12 @@ narwhals==2.27.1
 networkx==3.6.1
 numba==0.68.0
 numpy==2.4.6
+olefile==0.47
 onnxruntime==1.31.0
 opencv-python-headless==5.0.0.93
 opentelemetry-api==1.45.1
 packaging==26.3
+pdfminer-six==20260107
 pillow==12.3.0
 platformdirs==4.13.5
 playwright==1.64.0
