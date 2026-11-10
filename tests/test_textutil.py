@@ -180,6 +180,50 @@ def test_kiwi_hints_cover_auxiliary_and_negation():
     assert hints.get("나는 안 돼 정말로".index(" 돼"), 0) > 0   # 안 | 돼
 
 
+@pytest.mark.skipif(not textutil.kiwi_available(), reason="kiwipiepy not installed")
+def test_words_that_stay_together_win_over_the_balance_of_the_lines():
+    # audit 2-10: a Kiwi cost of 2 lost to a balance 2 units better ('… 새로 산' / '신발을 …', 9.5 and
+    # 10.5 units): General Requirements 4 "should not separate … a noun from an adjective"
+    text = "어제 친구가 새로 산 신발을 자랑하더라 진짜"            # made up; 20.5 units
+    assert wrap(text, kiwi=False)[0].endswith("산")              # the balance alone
+    lines = wrap(text)
+    _check_lines(text, lines)
+    assert not lines[0].endswith("산")
+    # a word that ends with punctuation holds nothing to the next one: Kiwi reads the 요 of '잠깐만요,' as
+    # a determiner, and that no longer costs the break after the comma
+    assert textutil.keep_costs("잠깐만요, 지금 그러니까") == {}
+    assert wrap("[하늘/영어] 잠깐만요, 지금 그러니까")[0] == "[하늘/영어] 잠깐만요,"
+
+
+def test_a_quotation_stays_on_one_line_when_it_can():
+    # I.11's example breaks before the quote ('내가 말했지' / '‘난 안 그랬어’'); I.14: a quote over two
+    # subtitles is quoted again in each, so one line (and one cell) is kept when that fits
+    text = "아까 엄마가 '밥 먹고 가라' 하셨는데 그냥 나왔어"         # made up; 21.5 units
+    for kiwi in (True, False):
+        lines = wrap(text, kiwi=kiwi)
+        _check_lines(text, lines)
+        assert lines[0].endswith("가라'") or lines[1].startswith("'밥"), lines
+    text = "그 사람이 “내일 다시 오겠다” 하고 갔어"                  # “ ” too
+    lines = wrap(text)
+    _check_lines(text, lines)
+    assert "“" in lines[0] and "”" in lines[0] or "“" in lines[1] and "”" in lines[1], lines
+    # where it cannot fit one line, it is broken as any other text
+    long_quote = "'오늘은 정말로 아무 데도 가지 말고 집에만 있어'"
+    assert len(wrap(long_quote)) == 2 and " ".join(wrap(long_quote)) == long_quote
+
+
+def test_quoted_spaces_are_those_of_a_closed_quotation():
+    def spaces(text):
+        return sorted(textutil._quoted(text))
+    assert spaces("가 '나 다' 라") == [4]                       # the space between 나 and 다
+    assert spaces("가 ‘나 다’ 라 “마 바” 사") == [4, 12]
+    assert spaces("가 '나다' 라") == []                         # a quotation inside one word
+    assert spaces("가 '나 다 라") == []                         # not closed in the text: no quotation here
+    assert spaces("I don't know what you mean") == []           # a mark inside a word
+    assert spaces("(가 '나 다'.) 라") == [5]                      # past brackets and punctuation
+    assert textutil.keep_costs("가 '나 다' 라", kiwi=False) == {4: textutil.QUOTE_COST}
+
+
 def test_hold_keeps_the_head_of_a_text_on_one_line():
     # 4th review: placement used to mark the spaces that must not break with U+2027, a character a
     # line can hold itself (남‧북); the position is passed instead

@@ -1334,6 +1334,109 @@ def test_a_line_is_cut_where_every_piece_can_be_read():
     assert all(c["check"]["violations"] == [] and "flash" not in c["flags"] for c in cs)
 
 
+PAUSED = "잠깐만 기다려 그래 알았어"                    # made up; 12 units, one line: a 3 s pause after '기다려'
+PAUSED_T = [(10.0, 10.4), (10.4, 10.9), (13.9, 14.2), (14.2, 14.79)]
+
+
+def test_a_pause_of_two_seconds_cuts_the_line_even_when_it_fits():
+    # audit 2-03: the line was one cell of 5.29 s, '그래 알았어' on screen 3 s before it is said
+    # (TG "Subtitles should be in sync with both the image and the audio", "Avoid spoilers")
+    line = L("L1", PAUSED, 10.0, 14.79, words=W(PAUSED, PAUSED_T), timing="asr", name="하늘", show=True,
+             language="영어")
+    cs = cells_of(run([line]), "L1")
+    assert [c["lines"] for c in cs] == [["[하늘/영어] 잠깐만 기다려"], ["[영어] 그래 알았어"]]   # name once, language on each
+    assert cs[0]["start"] == sec(F(10.0)) and cs[0]["end"] == sec(F(10.9) + 12)
+    assert cs[1]["start"] == sec(F(13.9)) and cs[1]["end"] == sec(F(14.79) + 12)
+    assert all(c["check"]["violations"] == [] for c in cs)
+    # a pause under 2 s is no cut; nor is one in a line whose time is a guess (its pauses are not known),
+    # nor where the writer chose: the writer's cut points, or one cell
+    short = [(10.0, 10.4), (10.4, 10.9), (12.85, 13.2), (13.2, 13.79)]
+    assert len(cells_of(run([L("L1", PAUSED, 10.0, 13.79, words=W(PAUSED, short), timing="asr")]), "L1")) == 1
+    bare_line = L("L1", PAUSED, 10.0, 14.79, words=W(PAUSED, PAUSED_T), timing="asr")
+    for more in (dict(timing="voice", status="unheard"), dict(keep=True)):
+        assert len(cells_of(run([dict(bare_line, **more)]), "L1")) == 1, more
+    cs = cells_of(run([dict(bare_line, breaks=[3])]), "L1")
+    assert [c["lines"] for c in cs] == [["잠깐만 기다려 그래"], ["알았어"]] and "notes" not in cs[0]["check"]
+
+
+def test_a_pause_is_no_cut_where_a_piece_next_to_it_could_not_be_read():
+    # 5/6 s and the reading speed are musts (General Requirements 1, II.3), the sync with the audio a
+    # should: the piece after the pause would have 13 frames before the next line, so no cut there
+    times = [(10.0, 10.4), (10.4, 10.9), (13.9, 14.1), (14.1, 14.3)]
+    line = L("L1", PAUSED, 10.0, 14.3, words=W(PAUSED, times), timing="asr", speaker="A")
+    nxt = L("L2", "응 그래", 14.5, 15.2, timing="asr", speaker="B")
+    d = run([line, nxt])
+    assert len(cells_of(d, "L1")) == 1 and cells_of(d, "L2")
+    assert len(cells_of(run([line, dict(nxt, start=20.0, end=20.7, words="even")]), "L1")) == 2   # room: cut
+    # another line spoken over the piece after the pause: the rules for lines that overlap decide, as before
+    over = L("L2", "어디 가는데 그래서", 13.6, 15.0, timing="asr", speaker="B")
+    line = L("L1", PAUSED, 10.0, 14.79, words=W(PAUSED, PAUSED_T), timing="asr", speaker="A")
+    assert len(cells_of(run([line, over]), "L1")) == 1
+
+
+def test_pieces_cut_at_a_pause_follow_the_rules_of_any_piece():
+    # each side of the pause is cut further when it does not fit (2 x 16 units, 7 s); no writer's note
+    head = "오늘 아침에 집 골목에서 정말 예쁜 고양이 한 마리를 봤는데"   # made up; 28.5 units, two lines
+    toks = head.split() + ["진짜야"]
+    times = [(round(20.0 + 0.3 * k, 3), round(20.28 + 0.3 * k, 3)) for k in range(len(toks) - 1)] + [(26.0, 26.5)]
+    text = " ".join(toks)
+    cs = cells_of(run([L("L1", text, 20.0, 26.5, words=W(text, times), timing="asr")]), "L1")
+    assert cs[-1]["lines"] == ["진짜야"] and cs[-1]["start"] == sec(F(26.0))
+    assert len(cs) == 2 and bare(" ".join(cs[0]["lines"])) == bare(head)
+    assert all(c["check"]["violations"] == [] and "notes" not in c["check"] for c in cs)
+    long_head = head + " 너무 귀여워서 한참 쳐다봤어"                                # 42.5 units before the pause
+    toks = long_head.split() + ["진짜야"]
+    times = [(round(20.0 + 0.3 * k, 3), round(20.28 + 0.3 * k, 3)) for k in range(len(toks) - 1)] + [(28.0, 28.5)]
+    text = " ".join(toks)
+    cs = cells_of(run([L("L1", text, 20.0, 28.5, words=W(text, times), timing="asr")]), "L1")
+    assert len(cs) == 3 and cs[-1]["lines"] == ["진짜야"] and all(c["check"]["violations"] == [] for c in cs)
+
+
+def test_a_writer_join_holds_a_line_with_a_pause_in_one_cell():
+    # the writer's "one cell with the line before" comes before the cut at a pause
+    a = L("L0", "어디야", 8.0, 8.4, speaker="가람", name="가람", timing="asr")
+    b = L("L1", PAUSED, 10.0, 14.79, words=W(PAUSED, PAUSED_T), speaker="가람", name="가람", timing="asr")
+    assert len(cells_of(run([a, b]), "L1")) == 2
+    d = run([a, dict(b, join=True)])
+    c = one(d, "L1")
+    assert c["refs"] == ["L0", "L1"] and c["lines"] == ["어디야 잠깐만 기다려 그래 알았어"]
+    assert "notes" not in c["check"] and len(d["cells"]) == 1
+    d = run([dict(a, text="어디야 지금", words="even"), dict(b, join=True)])   # the line before has a pause too
+    assert one(d, "L1")["refs"] == ["L0", "L1"]
+    c = L("L2", "그럼 거기서 봐", 16.0, 16.8, speaker="가람", name="가람", timing="asr")
+    cs = cells_of(run([a, b, dict(c, join=True)]), "L1")      # a join of the line after holds it too
+    assert len(cs) == 1 and cs[0]["refs"] == ["L1", "L2"]
+
+
+QUOTED = "우리 반 반장이 '오늘은 청소 당번이 아니니까 먼저 가도 돼' 하고 말해 줬어 그래서 그냥 왔지"   # made up
+
+
+def test_a_quotation_stays_in_one_cell_when_it_can():
+    # I.14 "Quotes should be used at the start and end of each subtitle if the quote carries over more
+    # than one subtitle" (인용이 자막 여러 개에 걸치면 자막마다 따옴표): the cut is not taken inside it
+    toks = QUOTED.split()
+    times = [(round(20.0 + 0.3 * k, 3), round(20.28 + 0.3 * k, 3)) for k in range(len(toks))]
+    for kiwi in (True, False):
+        d = run([L("L1", QUOTED, 20.0, times[-1][1], words=W(QUOTED, times), timing="asr")], kiwi=kiwi)
+        cs = cells_of(d, "L1")
+        assert len(cs) == 2 and all(c["check"]["violations"] == [] for c in cs)
+        first = " ".join(cs[0]["lines"])
+        assert first.count("'") == 2 and first.endswith("돼'"), (kiwi, [c["lines"] for c in cs])
+
+
+@pytest.mark.skipif(not __import__("cboe.textutil", fromlist=["x"]).kiwi_available(), reason="kiwipiepy not installed")
+def test_a_cell_cut_keeps_a_verb_with_its_auxiliary():
+    # General Requirements 4 "The line break should not separate … a verb from an auxiliary" (줄바꿈으로 동사와
+    # 보조 용언을 떼지 않는다): the cut between two cells too, when another cut does about as well
+    text = "그러니까 내 말은 네가 어제 보여 준 그 사진 속에 있던 사람이 우리 옆집 아저씨 같다는 거야"   # made up
+    toks = text.split()
+    times = [(round(20.0 + 0.3 * k, 3), round(20.28 + 0.3 * k, 3)) for k in range(len(toks))]
+    cs = cells_of(run([L("L1", text, 20.0, times[-1][1], words=W(text, times), timing="asr")]), "L1")
+    assert not any(c["lines"][-1].endswith("보여") for c in cs), [c["lines"] for c in cs]
+    assert bare(" ".join(" ".join(c["lines"]) for c in cs)) == bare(text)
+    assert all(c["check"]["violations"] == [] for c in cs)
+
+
 def test_pieces_of_one_line_are_not_overlapping_lines():
     # 4th review: the ASR's word ends run a little past the next word's start, and the pieces of one
     # line were untangled as if two people spoke over each other ('overlap', the next piece late)

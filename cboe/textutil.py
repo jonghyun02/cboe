@@ -9,19 +9,22 @@ The limits (16 units, 2 lines) and the notation come from ``cboe.style``.
               spaces and punctuation only; counting digits 0.5 is our rule (10-13 memo 5.1).
 ``wrap(text)`` at most two lines of at most 16 units (II.2, II.4), broken at eojeol (space)
               boundaries. One line when it fits (II.4 "usually kept to one line"). Otherwise the
-              break with no overflow whose two lines are closest in length, preferring a break
+              break with no overflow that keeps together the words that stay together
+              (``keep_costs``, weighed by ``KEEP_WEIGHT`` above any balance of the two lines,
+              audit 2-10) and then whose two lines are closest in length, preferring a break
               after punctuation (General Requirements 4 "after punctuation marks"; a sentence end
               more than a comma), a slightly bottom-heavy shape (I.11), no break inside ( ) or
-              [ ] (a speaker label or a sound label) and none between a ♪ and the lyric next to
-              it (taken only when nothing else fits; ``fits`` then says no, II.7). Korean
-              particles and endings are written
+              [ ] (a speaker label or a sound label), none inside a quotation that closes in the
+              text (I.14, I.11's example puts the quote on a line of its own) and none between a
+              ♪ and the lyric next to it (taken only when nothing else fits; ``fits`` then says
+              no, II.7). Korean particles and endings are written
               without a space, so a space break never separates a noun from its particle; Kiwi
               adds the General Requirements 4 "should not separate" cases that a space does
               separate: a determiner from its noun (관형사 MM, "무슨 | 그림자"), an adnominal from
-              its noun (ETM, "예쁜 | 꽃"), a verb from its auxiliary or negation (VX, "먹어 |
-              버렸다", "하지 | 않았다"), a negation adverb from its verb ("안 | 돼"), a name from a
-              name (NNP NNP) and a number from its counter; a connective or final ending (EC, EF)
-              is a good place. Without kiwipiepy the same rules run without these hints.
+              its noun (ETM, "예쁜 | 꽃", "새로 산 | 신발"), a verb from its auxiliary or negation (VX,
+              "먹어 | 버렸다", "하지 | 않았다"), a negation adverb from its verb ("안 | 돼"), a name
+              from a name (NNP NNP) and a number from its counter; a connective or final ending
+              (EC, EF) is a good place. Without kiwipiepy the same rules run without these hints.
               A word is cut inside only when it alone is longer than a line. When no two-line
               layout fits, more lines (or an over-long line) come back so that ``fits`` and the
               placement checks see the overflow. The text itself is never changed: joining the
@@ -98,6 +101,22 @@ def end_bonus(piece: str) -> float:
 
 
 BY_NOTE = 100.0      # the cost of a break next to a music note: only when nothing else is left
+# the cost of a break inside a quotation that closes in the text (I.14 "Quotes should be used at
+# the start and end of each subtitle if the quote carries over more than one subtitle" = 인용이
+# 자막 여러 개에 걸치면 자막마다 처음과 끝에 따옴표; I.11's example breaks before the quote:
+# '내가 말했지' / '‘난 안 그랬어’'): as much as a word kept with its noun (``_hints`` 2), so a
+# quotation stays on one line, and in one cell (placement._split), when it can
+QUOTE_COST = 2.0
+# how much a break that separates words that stay together (``keep_costs``: Kiwi hints, a quotation,
+# a label) weighs against the balance of the two lines in ``wrap`` (audit 2-10: a break between a
+# determiner and its noun won over a balance 2 units better, the cost was 1-3): two lines of a text that needs two
+# differ by less than 16 units, so a cost of 2 (ETM, VX, a name, a number, a quotation) times 8
+# outweighs any balance; the cost 1 of a genitive (JKG) is worth 8 units of balance. Not measured:
+# the smallest weight that puts every cost of 2 above the balance of any two lines
+KEEP_WEIGHT = 8.0
+_QUOTES = {"‘": "s", "'": "s", "’": "s", "“": "d", '"': "d", "”": "d"}   # one family: ‘ ’ ', other: “ ” "
+_OPENS, _CLOSES = "‘'“\"", "’'”\""
+_STRIP_HEAD, _STRIP_TAIL = "-([<", ".,?!…~;:)]>"
 
 
 def _spaces(text: str) -> list[tuple[int, float]]:
@@ -117,6 +136,45 @@ def _spaces(text: str) -> list[tuple[int, float]]:
             # after the opening note or before the closing one: an odd number of notes so far
             by_note = style.NOTE in (text[i - 1:i], text[i + 1:i + 2]) and text.count(style.NOTE, 0, i) % 2 == 1
             out.append((i, BY_NOTE if by_note else 4.0 if depth > 0 else 0.0))
+    return out
+
+
+@functools.lru_cache(maxsize=8192)
+def _quoted(text: str) -> frozenset:
+    """Positions of the spaces of ``text`` inside a quotation: from the word that opens it (a
+    quotation mark at its head, past '-', '(' …) to the word that closes it (a mark of the same
+    kind at its end, before '.', '?' …): ‘ ’ and ' are one kind, “ ” and " the other. A mark inside
+    a word (don't) and a quotation that does not close in ``text`` make no quotation here."""
+    if not any(q in text for q in _QUOTES):
+        return frozenset()
+    out: set = set()
+    open_at: dict = {}                               # kind -> the word that opened it
+    words, pos, starts = text.split(" "), 0, []
+    for w in words:
+        starts.append(pos)
+        pos += len(w) + 1
+    for k, w in enumerate(words):
+        head, tail = w.lstrip(_STRIP_HEAD), w.rstrip(_STRIP_TAIL)
+        o = head[:1] if head[:1] and head[:1] in _OPENS else None
+        c = tail[-1:] if tail[-1:] and tail[-1:] in _CLOSES else None
+        if o is not None and _QUOTES[o] not in open_at:
+            if not (c is not None and _QUOTES[c] == _QUOTES[o] and len(tail) > 1):
+                open_at[_QUOTES[o]] = k              # (else the quotation is inside this word)
+        elif c is not None and _QUOTES[c] in open_at:
+            k0 = open_at.pop(_QUOTES[c])
+            out.update(starts[x] - 1 for x in range(k0 + 1, k + 1))
+    return frozenset(out)
+
+
+def keep_costs(text, kiwi: bool = True) -> dict:
+    """The cost of a break at each space of ``text`` (white space collapsed) that separates words
+    which stay together: the Kiwi hints of General Requirements 4 ('The line break should not
+    separate …', module doc; the good places, endings, are left out) and ``QUOTE_COST`` inside a
+    quotation. {position of the space: cost}; a space that is not in it costs nothing."""
+    text = norm(text)
+    out = {i: h for i, h in (_hints(text) if kiwi else {}).items() if h > 0}
+    for i in _quoted(text):
+        out[i] = out.get(i, 0.0) + QUOTE_COST
     return out
 
 
@@ -201,6 +259,12 @@ def _hints(text: str) -> dict:
             cost += 2.0                              # first name | last name
         if b.tag == "SN" and a.tag == "NNB":
             cost += 2.0                              # 3 | 개
+        if cost > 0 and word.rstrip("’'”\")]").endswith(_SENTENCE_END + _CLAUSE_END):
+            # a word that ends with punctuation holds nothing to the next one (General Requirements
+            # 4 "The line should be broken after punctuation marks"). Kiwi reads the 요 of
+            # '잠깐만요,' as a determiner (MM); with KEEP_WEIGHT that misreading would leave a
+            # speaker label alone on the first line
+            cost = 0.0
         if cost:
             out[i] = cost
     return out
@@ -268,6 +332,7 @@ def wrap(text, max_units: float = style.MAX_UNITS, max_lines: int = style.MAX_LI
         return [whole] if whole else []
     if max_lines >= 2:
         hints = _hints(text) if kiwi else {}
+        quoted = _quoted(text)
         best = None
         for i, cost in _spaces(text):
             if i < hold:
@@ -276,7 +341,10 @@ def wrap(text, max_units: float = style.MAX_UNITS, max_lines: int = style.MAX_LI
             ua, ub = units(a), units(b)
             if ua > max_units + EPS or ub > max_units + EPS:
                 continue
-            score = abs(ua - ub) + (0.5 if ua > ub else 0.0) - end_bonus(text[:i]) + hints.get(i, 0.0) + cost
+            # words that stay together outweigh the balance of the lines (KEEP_WEIGHT, audit 2-10)
+            h = hints.get(i, 0.0)
+            keep = cost + max(h, 0.0) + (QUOTE_COST if i in quoted else 0.0)
+            score = abs(ua - ub) + (0.5 if ua > ub else 0.0) - end_bonus(text[:i]) + min(h, 0.0) + KEEP_WEIGHT * keep
             key = (round(score, 6), i)
             if best is None or key < best[0]:
                 best = (key, a, b)

@@ -49,11 +49,23 @@ Dialogue cells. One cell per script line. In front of it ``[이름/출처·말�
 when ``show_name``, then ``label_extra``, the language last; "에루/마야카" = both speak ->
 ``[에루, 마야카]`` or ``[함께]``, II.10). A sung line is ``♪ … ♪`` (II.7). A line that does not fit
 2 x 16 units or whose speech is longer than 7 s is split at word boundaries into cells that fit,
-few and balanced, cut after sentence punctuation (then commas) where possible, and each long
+few and balanced, cut after sentence punctuation (then commas) where possible, not between words
+that stay together (General Requirements 4 by Kiwi: '무슨 | 그림자', '하지 | 않았다') nor inside a
+quotation (I.14) where another cut does about as well (``CUT_KEEP``), and each long
 enough to be read where it stands (from its first word to the next piece, 5/6 s and the reading
 speed) whenever the line can be cut that way (_split), using the
-word times; the name only on the first piece, but the language label and the notes on every piece
-(II.6 "in each event", II.7 "each subtitle"), all counted in the 16 units. After splitting and
+word times. A pause of 2 s or more between two words (``PAUSE_CUT``, I.4's pause) is a cut of its
+own however short the line, so that the words after it do not show before they are spoken (TG
+"Subtitles should be in sync with both the image and the audio", "Avoid spoilers"; audit 2-03),
+except in a line whose time is a guess, a line the writer cut (``breaks``) or kept in one cell
+(``keep``), the two lines of a writer's join, and where a piece next to the pause could not then
+be read where it stands (its 5/6 s and reading time before the next piece or line, with no other
+line spoken over it: General Requirements 1 and II.3 are musts, the sync with the audio a should;
+``_clear``). Measured in the 6th round on the 1000 made-up scenes with a pause of 2-4 s put into
+2414 lines: cells with a violation 1254 without the cut, 1276 cutting at every pause (pieces after
+the pause squeezed by the lines around them), 1255 with ``_clear``. The name only on the first
+piece, but the language label and the notes on every piece (II.6 "in each event", II.7 "each
+subtitle"), all counted in the 16 units. After splitting and
 line breaking the punctuation of each line is tidied for display (style.tidy_line, I.13 and I.4:
 no period or comma at a line end, a comma between two sentences, … for dots); the words are never
 changed. In-time = first word, moved back to a shot change at
@@ -176,7 +188,7 @@ import math
 import re
 
 from . import style
-from .textutil import EPS, end_bonus, fits, note_left_alone, units, wrap
+from .textutil import EPS, end_bonus, fits, keep_costs, note_left_alone, units, wrap
 
 INF = float("inf")
 ESTIMATED = ("voice", "even")               # dialogue.json ``timing`` of a line whose time is a guess
@@ -378,6 +390,79 @@ def _word_times(ln: dict, toks: list[str]):
 
 
 UNREADABLE = 1000.0     # the cost of a piece that cannot stay 5/6 s and its reading time (_split)
+# the cost of a cell cut between words that stay together (_split), times textutil.keep_costs: a
+# cost of 2 (an adnominal and its noun '예쁜 | 꽃', an auxiliary, a name, a number, inside a
+# quotation) is 20, the constant of one more piece, so the cut moves to another word when that
+# costs less than about one more cell (audit 2-03). Not measured
+CUT_KEEP = 10.0
+# a pause of this many seconds between two words of a line is a cut point of its own (_dialogue_parts):
+# I.4 "Use ellipses to indicate a pause (2 seconds or more)" (2초 이상 쉼) is the length the Korean
+# guide calls a pause, and a cell held over it shows the words after it before they are spoken
+# (TG "Subtitles should be in sync with both the image and the audio" = 자막은 화면·소리와 맞아야
+# 한다, "Avoid spoilers" = 스포일러를 피하라)
+PAUSE_CUT = 2.0
+
+
+def _cut_costs(toks: list[str], P: _P) -> list[float]:
+    """The cost of a cell cut before word j of ``toks`` (index j, 0 < j < n) for words that stay
+    together: ``CUT_KEEP`` times ``textutil.keep_costs`` of the space there."""
+    kc = keep_costs(" ".join(toks), kiwi=P.kiwi)
+    out, pos = [0.0] * (len(toks) + 1), -1
+    for j in range(1, len(toks)):
+        pos += len(toks[j - 1]) + 1                  # the space before word j
+        out[j] = CUT_KEEP * kc.get(pos, 0.0)
+    return out
+
+
+def _pauses(times: list) -> list[int]:
+    """The words of a line that come after a pause of ``PAUSE_CUT`` or more (their index)."""
+    return [k for k in range(1, len(times)) if times[k][0] - times[k - 1][1] >= PAUSE_CUT - 1e-6]
+
+
+def _room(times: list, i: int, j: int, P: _P, after=None, others=None) -> int:
+    """Frames the piece of words i..j of a line (word ``times``) can stay where it stands (``_split``):
+    to 2 frames before the next piece, ``after`` or the next line that starts after it (``others``,
+    sorted start frames; without them its last word + 0.5 s), at most 7 s."""
+    import bisect
+    s = P.fr(times[i][0])
+    if j < len(times):
+        e = P.fr(times[j][0]) - P.gap
+    elif after is not None:
+        e = after - P.gap
+    elif others is not None:
+        k = bisect.bisect_right(others, s)
+        e = others[k] - P.gap if k < len(others) else INF
+    else:
+        e = P.fr(times[-1][1]) + P.tail
+    return min(e - s, P.max_f)
+
+
+def _reading(text: str, P: _P) -> int:
+    """Frames a piece showing ``text`` has to stay: 5/6 s and its reading time (II.3, General
+    Requirements 1), the units as displayed, as the cell counts them."""
+    shown = sum(units(x) for x in wrap(text, P.max_units, P.max_lines, kiwi=False, tidy=style.tidy_line))
+    return max(P.min_f, P.need(shown))
+
+
+def _readable(text: str, room, P: _P) -> bool:
+    return room >= _reading(text, P)
+
+
+def _clear(text: str, times: list, i: int, j: int, P: _P, others, spans, order) -> bool:
+    """Whether the piece of words i..j next to a pause can be read where it stands: its reading time
+    (``_reading``) before the next piece of its line and before the next line that starts after its
+    first word, and no other line spoken over that time (``spans``: two people talking over each
+    other is left to the rules for lines that overlap, as before the cut at pauses)."""
+    import bisect
+    s, need = P.fr(times[i][0]), _reading(text, P)
+    room = _room(times, i, j, P, others=others)
+    if others:
+        k = bisect.bisect_right(others, s)
+        if k < len(others):
+            room = min(room, others[k] - P.gap - s)
+    if room < need:
+        return False
+    return not any(o != order and a < s + need and b > s for a, b, o in spans or ())
 
 
 def _split(toks: list[str], times: list, text_of, P: _P, after=None, others=None) -> list[tuple[int, int]]:
@@ -386,7 +471,10 @@ def _split(toks: list[str], times: list, text_of, P: _P, after=None, others=None
     it is written into a cell, with its label and notes, so those count in the 16 units. A piece
     costs a constant (fewer cells) plus its squared length (balanced cells); a piece that ends
     after sentence punctuation costs less (a comma a little less), so the line is cut at its
-    sentence ends when that takes at most one more cell or so. A piece that cannot be read where
+    sentence ends when that takes at most one more cell or so; a cut between words that stay
+    together costs more (``_cut_costs``: General Requirements 4 'The line break should not
+    separate …', a quotation, I.14), so a cell does not end on '무슨' of '무슨 그림자' or inside a
+    quotation when another cut does about as well. A piece that cannot be read where
     it stands costs ``UNREADABLE``, far more than any of that: its cell lasts from its first word
     to 2 frames before the first word of the next piece (``after``: the frame the next piece
     starts on when these words end before the line does, a writer's cut), the last one until 2
@@ -395,29 +483,17 @@ def _split(toks: list[str], times: list, text_of, P: _P, after=None, others=None
     reading time of its text (II.3, General Requirements 1). So a cut right after '아…' that
     leaves an eighth of a second is never taken while another way of cutting the line can be
     read (4th review)."""
-    import bisect
     n = len(toks)
 
     def span(i, j):
         return P.fr(times[j - 1][1]) - P.fr(times[i][0])
 
     def room(i, j) -> int:
-        s = P.fr(times[i][0])
-        if j < n:
-            e = P.fr(times[j][0]) - P.gap
-        elif after is not None:
-            e = after - P.gap
-        elif others is not None:
-            k = bisect.bisect_right(others, s)
-            e = others[k] - P.gap if k < len(others) else INF
-        else:
-            e = P.fr(times[n - 1][1]) + P.tail
-        return min(e - s, P.max_f)
+        return _room(times, i, j, P, after, others)
 
     if P.fits(text_of(0, n)) and span(0, n) <= P.max_f:
         return [(0, n)]
-    best: list = [None] * (n + 1)                    # (cost, start of the last piece)
-    best[0] = (0.0, -1)
+    pieces: list = [[] for _ in range(n + 1)]        # pieces[j]: (i, cost) of the pieces i..j that fit
     for j in range(1, n + 1):
         for i in range(j - 1, -1, -1):
             text = text_of(i, j)
@@ -427,12 +503,25 @@ def _split(toks: list[str], times: list, text_of, P: _P, after=None, others=None
             cost = 20.0 + (u / 4.0) ** 2
             if j < n:
                 cost -= 2.0 * end_bonus(toks[j - 1])
-            shown = sum(units(x) for x in wrap(text, P.max_units, P.max_lines, kiwi=False, tidy=style.tidy_line))
-            if room(i, j) < max(P.min_f, P.need(shown)):     # the units as displayed, as the cell counts them
+            if not _readable(text, room(i, j), P):
                 cost += UNREADABLE
-            cost += best[i][0]
-            if best[j] is None or cost < best[j][0] - 1e-9:
-                best[j] = (cost, i)
+            pieces[j].append((i, cost))
+
+    def cheapest(keep):
+        best: list = [None] * (n + 1)                # (cost, start of the last piece)
+        best[0] = (0.0, -1)
+        for j in range(1, n + 1):
+            for i, cost in pieces[j]:
+                cost += best[i][0] + (keep[j] if j < n else 0.0)
+                if best[j] is None or cost < best[j][0] - 1e-9:
+                    best[j] = (cost, i)
+        return best
+
+    best = cheapest(_cut_costs(toks, P))
+    if best[n][0] >= UNREADABLE:
+        # no way to cut it where every piece can be read: the words that stay together do not choose
+        # among such ways (``_make_room`` lays the pieces out again), so it is cut as before them
+        best = cheapest([0.0] * (n + 1))
     out, j = [], n
     while j > 0:
         i = best[j][1]
@@ -456,10 +545,15 @@ def _piece(d: dict, words: list, prefix: str) -> dict:
                 e=max(w[2] for w in words), whole=False)
 
 
-def _dialogue_parts(ln: dict, P: _P, order: int = 0, others=None) -> list[dict]:
+def _dialogue_parts(ln: dict, P: _P, order: int = 0, others=None, pauses: bool = True, spans=None) -> list[dict]:
     """The pieces of one script line as cell parts (empty when it has no text or no time).
     ``order`` is the place of the line in the script; ``others`` the sorted start frames of the
-    lines (``_split``: how long the last piece can stay)."""
+    lines (``_split``: how long the last piece can stay); ``spans`` (first word, last word, order)
+    frames of the lines. A pause of ``PAUSE_CUT`` between two words is a cut point whatever the
+    length of the line (audit 2-03), unless the writer chose the cuts (``breaks``) or one cell
+    (``keep``), the time of the line is a guess (its word times are shared out, so its pauses are
+    not known) or ``pauses`` is False (a writer's join, _dialogue_cells); and only where the pieces
+    on both sides of it can then be read where they stand (``_clear``)."""
     text = " ".join(str(ln.get("text") or "").split())
     if not text or ln.get("status") in NO_TIME:
         return []
@@ -470,25 +564,45 @@ def _dialogue_parts(ln: dict, P: _P, order: int = 0, others=None) -> list[dict]:
     head, cont = style.line_labels(ln)               # "[이름/출처·말투/언어] " and "[언어] "
     sung = bool(ln.get("sung"))
     n = len(toks)
+    guess = ln.get("timing") in ESTIMATED or ln.get("status") == "unheard"
     cuts = sorted({int(b) for b in ln.get("breaks") or () if isinstance(b, (int, float)) and 0 < int(b) < n})
-    notes = []
-    if cuts:                                         # the writer's cut points; a piece that does not fit is cut further
-        ranges = []
-        for a, b in zip([0] + cuts, cuts + [n]):
-            sub = _split(toks[a:b], times[a:b],
-                         lambda i, j, a=a: (head if a + i == 0 else cont) + _body(toks[a + i:a + j], sung), P,
+    paused = [] if cuts or ln.get("keep") or guess or not pauses else _pauses(times)
+
+    def text_of(i, j):
+        return (head if i == 0 else cont) + _body(toks[i:j], sung)
+
+    def cut_at(points):                              # the writer's cut points, or the pauses; a piece
+        ranges, more = [], False                     # that does not fit is cut further
+        for a, b in zip([0] + points, points + [n]):
+            sub = _split(toks[a:b], times[a:b], lambda i, j, a=a: text_of(a + i, a + j), P,
                          after=P.fr(times[b][0]) if b < n else None, others=others)
-            if len(sub) > 1:
-                notes.append("작가가 정한 칸이 한도를 넘어 더 나눔")
+            more = more or len(sub) > 1
             ranges += [(a + i, a + j) for i, j in sub]
+        return ranges, more
+
+    notes = []
+    if cuts:
+        ranges, more = cut_at(cuts)
+        if more:
+            notes.append("작가가 정한 칸이 한도를 넘어 더 나눔")
     else:
-        ranges = _split(toks, times, lambda i, j: (head if i == 0 else cont) + _body(toks[i:j], sung), P,
-                        others=others)
+        ranges = None
+        while paused:
+            # a pause is no cut where a piece next to it could not then be read where it stands (5/6 s
+            # and the reading speed, musts, before the sync with the audio): it is left as before
+            ranges, _ = cut_at(paused)
+            bad = [k for k in paused if any((i == k or j == k) and not _clear(text_of(i, j), times, i, j, P, others,
+                                                                               spans, order) for i, j in ranges)]
+            if not bad:
+                break
+            paused.remove(bad[0])
+            ranges = None
+        if ranges is None:
+            ranges = _split(toks, times, text_of, P, others=others)
     keep = bool(ln.get("keep")) and not cuts
     if keep and len(ranges) > 1:
         notes.append(f"한 칸에 두기: {P.max_lines}줄 {P.max_units:g}자·{P.max_dur:g}초를 넘어 나눔")
         keep = False
-    guess = ln.get("timing") in ESTIMATED or ln.get("status") == "unheard"
     parts = []
     for i, j in ranges:
         pre = head if i == 0 else cont
@@ -501,7 +615,8 @@ def _dialogue_parts(ln: dict, P: _P, order: int = 0, others=None) -> list[dict]:
                       "speaker": ln.get("person") or ln.get("name") or ln.get("speaker"), "whole": len(ranges) == 1,
                       "cont": cont, "sung": sung, "guess": guess, "order": order, "pos": ln.get("pos"),
                       "scene": ln.get("scene_id"), "timing": ln.get("timing"), "keep": keep,
-                      "turn": ln.get("turn"), "breaks": bool(cuts), "notes": list(dict.fromkeys(notes))})
+                      "turn": ln.get("turn"), "breaks": bool(cuts), "paused": bool(paused),
+                      "notes": list(dict.fromkeys(notes))})
     for p, q in zip(parts, parts[1:]):           # one speaker: a piece is over where the next one begins
         if p["e"] > q["t"]:                      # (word times of the ASR may overlap by a few frames)
             p["e"] = max(p["t"], q["t"])
@@ -1021,22 +1136,44 @@ def _make_room(cells: list[_Cell], P: _P, w0: int, w1) -> tuple[list[dict], bool
     return dropped, moved
 
 
+def _in_window(parts: list[dict], w0: int, w1) -> list[dict]:
+    parts = [p for p in parts if p["e"] > w0 or p["t"] >= w0]
+    return [p for p in parts if p["t"] < w1] if w1 is not None else parts
+
+
+def _joined(parts: list[dict], lines: list) -> set:
+    """The script places (``order``) of the lines a writer's join puts in one cell: a line with
+    ``join`` and the line placed just before it (as ``_join`` finds them)."""
+    seen = sorted({(p["order"], p["id"]) for p in parts})
+    out = set()
+    for (k0, _), (k, _) in zip(seen, seen[1:]):
+        if isinstance(lines[k], dict) and lines[k].get("join"):
+            out.update((k0, k))
+    return out
+
+
 def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> tuple[list[_Cell], list[dict]]:
     parts = []
     starts = []                                          # where each line begins (_split: room of a last piece)
-    for ln in lines or []:
+    spans = []                                           # (first word, last word, place) of each line
+    for k, ln in enumerate(lines or []):
         if isinstance(ln, dict) and ln.get("status") not in NO_TIME and str(ln.get("text") or "").split():
             times = _word_times(ln, str(ln.get("text")).split())
             if times:
                 starts.append(P.fr(times[0][0]))
+                spans.append((P.fr(times[0][0]), P.fr(max(e for _, e in times)), k))
     starts.sort()
     for k, ln in enumerate(lines or []):
         if isinstance(ln, dict):
-            parts.extend(_dialogue_parts(ln, P, k, starts))
-    parts = [p for p in parts if p["e"] > w0 or p["t"] >= w0]
-    if w1 is not None:
-        parts = [p for p in parts if p["t"] < w1]
-    parts.sort(key=lambda p: p["t"])                     # stable: script order for equal times
+            parts.extend(_dialogue_parts(ln, P, k, starts, spans=spans))
+    parts = _in_window(parts, w0, w1)
+    # a writer's join holds both lines whole: no cut at a pause in either (the writer's choice first)
+    redo = sorted({p["order"] for p in parts if p["paused"]} & _joined(parts, list(lines or [])))
+    if redo:
+        parts = [p for p in parts if p["order"] not in redo]
+        for k in redo:
+            parts.extend(_in_window(_dialogue_parts(lines[k], P, k, starts, pauses=False), w0, w1))
+    parts.sort(key=lambda p: (p["t"], p["order"]))       # script order for equal times
     cells: list[_Cell] = []
     prev = None
     for p in parts:
