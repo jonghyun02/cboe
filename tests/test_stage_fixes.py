@@ -389,6 +389,32 @@ def test_speaker_name_is_not_added_on_a_guessed_time(tmp_path):
                                                  "source": "broadcast"}}, None)[0] == "check"
 
 
+def test_speaker_going_on_after_a_line_still_to_check_follows_it(tmp_path):
+    """L0001 (guessed time, no face) is 확인 필요; the same speaker goes on off screen right after:
+    the next line keeps its own recommendation but follows L0001, so that putting the name on
+    L0001 can drop it here (the name would be shown twice)."""
+    lines = [_line(1, 2.0, 4.0, timing="even"), _line(2, 4.05, 6.0), _line(3, 6.5, 8.0),
+             _line(4, 8.5, 9.5, speaker=None), _line(5, 9.6, 10.5, speaker=None)]
+    rows = [{"line_id": ln["id"], "face": "not_visible", "n_faces": 0, "best": None} for ln in lines]
+    p = _project(tmp_path, dialogue={"lines": lines}, speaker={"lines": rows})
+    a, b, c, d, e = [it for it in recommend.build(p, {}) if it["kind"] == "speaker"]
+    assert a["rec"] == "check" and "follows" not in a
+    assert b["rec"] == "include" and b["follows"] == a["id"] and b["reason"].endswith("앞 줄을 먼저 정해야 함")
+    assert any(a["id"] in x["text"] and x["polarity"] == "neutral" for x in b["evidence"])
+    assert c["rec"] == "exclude" and c["follows"] == b["id"]               # the run named on b, as before
+    assert "follows" not in d and "follows" not in e                       # no speaker in the script: no run
+    # a line still to check after a check: both wait for the first
+    lines[1] = _line(2, 4.05, 6.0, timing="voice")
+    p = _project(tmp_path, dialogue={"lines": lines}, speaker={"lines": rows})
+    a, b, c = [it for it in recommend.build(p, {}) if it["kind"] == "speaker"][:3]
+    assert [a["rec"], b["rec"]] == ["check", "check"] and b["follows"] == a["id"] and c["follows"] == b["id"]
+    # another source (the script marks narration) or a gap over 2 s: no run, no follows
+    lines[1] = _line(2, 4.05, 6.0, source="narration")
+    lines[2] = _line(3, 9.0, 10.0)
+    p = _project(tmp_path, dialogue={"lines": lines[:3]}, speaker={"lines": rows[:3]})
+    assert all("follows" not in it for it in recommend.build(p, {}) if it["kind"] == "speaker")
+
+
 def _reaction(line_id="L0001") -> dict:
     return {"id": "S0001", "relation": "reaction", "line_id": line_id, "evidence": "직후 \"방금 뭐였지\"", "plot_hint": "",
             "source": "llm"}

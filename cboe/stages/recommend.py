@@ -17,7 +17,9 @@
 부르지 않는다 (감사 9-x1, 6-m2). 멈춤('[음악이 멈춘다]')은 늘 확인 필요.
 화자: 시각이 있는 대본 줄마다. 말하는 얼굴이 보이면 이름 생략(제외), 안 보이면 이름 표시(포함),
 애매하거나 대본에 화자가 없으면 확인 필요. 대본이 화면 밖이라고 적은 줄(내레이션·전화·V.O. …)은
-얼굴 판정과 상관없이 '안 보임'이고, 시각이 추정인 줄은 얼굴이 없어도 확인 필요.
+얼굴 판정과 상관없이 '안 보임'이고, 시각이 추정인 줄은 얼굴이 없어도 확인 필요. 화면 밖에서 같은
+화자가 이어 말하면 이름은 첫 줄에만('같은 화자가 이어 말함', ``follows`` = 이름을 단 줄); 앞 줄이
+아직 확인 필요면 이 줄의 추천은 그대로 두고 ``follows`` = 앞 줄, 이유에 '앞 줄을 먼저 정해야 함'.
 Candidates are never dropped. ``decide()`` is re-run after the agent adds evidence.
 
 ``follows`` on an item (sound, music or speaker) is the id of the earlier item its recommendation
@@ -615,13 +617,22 @@ def build(p, agent_results: dict | None = None) -> list[dict]:
     prev, named_run, named_id = None, False, None
     for s in speaker_candidates(p):
         sp = s["speaker"]
-        cont = (named_run and prev is not None and prev["speaker"]["name"] == sp.get("name")
+        near = (prev is not None and bool(sp.get("name")) and prev["speaker"]["name"] == sp.get("name")
                 and prev["speaker"]["face"] != "visible" and s["onset"] - prev["t1"] <= 2.0
                 and prev["speaker"].get("source") == sp.get("source"))
+        cont = named_run and near
         rec, reason, _ = decide_speaker(s, prev if cont else None)
+        evid = speaker_evidence(s)
         if cont and rec == "exclude" and sp["face"] == "not_visible":
             s["follows"] = named_id         # the line of the run that carries the name
-        s.update(rec=rec, reason=reason, evidence=speaker_evidence(s), agent_reasons=[])
+        elif near and not named_run and prev.get("rec") == "check":
+            # the same speaker goes on right after a line that is still 확인 필요: whether the name
+            # goes there or here is not settled yet — shown together, decided again with it
+            s["follows"] = prev["id"]
+            reason += " · 앞 줄을 먼저 정해야 함"
+            evid.append(ev("대본", s["onset"], f"앞 줄({prev['id']})과 같은 화자가 이어 말함 · 앞 줄은 아직 확인 필요"
+                           " (앞 줄에 이름을 넣으면 이 줄은 이름 생략)", "neutral", "script"))
+        s.update(rec=rec, reason=reason, evidence=evid, agent_reasons=[])
         items.append(s)
         if rec == "include":
             named_id = s["id"]
