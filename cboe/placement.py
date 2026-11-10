@@ -17,9 +17,10 @@ lines  : DialogueLine dicts (id, speaker, text, start, end, words[{w,s,e}]) plus
          subtitle cell, "<cell>-<row>": a "#" line is another person than the other row of its
          own cell only, never than a line of another cell, named or not, which may be the same
          person),
-         ``breaks`` (the writer's cuts: eojeol numbers 1..n-1 a new cell starts at) and ``keep``
+         ``breaks`` (the writer's cuts: eojeol numbers 1..n-1 a new cell starts at), ``keep``
          (the writer's "one cell": no sound splits it; ignored, and said in ``check.notes``, when
-         the line does not fit one cell).
+         the line does not fit one cell) and ``join`` (the writer's "one cell with the line
+         before": module doc "Writer's join").
 sounds : included sound items only: {id, kind: "sfx"|"music", onset, t1 (sound end),
          phrase, short, source_line (line id whose speaker made the sound, or None),
          move_to (writer-forced start time, or None), estimated (the onset is a guess: a sound
@@ -115,6 +116,16 @@ Writer's cuts: ``breaks`` replaces the automatic cut points of the line (a piece
 is cut further and the cell says so in ``check.notes``). A line wrapped right after its label
 ("[김철수]" alone on the first line) is wrapped again with the first word kept next to the label,
 unless the 16 units leave no other way.
+Writer's join (``join``, audit 2-02, 7-03): the line goes into one cell with the line placed just
+before it in script order (the first line placed has none), before any automatic rule: two
+speakers (``person`` differs) make one hyphen cell however far apart they are spoken, one speaker
+one cell of the two texts with a space between, the words and times of both and the label of the
+first (no sound splits that cell again). Only when each hyphen line fits one line (else the two
+texts 2 x 16 units), the speech of the two lasts at most 7 s from the in-time, the line before is
+in no cell with another line yet (two lines a cell), neither line is cut in pieces and no other
+line has a cell between the two; else the line keeps its cells and they say why in ``check.notes``
+("앞 줄과 한 칸으로 묶지 못함 · 7초 초과"). The cell has both line ids in ``refs`` and gets every
+check and end rule of any other cell.
 
 Sound cells (memo 5.2). sfx: start = onset frame, never earlier, even near a cut (BBC 5.5);
 length = units / 14 + 1 s (BBC 4.3.3) within [5/6, 7] s, whatever the sound's own length.
@@ -611,6 +622,87 @@ def _can_pair(a: _Cell, b: _Cell, c, P: _P, w1=None) -> bool:
     return room >= max(P.min_f, P.need(units(_hyphen_line(pa)) + units(_hyphen_line(pb))))   # ③
 
 
+# the writer's "one cell with the line before" (module doc "Writer's join")
+
+JOIN_NOTE = "앞 줄과 한 칸으로 묶지 못함 · {}"
+
+
+def _ids(p: dict) -> list:
+    """The line ids of a part: one, or the lines a writer's join put together (same speaker)."""
+    return p.get("ids") or [p.get("id")]
+
+
+def _whole(ln: dict) -> tuple[str, str]:
+    """(label, words) of a whole line as one cell would show it, cut or not."""
+    return style.line_labels(ln)[0], _body(" ".join(str(ln.get("text") or "").split()).split(" "), bool(ln.get("sung")))
+
+
+def _join(cells: list[_Cell], lines: list, P: _P) -> list[_Cell]:
+    """``join`` of a line (the writer): one cell with the line before it, the one placed just
+    before it in script order. Two speakers: one hyphen cell, '- ' a line each (I.6), however far
+    apart the two are; one speaker (the same ``person``): one cell of the two texts, a space between,
+    the words and their times of both, the label of the first. Only when that cell fits (one line of
+    16 units each as hyphen lines, else 2 x 16 units) and the speech of the two lasts at most 7 s
+    (GR 1), the line before is in no cell with another line yet (two lines a cell), neither is cut
+    in pieces and no other line has a cell between them. Otherwise the line keeps its own cells and
+    they say why in ``check.notes`` (``JOIN_NOTE``). The cell gets the checks of any other cell."""
+    seen = sorted({(p["order"], p["id"]) for c in cells for p in c.dialogue()})
+    for (k0, before), (k, lid) in zip(seen, seen[1:]):
+        if not isinstance(lines[k], dict) or not lines[k].get("join"):
+            continue
+        mine = [c for c in cells if any(lid in _ids(p) for p in c.dialogue())]
+        theirs = [c for c in cells if any(before in _ids(p) for p in c.dialogue())]
+        why = _join_cells(cells, theirs, mine, lines[k0], lines[k], P)
+        if why:
+            note = JOIN_NOTE.format(why)
+            for c in mine:
+                for p in c.dialogue():
+                    if lid in _ids(p) and note not in p["notes"]:
+                        p["notes"].append(note)
+    return cells
+
+
+def _join_cells(cells: list[_Cell], theirs: list[_Cell], mine: list[_Cell], ln0: dict, ln: dict, P: _P):
+    """Put the line of the cells ``mine`` with the line before it (cells ``theirs``) when ``_join``
+    allows it; returns None, or why not."""
+    a, b = theirs[-1], mine[0]
+    pa, pb = a.dialogue()[0], b.dialogue()[0]
+    if a.mode != "plain" or len(a.parts) > 1:
+        return "앞 줄이 이미 다른 줄과 한 칸"
+    one = len(theirs) == 1 and len(mine) == 1
+    (h0, w0), (h1, w1) = ((pa["prefix"], pa["body"]) if len(theirs) == 1 else _whole(ln0),
+                          (pb["prefix"], pb["body"]) if len(mine) == 1 else _whole(ln))
+    same = pa.get("speaker") == pb.get("speaker")
+    if same and not P.fits(h0 + w0 + " " + w1):
+        return f"너무 김: {P.max_lines}줄 {P.max_units:g}자 초과"
+    if not same and any(units(style.tidy_line(style.HYPHEN + h + w)) > P.max_units + EPS
+                        for h, w in ((h0, w0), (h1, w1))):
+        return f"너무 김: 하이픈 줄 {P.max_units:g}자 초과"
+    parts = [p for c in theirs + mine for p in c.dialogue()]
+    start = min(a.start, b.start)
+    if max(p["e"] for p in parts) - start > P.max_f:
+        return f"{P.max_dur:g}초 초과"
+    if not one:
+        return "작가가 정한 끊을 자리로 나뉜 줄"
+    if abs(cells.index(b) - cells.index(a)) != 1:
+        return "사이에 다른 줄의 칸"
+    if same:
+        body = pa["body"] + " " + pb["body"]
+        merged = dict(pa, body=body, text=pa["prefix"] + body, words=pa["words"] + pb["words"],
+                      t=min(pa["t"], pb["t"]), e=max(pa["e"], pb["e"]), whole=True, keep=True, breaks=False,
+                      ids=_ids(pa) + _ids(pb), guess=bool(pa.get("guess") and pb.get("guess")),
+                      timing="asr" if "asr" in (pa.get("timing"), pb.get("timing")) else pa.get("timing"),
+                      pos="top" if "top" in (pa.get("pos"), pb.get("pos")) else pa.get("pos"),
+                      notes=list(dict.fromkeys(pa["notes"] + pb["notes"])))
+        a.set([merged], "plain", P)
+    else:
+        a.set([pa, pb], "hyphen", P)
+    a.start = start
+    a.marks |= b.marks
+    cells.remove(b)
+    return None
+
+
 # lines that overlap in time (module doc "Lines that overlap")
 
 def _need(c: _Cell, P: _P) -> int:
@@ -910,11 +1002,12 @@ def _make_room(cells: list[_Cell], P: _P, w0: int, w1) -> tuple[list[dict], bool
             i += 1
             continue
         first = min(x.parts[0]["t"] for x in mine)
-        dropped.append({"item": lid, "line": lid, "t": P.sec(first), "kind": "dialogue",
-                        "text": " ".join(x.parts[0]["text"] for x in sorted(mine, key=lambda x: x.start)),
-                        "reason": (f"시각 추정 대사 · 앞뒤 칸 사이 빈틈 {gap:.2f}초 ({P.min_text}초 미만)" if k == 1 else
-                                   f"시각 추정 대사 · 칸 {k}개 · 앞뒤 칸 사이 빈틈 {gap:.2f}초 "
-                                   f"(칸마다 {P.min_text}초면 {want:.2f}초 필요)")})
+        for rid in dict.fromkeys(q for x in mine for q in _ids(x.parts[0])):   # a writer's join: each line
+            dropped.append({"item": rid, "line": rid, "t": P.sec(first), "kind": "dialogue",
+                            "text": " ".join(x.parts[0]["text"] for x in sorted(mine, key=lambda x: x.start)),
+                            "reason": (f"시각 추정 대사 · 앞뒤 칸 사이 빈틈 {gap:.2f}초 ({P.min_text}초 미만)" if k == 1 else
+                                       f"시각 추정 대사 · 칸 {k}개 · 앞뒤 칸 사이 빈틈 {gap:.2f}초 "
+                                       f"(칸마다 {P.min_text}초면 {want:.2f}초 필요)")})
         for x in mine:
             cells.remove(x)
         i = max(0, a - 1)
@@ -946,6 +1039,7 @@ def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> tuple[li
         c = _Cell(s, s + 1, [p], "plain", P, next(seq))
         cells.append(c)
         prev = c
+    cells = _join(cells, list(lines or []), P)           # the writer's "one cell with the line before"
     cells = _untangle(cells, P, w0, w1)                  # overlapping lines: never a one-frame cell
     cells = _pair_short(cells, P, w1)
     _dialogue_outs(cells, P, w1, _scene_caps(cells, cuts, P))
@@ -1027,7 +1121,7 @@ def _merge_parts(other: dict, sp: dict, text: str, dialogue: bool):
     """Parts and mode of a cell holding ``other`` and the sound: ③ inline when the speaker made the
     sound, else ② hyphen lines in heard order (the sound first when both start on the same frame)."""
     snd = dict(sp, text=text)
-    if dialogue and sp["src"] is not None and sp["src"] == other["id"]:
+    if dialogue and sp["src"] is not None and sp["src"] in _ids(other):
         return [other, snd], "inline"
     return ([snd, other] if snd["t"] <= other["t"] else [other, snd]), "hyphen"
 
@@ -1319,8 +1413,9 @@ def _out(cells: list[_Cell], cuts: list[int], P: _P, more_notes=None) -> list[di
                 viol.append("빈틈 0.5초 미만")
         refs = []
         for p in c.parts:
-            if p["id"] not in refs:
-                refs.append(p["id"])
+            for r in _ids(p):
+                if r not in refs:
+                    refs.append(r)
         flags = ["timing_estimated"] if any(p.get("guess") for p in c.parts) else []
         flags += sorted(c.marks)
         if dur_f < P.flash_f:

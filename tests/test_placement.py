@@ -1072,6 +1072,86 @@ def test_keep_holds_the_line_against_a_sound_and_says_when_it_cannot():
     assert len(cs) >= 2 and all(any(n.startswith("한 칸에 두기") for n in c["check"]["notes"]) for c in cs)
 
 
+# the writer's join (6th round, audit 2-02, 7-03): "this line in one cell with the line before"
+
+def test_join_puts_two_speakers_in_one_hyphen_cell_where_the_automatic_rule_would_not():
+    a = L("L1", "어디 가는 거야?", 10.0, 10.8, speaker="가람", name="가람", show=True, timing="asr")
+    b = L("L2", "집에 간다니까", 12.0, 12.6, speaker="나래", timing="asr")
+    assert [c["refs"] for c in run([a, b])["cells"]] == [["L1"], ["L2"]]       # 1.2 s apart: two cells
+    d = run([a, dict(b, join=True)])
+    c = one(d, "L1")
+    assert c["refs"] == ["L1", "L2"] and c["lines"] == ["- [가람] 어디 가는 거야?", "- 집에 간다니까"]
+    assert c["start"] == sec(F(10.0)) and c["end"] == sec(F(12.6) + 12)       # both speeches, + 0.5 s
+    assert c["check"]["violations"] == [] and "notes" not in c["check"] and len(d["cells"]) == 1
+    # the join of the first line placed is no join at all; the line before is the one placed before it
+    assert run([dict(a, join=True), b])["cells"] == run([a, b])["cells"]
+    absent = {"id": "L9", "text": "어디서 들리는 말", "status": "absent"}
+    assert one(run([a, absent, dict(b, join=True)]), "L2")["refs"] == ["L1", "L2"]
+
+
+def test_join_of_one_speaker_makes_one_cell_of_the_two_texts():
+    a = L("L1", "그러니까 오늘은", 10.0, 10.8, speaker="가람", name="가람", show=True, timing="asr")
+    b = L("L2", "여기까지만 하고 내일 보자", 11.6, 12.8, speaker="가람", name="가람", show=True, timing="asr")
+    assert len(run([a, b])["cells"]) == 2
+    d = run([a, dict(b, join=True)], [S("S1", 20.0, "[쾅]")])
+    c = one(d, "L1")
+    assert c["refs"] == ["L1", "L2"] and c["kind"] == "dialogue"
+    assert c["lines"] == ["[가람] 그러니까 오늘은", "여기까지만 하고 내일 보자"]       # 2 lines, the first label only
+    assert all(units(x) <= 16 for x in c["lines"])
+    assert c["start"] == sec(F(10.0)) and c["end"] == sec(F(12.8) + 12) and c["check"]["violations"] == []
+    # the words go on with their own times: a sound in the middle of the second text cannot split the
+    # cell back into the two lines (the writer made it one cell), and says so
+    words = a["words"] + b["words"]
+    d = run([a, dict(b, join=True)], [S("S1", words[3]["s"], "[쾅]")])
+    assert one(d, "L1")["refs"] == ["L1", "L2"]
+    assert any("한 칸에 두기로 정한" in e["reason"] for e in d["no_room"] if e["item"] == "S1")
+
+
+def test_join_that_cannot_be_made_says_why_on_the_line():
+    def note(d, ref):
+        return [n for n in one(d, ref)["check"].get("notes", []) if n.startswith("앞 줄과 한 칸으로")]
+    a = L("L1", "그러니까 오늘은 여기까지만", 10.0, 11.0, speaker="가람", timing="asr")
+    long_ = L("L2", "하고 내일 아침 일찍 다시 만나서 이야기하자", 11.6, 13.0, speaker="가람", timing="asr")
+    d = run([a, dict(long_, join=True)])
+    assert len(d["cells"]) == 2 and note(d, "L2") == ["앞 줄과 한 칸으로 묶지 못함 · 너무 김: 2줄 16자 초과"]
+    late = L("L2", "응", 17.5, 17.8, speaker="가람", timing="asr")                  # 7.8 s after L1 begins
+    assert note(run([a, dict(late, join=True)]), "L2") == ["앞 줄과 한 칸으로 묶지 못함 · 7초 초과"]
+    wide = L("L2", "아니 나는 내일 아침에는 절대 못 가", 11.6, 13.0, speaker="나래", timing="asr")   # 18 units as '- …'
+    assert note(run([a, dict(wide, join=True)]), "L2") == ["앞 줄과 한 칸으로 묶지 못함 · 너무 김: 하이픈 줄 16자 초과"]
+    # the line before is already in one cell with another line: two lines a cell
+    b = L("L2", "왜?", 11.6, 11.9, speaker="나래", timing="asr")
+    c = L("L3", "그냥", 12.5, 12.8, speaker="다솜", timing="asr")
+    d = run([a, dict(b, join=True), dict(c, join=True)])
+    assert one(d, "L1")["refs"] == ["L1", "L2"] and note(d, "L3") == ["앞 줄과 한 칸으로 묶지 못함 · 앞 줄이 이미 다른 줄과 한 칸"]
+    # no note on a line whose join was made, nor on the cells of the lines around it
+    assert all(not any(n.startswith("앞 줄과") for n in x["check"].get("notes", [])) for x in d["cells"] if "L3" not in x["refs"])
+    # another line spoken between the two (out of script order) has its cell there
+    between = L("L3", "뭐라고?", 11.2, 11.4, speaker="다솜", timing="asr")
+    d = run([a, dict(L("L2", "응", 12.5, 12.8, speaker="나래", timing="asr"), join=True), between])
+    assert note(d, "L2") == ["앞 줄과 한 칸으로 묶지 못함 · 사이에 다른 줄의 칸"]
+    # a line the writer cut with breaks stays cut
+    cut = L("L2", "응 그래 알았어", 11.6, 12.6, speaker="나래", timing="asr", breaks=[1], join=True)
+    cs = cells_of(run([a, cut]), "L2")
+    assert [c["lines"] for c in cs] == [["응"], ["그래 알았어"]]
+    assert all("앞 줄과 한 칸으로 묶지 못함 · 작가가 정한 끊을 자리로 나뉜 줄" in c["check"]["notes"] for c in cs)
+
+
+def test_a_joined_cell_gets_the_checks_of_any_cell():
+    from cboe import check
+    a = L("L1", "가나다라마바사아자차카타파", 10.0, 10.3, speaker="가람", timing="asr")
+    b = L("L2", "하가나다라마바사아자차카타", 10.9, 11.2, speaker="나래", timing="asr")
+    nxt = L("L3", "그래", 11.45, 11.7, speaker="가람", timing="asr")
+    d = run([a, dict(b, join=True), nxt])
+    c = one(d, "L1")
+    assert c["refs"] == ["L1", "L2"] and "초당 14자 초과" in c["check"]["violations"]   # 28 units in 1.4 s
+    assert "reading_speed" in [v["code"] for v in check.run(d)["violations"] if v["cell"] == c["id"]]
+    # and the shot-change rules: a cut just after the speech of the two ends the cell before it (TG 1)
+    short = [L("L1", "어디 가?", 10.0, 10.3, speaker="가람", timing="asr"),
+             L("L2", "집에", 10.9, 11.2, speaker="나래", timing="asr", join=True)]
+    assert one(run(short), "L1")["end"] == sec(F(11.2) + 12)
+    assert one(run(short, cuts=[11.5]), "L1")["end"] == sec(F(11.5) - 2)
+
+
 def test_a_speaker_label_is_not_left_alone_on_the_first_line():
     long_name = L("L1", "오늘은 정말 고마웠어", 10.0, 12.0, name="가나다라마바", show=True)
     c = one(run([long_name]), "L1")
