@@ -55,6 +55,17 @@ MARGIN_BAND = 0.09    # top and bottom share of the page where page numbers and 
 PAGE_NO = re.compile(r"[-–—~\s]*\d{1,4}[-–—~\s]*|\d{1,4}\s*/\s*\d{1,4}|(?:page|p\.?)\s*\d{1,4}|\d{1,4}\s*쪽", re.I)
 
 
+def _drawn_twice(a: dict, b: dict) -> bool:
+    """``b`` is ``a`` drawn again a hair to the side (faked bold): the same glyph whose box
+    lies almost on the first one. Narrow glyphs set close together, like the dots of
+    ``...``, are a step of most of their own width apart and are kept."""
+    if b["text"] != a["text"]:
+        return False
+    dx = abs(b["x0"] - a["x0"])
+    width = max(a["x1"] - a["x0"], b["x1"] - b["x0"], 0.0)
+    return dx < 0.2 * max(a["size"], b["size"]) and dx <= 0.3 * width
+
+
 def page_rows(chars: list[dict], page: int, height: float) -> list[dict]:
     """Characters of one page -> its lines, top to bottom and left to right.
 
@@ -91,7 +102,7 @@ def page_rows(chars: list[dict], page: int, height: float) -> list[dict]:
             if prev is None:
                 lead = spaces
             else:
-                if c["text"] == prev["text"] and abs(c["x0"] - prev["x0"]) < 0.2 * c["size"]:
+                if _drawn_twice(prev, c):
                     continue                          # a glyph drawn twice (faked bold)
                 gap, em = c["x0"] - prev["x1"], max(prev["size"], c["size"], 1.0)
                 if gap >= SPLIT_GAP_SPACES * em or (gap >= SPLIT_GAP * em and not spaces):
@@ -307,8 +318,12 @@ def hwp_paragraphs(path) -> list[str]:
 
 
 # ============================================================ what a line is: patterns
-_TIME = (r"(?:(?:이른|늦은|깊은)\s*)?(?:새벽|아침|오전|한낮|낮|정오|오후|초저녁|저녁|해\s*질\s*녘|해\s*질\s*무렵|"
-         r"한밤중|한밤|밤|심야|자정|동\s*틀\s*녘|일출|일몰|황혼|석양|DAY|NIGHT|D|N)")
+# one word that describes the time before it: an adjective ending in ㄴ (이른, 짙은, 밝은, 어두운,
+# 희뿌연) or 어스름
+_N_FINAL = "".join(chr(0xAC00 + 28 * k + 4) for k in range(11172 // 28))      # syllables ending in ㄴ
+_TIME_MOD = rf"(?:[가-힣]{{0,3}}[{_N_FINAL}]|어스름)"
+_TIME = (rf"(?:{_TIME_MOD}\s*)?(?:새벽|아침|오전|한낮|낮|정오|오후|초저녁|저녁|해\s*질\s*녘|해\s*질\s*무렵|"
+         r"한밤중|한밤|밤|심야|자정|동\s*틀\s*녘|일출|일몰|황혼|석양|어스름|DAY|NIGHT|D|N)")
 _WEATHER = r"(?:비\s*그침|비|눈|맑음|흐림|안개|폭우|소나기|장마|눈보라)"
 TIME_PART = re.compile(rf"\s*{_TIME}(?:\s*[-~→,·&]\s*{_TIME})*\s*(?:[\(（][^()（）]*[\)）])?\s*")
 WEATHER_PART = re.compile(rf"\s*{_WEATHER}(?:\s*[-~→,·&]\s*{_WEATHER})*\s*")
@@ -324,6 +339,9 @@ _T_KO = (r"페이드\s*(?:인|아웃)|디졸브|오버랩|컷\s*투|컷\s*아웃
 # a Latin mark may be followed by what it shows ("INSERT) ..."); a Korean word is a mark only alone
 TRANSITION_LATIN = re.compile(rf"\s*[\(\[<〈\-–—\s]*(?:{_T_LATIN})(?![A-Za-z0-9가-힣])[\)\]>〉\-–—.:：\s]*(.*)", re.I)
 TRANSITION_KO = re.compile(rf"\s*[\(\[<〈\-–—\s]*(?:{_T_KO})[\)\]>〉\-–—.\s]*")
+# a Korean mark that is also an everyday word for a person (와이프 = a wife): in a speaker cell,
+# or alone on the line above a dialogue, it names that person, not the transition (WIPE)
+PERSON_MARK = re.compile(r"[\s\(\[<〈]*와이프[\s\)\]>〉.:：]*")
 _ONSCREEN = r"자막|字幕|SUBTITLE|SUPER|슈퍼|수퍼|타이틀|TITLE|CAPTION"
 ONSCREEN = re.compile(rf"\s*(?:[\(\[<〈]\s*(?:{_ONSCREEN})\s*[\)\]>〉]\s*[:：\-–—]?|(?:{_ONSCREEN})\s*[:：\-–—])\s*(\S.*?)\s*",
                       re.I)
@@ -374,10 +392,11 @@ def is_transition(text: str) -> bool:
 
 
 def cue_like(text: str) -> bool:
-    """Could be a speaker cell: short, with a letter, not a heading or a transition mark."""
+    """Could be a speaker cell: short, with a letter, not a heading or a transition mark
+    (``와이프`` is a person there, ``PERSON_MARK``)."""
     t = clean(text)
-    return bool(t) and len(t) <= CUE_MAX and bool(LETTER_RE.search(t)) and not is_transition(t) \
-        and heading_candidate(t) is None
+    return bool(t) and len(t) <= CUE_MAX and bool(LETTER_RE.search(t)) \
+        and (not is_transition(t) or bool(PERSON_MARK.fullmatch(t))) and heading_candidate(t) is None
 
 
 ABBREVIATION = re.compile(r"(?<![A-Za-z])[A-Za-z](?:\.[A-Za-z])+\.?(?![A-Za-z.])")      # D.J, P.D., M.C
@@ -735,8 +754,9 @@ def _assemble(rows: list[dict], right: float | None = None, looks: list | None =
             if i in heads:
                 h = heads[i]
                 item = {"type": "heading", "text": text, "number": h["number"], "place": h["place"], "time": h["time"]}
-            elif is_transition(text):
-                item = {"type": "transition", "text": text}
+            elif is_transition(text) and not (PERSON_MARK.fullmatch(text) and i + 1 < len(rows)
+                                              and rows[i + 1]["col"] == "dialogue" and rows[i + 1]["cue"] is None):
+                item = {"type": "transition", "text": text}      # (와이프 above its dialogue is a name line)
             elif ONSCREEN.fullmatch(text):
                 item = {"type": "onscreen", "text": text}
             elif r["col"] == "left" and not (SLUG.fullmatch(text) and r.get("bold")):       # a bold "- 강가"

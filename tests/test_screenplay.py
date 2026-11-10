@@ -144,6 +144,27 @@ def test_pdf_lines_and_document_from_a_made_up_pdf(tmp_path):
     assert doc["source"]["size"] == f.stat().st_size and len(doc["source"]["sha1"]) == 40
 
 
+def test_dots_set_close_together_are_kept_a_glyph_drawn_twice_is_not(tmp_path):
+    # Helvetica's dot is 2.78 wide at size 10: three dots a step of 1.5 apart (closer than 0.2 em)
+    # are an ellipsis; an N drawn again 0.3 to the side is a faked bold N
+    dots = "".join(_t("F1", 10, 179.5 + 1.5 * k, 700, ".") for k in range(3))
+    two = "".join(_t("F1", 10, 179.5 + 1.5 * k, 680, ".") for k in range(2))
+    bold = _t("F1", 10, 160, 660, "N") + _t("F1", 10, 160.3, 660, "N") + _t("F1", 10, 167.5, 660, "o")
+    page = (_t("F2", 12, 72, 760, "1. ROOM / DAY")
+            + _t("F2", 10, 72, 700, "MINA") + _t("F1", 10, 160, 700, "Well") + dots
+            + _t("F2", 10, 72, 680, "JUNO") + _t("F1", 10, 160, 680, "Sure") + two
+            + _t("F2", 10, 72, 660, "MINA") + bold)
+    f = tmp_path / "dots.pdf"
+    f.write_bytes(_pdf([page]))
+    doc = script.read(f)
+    assert [(ln["speaker"], ln["raw"]) for ln in doc["lines"]] == [("MINA", "Well..."), ("JUNO", "Sure.."), ("MINA", "No")]
+    dot = {"x0": 10.0, "x1": 12.18, "y": 500.0, "text": ".", "size": 9.74, "bold": False}     # 9.74 pt, 2.18 wide
+    assert not sp._drawn_twice(dot, {**dot, "x0": 11.5, "x1": 13.68})
+    assert sp._drawn_twice(dot, {**dot, "x0": 10.5, "x1": 12.68})
+    wide = glyphs("굵", 70, 500)[0]
+    assert sp._drawn_twice(wide, {**wide, "x0": 70.4, "x1": 80.4})
+
+
 def test_pdf_without_text_is_refused(tmp_path):
     f = tmp_path / "scan.pdf"
     f.write_bytes(_pdf([""]))
@@ -293,6 +314,25 @@ def test_a_name_line_above_its_dialogue_column():
     assert (items[-1]["type"], items[-1]["cue"], items[-1]["text"]) == ("dialogue", "낯선 사람", "여기가 그 다방입니까?")
 
 
+def test_a_speaker_called_wife_is_no_wipe():
+    # 와이프 is also the Korean spelling of WIPE: as a speaker cell it is a person
+    assert sp.cue_like("와이프") and sp.cue_like("(와이프)") and sp.name_like("와이프")
+    assert sp.is_transition("와이프") and sp.is_transition("(와이프)") and sp.is_transition("WIPE")
+    rows = ["1. 집 / 낮", "", "남편이 신발을 신는다.", "", "와이프\t어디 가?", "남편\t회사.", "와이프\t일찍 와.", "남편\t응.",
+            "", "(와이프)"]
+    doc = script.read_rows(rows)
+    assert doc["format"] == "screenplay"
+    assert [(ln["speaker"], ln["text"]) for ln in doc["lines"]] == [
+        ("와이프", "어디 가?"), ("남편", "회사."), ("와이프", "일찍 와."), ("남편", "응.")]
+    assert doc["elements"][-1]["type"] == "transition"                 # alone on its line it still is the mark
+    lines = [L(1, 50, 60, "현관."), L(1, 70, 60, "와이프"), L(1, 70, 200, "다녀와."), L(1, 90, 60, "남편"), L(1, 90, 200, "응."),
+             L(1, 110, 60, "와이프"), L(1, 110, 200, "우산."), L(1, 130, 60, "와이프"), L(1, 146, 200, "챙겨 가.")]
+    items = sp.classify_positioned(lines)
+    assert [(it["type"], it.get("cue"), it["text"]) for it in items] == [
+        ("action", None, "현관."), ("dialogue", "와이프", "다녀와."), ("dialogue", "남편", "응."),
+        ("dialogue", "와이프", "우산."), ("dialogue", "와이프", "챙겨 가.")]
+
+
 # ----------------------------------------------------------------- text lines
 TAB_SCRIPT = [
     "포구 / 밤", "", "배가 들어온다.", "뱃고동이 길게 울린다.", "",
@@ -398,6 +438,11 @@ def test_headings():
     assert cand("집 앞 / 버스 (맨 뒷자리) 번갈아 / 밤 / 비") == {"number": None, "place": "집 앞 / 버스 (맨 뒷자리) 번갈아", "time": "밤 / 비",
                                                     "kind": "slug", "text": "집 앞 / 버스 (맨 뒷자리) 번갈아 / 밤 / 비"}
     assert cand("40.2층 복도")["place"] == "2층 복도" and cand("7. 찻집.")["place"] == "찻집"
+    # a word that describes the time comes with it (짙은 새벽, 밝은 새벽, 어두운 밤, 어스름)
+    for when in ("짙은 새벽", "밝은 새벽", "이른 아침", "어두운 밤", "희뿌연 새벽", "어스름", "어스름한 저녁"):
+        c = cand(f"국도 / {when}")
+        assert (c["kind"], c["place"], c["time"]) == ("slug", "국도", when), when
+    assert cand("국도 / 밤길") is None and cand("가자 / 우리 밤") is None
     for not_heading in ("그는 말이 없다.", "1999년 3월", "밥 / 국 / 김치", "(지나가며) 뭐야 / 밤", "3. 정말이야?", ""):
         assert cand(not_heading) is None
     # numbered lines are scenes only as a run of rising numbers; of two candidates the later one
@@ -407,6 +452,7 @@ def test_headings():
     # place / time lines count where scenes are not numbered
     slugs = [(i, cand(t)) for i, t in enumerate(["포구 / 밤", "선창가 / 낮"])]
     assert sorted(sp.accept_headings(slugs)) == [0, 1]
+    assert sorted(sp.accept_headings([(0, cand("포구 / 밤")), (5, cand("국도 / 짙은 새벽")), (9, cand("국도 / 밝은 새벽"))])) == [0, 5, 9]
     assert sorted(sp.accept_headings(cands + [(9, cand("포구 / 밤"))])) == [2, 3, 4]
 
 
