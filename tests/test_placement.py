@@ -283,6 +283,30 @@ def test_two_short_lines_of_different_speakers_share_a_hyphen_cell():
     assert len(run(longer)["cells"]) == 2                              # second line is not short
 
 
+def test_two_nameless_turns_of_a_subtitle_script_share_a_hyphen_cell_without_labels():
+    # 5th round: a subtitle script's "- " cell without names comes as two lines whose person is
+    # "#" + the turn (state.placement_inputs); two people, and the "#…" is never shown
+    from cboe import check
+    lines = [L("L1", "뭐라고?", 10.0, 10.2, person="#1-1", turn="1-1"),
+             L("L2", "아니야", 10.45, 10.6, person="#1-2", turn="1-2"),
+             L("L3", "그래 가자", 11.1, 12.0, person="#2", turn="2")]
+    for ls in (lines, [dict(x, show_name=True) for x in lines]):      # nothing to show without a name
+        d = run(ls)
+        c = one(d, "L1")
+        assert c["refs"] == ["L1", "L2"] and c["lines"] == ["- 뭐라고?", "- 아니야"]
+        assert c["check"]["violations"] == [] and c["flags"] == []
+        assert [x["lines"] for x in d["cells"]] == [["- 뭐라고?", "- 아니야"], ["그래 가자"]]
+        assert not any("#" in t or "[" in t for x in d["cells"] for t in x["lines"])
+        assert [v for v in check.run(d)["violations"] if v["level"] == "must"] == []
+    one_person = [lines[0], dict(lines[1], person="#1-1"), lines[2]]  # one turn twice: no hyphen cell
+    assert [x["refs"] for x in run(one_person)["cells"]] == [["L1"], ["L2"], ["L3"]]
+    # lines that overlap: ① of the untangling makes the same hyphen cell
+    a = L("L1", "오늘은 어디 갔었어?", 10.0, 11.6, person="#1-1")
+    b = L("L2", "그냥 집에 있었어", 10.5, 12.0, person="#1-2")
+    c = one(run([a, b]), "L1")
+    assert c["lines"] == ["- 오늘은 어디 갔었어?", "- 그냥 집에 있었어"] and c["check"]["violations"] == []
+
+
 # --------------------------------------------------------------------------- sound timing (memo 5.2)
 
 @pytest.mark.parametrize("phrase, u, seconds", [("[책 떨어지는 소리]", 9, 1.64), ("[쿵, 책 떨어지는 소리]", 11, 1.79)])
@@ -1075,6 +1099,38 @@ def test_a_heard_line_cut_by_the_writer_gets_its_pieces_laid_out_or_a_note():
     cs = cells_of(run([ln, tight]), "L1")
     short = [c for c in cs if nframes(c["start"], c["end"]) < MIN_F]
     assert short and all("작가가 정한 끊을 자리로 나눈 칸이 5/6초가 안 됨" in c["check"]["notes"][0] for c in short)
+
+
+def test_a_later_piece_of_a_heard_line_comes_before_its_words_rather_than_under_five_sixths():
+    # 4th round check: laid out again, the last piece starts before its own word. Kept on purpose
+    # (5th round, module doc): 5/6 s (General Requirements 1, must) before the in-time on the first
+    # frame of audio (TG 1, should); holding every piece behind its words left more cells under
+    # 5/6 s than it moved pieces. The first piece never starts before the line's first word
+    words = [{"w": "가나", "s": 10.0, "e": 10.1}, {"w": "다라", "s": 10.1, "e": 10.2}, {"w": "마바", "s": 12.5, "e": 12.6}]
+    ln = L("L1", "가나 다라 마바", 10.0, 12.6, words=words, timing="asr", breaks=[1, 2])
+    cs = cells_of(run([ln, L("L2", "그래 알았어", 13.0, 14.0, timing="asr")]), "L1")
+    assert [c["lines"] for c in cs] == [["가나"], ["다라"], ["마바"]]
+    assert all(nframes(c["start"], c["end"]) >= MIN_F and not c["flags"] and not c["check"]["violations"] for c in cs)
+    assert F(cs[0]["start"]) == F(10.0)
+    assert F(cs[1]["start"]) - F(cs[0]["start"]) >= MIN_F + 2      # each after the one before has had 5/6 s
+    assert F(cs[2]["start"]) == F(13.0) - 2 - MIN_F < F(12.5)       # as late as 5/6 s allows: before its word
+
+
+def test_every_group_of_short_pieces_of_a_heard_line_says_why():
+    # 4th round check: the writer's cut points left short pieces in two groups of one line (another
+    # line's cell between them); only the first group said so in check.notes
+    words = [{"w": "가자", "s": 10.0, "e": 10.1}, {"w": "어서", "s": 10.4, "e": 10.5},
+             {"w": "빨리", "s": 12.0, "e": 12.5}, {"w": "와", "s": 12.5, "e": 13.0}]
+    x = L("L1", "가자 어서 빨리 와", 10.0, 13.0, words=words, timing="asr", person="하늘", breaks=[1, 2])
+    y = L("L2", "응 그래", 10.2, 10.35, timing="asr", person="바다")
+    z = L("L3", "뭐", 10.6, 10.7, timing="asr", person="구름")
+    d = run([x, y, z])
+    assert [c["refs"] for c in d["cells"]] == [["L1"], ["L2"], ["L1"], ["L3"], ["L1"]]
+    short = [c for c in cells_of(d, "L1") if nframes(c["start"], c["end"]) < MIN_F]
+    assert [c["lines"] for c in short] == [["가자"], ["어서"]]
+    assert all("5/6초 미만" in c["check"]["violations"] for c in short)
+    assert all(any("작가가 정한 끊을 자리로 나눈 칸이 5/6초가 안 됨" in n for n in c["check"].get("notes") or ())
+               for c in short)
 
 
 def test_dialogue_after_a_cut_starts_on_it_when_the_cell_before_ends_two_frames_before():

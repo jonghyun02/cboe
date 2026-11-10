@@ -11,7 +11,9 @@ lines  : DialogueLine dicts (id, speaker, text, start, end, words[{w,s,e}]) plus
          ``timing`` ("asr" | "script" | "voice" | "even"), ``status`` ("absent" and "out_of_range"
          lines have no time and are skipped; "unheard" = time is a guess) and ``pos`` ("top"),
          ``scene_id`` (the script scene), ``person`` (who speaks: two lines of one person never
-         share a hyphen cell, whatever label they show; default ``name`` or ``speaker``),
+         share a hyphen cell, whatever label they show; default ``name`` or ``speaker``; a line of
+         a subtitle script with no name has "#" + its turn, "#1-1" and "#1-2" for the two "- "
+         lines of one cell: two people, and the "#…" is never shown),
          ``breaks`` (the writer's cuts: eojeol numbers 1..n-1 a new cell starts at) and ``keep``
          (the writer's "one cell": no sound splits it; ignored, and said in ``check.notes``, when
          the line does not fit one cell).
@@ -74,8 +76,14 @@ A cell from a line whose time is a guess carries "timing_estimated" (so does a c
 onset is a guess); a cell shorter than a quarter of a second carries "flash", so that it never goes
 out unnoticed. A line with a piece left less than 5/6 s is laid out again inside the gap between
 the cells of the other lines around it (its pieces in order, each with its reading time when the
-gap holds that, else 5/6 s; a heard line from the in-time of its first piece on, its pieces up to
-a moment after their words). When the gap cannot hold its pieces, a guessed line (not one matched
+gap holds that, else 5/6 s; a heard line from the in-time of its first piece on, never earlier).
+A later piece of a heard line may then come after its words, and also before them when the pieces
+after it need the room (each still after the piece before it has had its time): 5/6 s (General
+Requirements 1, a must for the checker) comes before the in-time "on the first frame of audio or as
+close to it as possible" (TG 1, should: 첫 소리 프레임에, 안 되면 될 수 있는 대로 가깝게), as in
+the scene rule below. Keeping every piece behind its words was measured in the 5th round: per 1000
+made-up scenes 143 pieces start early (in 127 groups), and holding them back gave 156 more cells
+under 5/6 s and 30 more flashes. When the gap cannot hold its pieces, a guessed line (not one matched
 by the ASR) gets no cell and goes to ``no_room`` (the writer decides: a guessed line is no reason
 to show a few frames of text, 감사 2-m1); a heard line keeps its cells, and when the writer's cut
 points made them that short, the short cell says so in ``check.notes``.
@@ -735,9 +743,11 @@ def _guess_only(c: _Cell) -> bool:
 
 
 def _lay_out(run: list[_Cell], lo: int, hi, P: _P):
-    """In-times for the pieces ``run`` of one guessed line inside lo..hi, in order, each as near its
-    guessed time as it can be: every piece gets its reading time when the gap holds that, else at
-    least 5/6 s; with 2 frames between them. (starts, lengths) or None when the gap is too short."""
+    """In-times for the pieces ``run`` of one line inside lo..hi, in order, each as near its time as
+    it can be: every piece gets its reading time when the gap holds that, else at least 5/6 s; with
+    2 frames between them. A piece is moved earlier than its time when the pieces after it need the
+    room (a heard line: before its own words, module doc). (starts, lengths) or None when the gap
+    is too short."""
     for need in (lambda x: max(P.min_f, P.need(x.units)), lambda x: P.min_f):
         r = [need(x) for x in run]
         rest = sum(r) + (len(run) - 1) * P.gap
@@ -757,20 +767,21 @@ def _make_room(cells: list[_Cell], P: _P, w0: int, w1) -> tuple[list[dict], bool
     """A line with a piece left under 5/6 s (module doc): the pieces of the line that sit together
     between two cells of other lines are laid out again inside that gap (``_lay_out``; the cell
     before may shrink to its floor). A heard line (timing asr) is laid out from the in-time of its
-    first piece on, never earlier, and its words keep their times (a piece may come up to a
-    moment after its words: a cell of a few frames cannot be read at all, 4th review). When the
+    first piece on, never earlier, and its words keep their times; a later piece may come after
+    its words or, when the pieces after it need the room, before them (a cell of a few frames
+    cannot be read at all, 4th review; 5/6 s before TG 1, module doc). When the
     gap cannot hold the pieces, a guessed line gets no cell at all (``no_room`` entries, with the
     gap between the other lines); a heard line keeps its cells, and when the writer's cut points
     made them that short, the short cells say so in ``check.notes``. Returns (no_room entries,
     whether a cell moved); ends are set again by the caller."""
     dropped, moved = [], False
     _sorted(cells)
-    kept: set = set()                                # heard lines that cannot be helped
+    kept: set = set()                                # pieces (seq) of heard lines that cannot be helped
     i = 0
     while i < len(cells):
         c = cells[i]
         lid = _line_of(c)
-        if c.end - c.start >= P.min_f or lid is None or lid in kept:
+        if c.end - c.start >= P.min_f or lid is None or c.seq in kept:
             i += 1
             continue
 
@@ -812,8 +823,8 @@ def _make_room(cells: list[_Cell], P: _P, w0: int, w1) -> tuple[list[dict], bool
         gap = max(0, hi - lo) / P.fps
         want = (k * P.min_f + (k - 1) * P.gap) / P.fps
         if not guess:
-            kept.add(lid)
-            if c.parts[0].get("breaks"):
+            kept.update(x.seq for x in run)          # this group only: a later group of the line is seen
+            if c.parts[0].get("breaks"):             # on its own (after a cell of another line)
                 note = (f"작가가 정한 끊을 자리로 나눈 칸이 {P.min_text}초가 안 됨 · 이 줄의 칸 {k}개에 "
                         f"빈틈 {gap:.2f}초 (칸마다 {P.min_text}초면 {want:.2f}초 필요)")
                 for x in run:
