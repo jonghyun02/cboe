@@ -158,11 +158,50 @@ def test_tidy_lines_drops_what_becomes_empty():
 
 # --------------------------------------------------------------------------- older work folders
 
+def test_no_line_break_next_to_a_music_note():
+    from cboe import textutil
+    tidy = style.tidy_line
+    # II.7 '[영수/쉰 목소리] ♪ 기억하렴': the note stays on the line of its lyric. The only break that
+    # fits two lines here is right after the opening note, so the text does not fit (placement splits)
+    text = "[세바스찬/영어] ♪ 기다리고있었죠 하루 종일토록 ♪"
+    assert textutil.units(text[text.index("♪") + 2:]) == 15.5         # the lyric after the note would fit
+    assert not textutil.fits(text, tidy=tidy) and not textutil.fits(text)
+    lines = textutil.wrap(text, tidy=tidy)                              # what is left when nothing else fits
+    assert lines == ["[세바스찬/영어] ♪", "기다리고있었죠 하루 종일토록 ♪"] and textutil.note_left_alone(lines)
+    assert textutil.note_left_alone(["♪ 가나다라", "♪"]) and textutil.note_left_alone(["♪", "가나 ♪"])
+    assert not textutil.note_left_alone(["[영희]", "♪ 가나 ♪"]) and not textutil.note_left_alone(["♪ 가 ♪", "♪ 나 ♪"])
+    # a break inside the lyric is fine, and a note never stands alone at either end
+    assert textutil.wrap("♪ 가나다라마바사 아자차카타파하 ♪", tidy=tidy) == ["♪ 가나다라마바사", "아자차카타파하 ♪"]
+    assert textutil.wrap("[영희] ♪ 가나다라마바사아자차 ♪", tidy=tidy) == ["[영희]", "♪ 가나다라마바사아자차 ♪"]
+    assert textutil.fits("[영희] ♪ 가나다라마바사아자차 ♪")
+
+
+def test_fits_judges_the_displayed_width():
+    from cboe import textutil
+    tidy = style.tidy_line
+    # tidying puts a space in front of a closing note: '가…가♪' (16) is shown '가…가 ♪' (16.5)
+    line = "가" * 15 + "♪"
+    assert textutil.units(line) == 16 and textutil.units(tidy(line)) == 16.5
+    assert textutil.fits(line) and not textutil.fits(line, tidy=tidy)
+    text = "마다타카 아사 타차나다차라아 타파나아라 다카 타 마차아하1♪"
+    for x in textutil.wrap(text, tidy=tidy):
+        assert textutil.units(x) <= 16 or not textutil.fits(text, tidy=tidy)
+    # and it still takes the narrowing: a period at the end is not shown
+    assert textutil.wrap("가" * 16 + ".", tidy=tidy) == ["가" * 16] and textutil.fits("가" * 16 + ".", tidy=tidy)
+
+
 def test_modernize_old_notation():
     assert style.modernize_phrase("♬ 무서운 음악") == "[무서운 음악]"
     assert style.modernize_phrase("♬ 고조되는 무서운 음악") == "[고조되는 무서운 음악]"
     assert style.modernize_phrase("♬") == style.modernize_phrase("♬ 음악") == "[음악]"
     assert style.modernize_phrase("♬ [무서운 음악]") == "[무서운 음악]"
+    # a note at both ends, two in front, one at the end: none is left inside the brackets
+    assert style.modernize_phrase("♬ 무서운 음악 ♬") == style.modernize_phrase("♫ 무서운 음악") == "[무서운 음악]"
+    assert style.modernize_phrase("♬♬ 음악") == style.modernize_phrase("♬ ♬") == "[음악]"
+    assert style.modernize_phrase("잔잔한 음악 ♩") == "[잔잔한 음악]"
+    assert style.modernize_line("- ♬ 슬픈 음악 ♬") == "- [슬픈 음악]"
+    for old in ("♬ 무서운 음악 ♬", "♬♬ 음악", "♫ 빠른 ♬ 음악 ♩"):
+        assert not set(style.modernize_phrase(old)) & set(style.OLD_NOTES), old
     for same in ("[쿵]", "[쿵, 책 떨어지는 소리]", "[무서운 음악]", "♪ 가사 ♪", "(웃음)", ""):
         assert style.modernize_phrase(same) == same           # only the old music mark is rewritten
     assert style.modernize_phrase(None) == ""

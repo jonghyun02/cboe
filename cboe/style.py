@@ -286,15 +286,19 @@ def tidy_lines(lines) -> list[str]:
 # --------------------------------------------------------------------------- older work folders
 
 _OLD_MUSIC = re.compile(rf"^\s*[{OLD_NOTES}]\s*(.*?)\s*$")
+_OLD_PHRASE = re.compile(rf"^\s*[{OLD_NOTES}]|[{OLD_NOTES}]\s*$")
+_OLD_NOTE = re.compile(rf"[{OLD_NOTES}]")
 _OLD_NAME = re.compile(r"^(-\s*)?\(([^()]{1,30})\)(\s+\S.*)$")
 
 
 def modernize_phrase(text) -> str:
-    """A sound phrase stored by an older version, in today's notation: '♬ 무서운 음악' ->
-    '[무서운 음악]', '♬' -> '[음악]'. Anything else comes back as it is (white space collapsed)."""
+    """A sound phrase stored by an older version, in today's notation: '♬ 무서운 음악' and
+    '♬ 무서운 음악 ♬' -> '[무서운 음악]', '♬' -> '[음악]' (no ♬ ♫ ♩ is left, at the ends or inside:
+    the guide has none). Anything else comes back as it is (white space collapsed)."""
     s = _norm(text)
-    m = _OLD_MUSIC.match(s)
-    return (bracket(m.group(1)) or bracket(MUSIC)) if m else s
+    if not _OLD_PHRASE.search(s):
+        return s
+    return bracket(_OLD_NOTE.sub(" ", s)) or bracket(MUSIC)
 
 
 def modernize_line(line) -> str:

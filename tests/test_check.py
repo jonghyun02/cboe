@@ -10,6 +10,7 @@ the checker is written down, not hidden.
 """
 import ast
 import json
+import re
 from pathlib import Path
 
 import pytest
@@ -601,6 +602,36 @@ def test_placement_and_checker_agree_on_random_scenes():
         assert all(v["code"] == "min_duration" for v in res["violations"] if v.get("flash"))
         flash += len(marked)
     assert flash                                                             # (the scenes do produce some)
+
+
+@pytest.mark.parametrize("name, extra", [("세바스찬", []), ("영희/철수", []), ("빌", ["전화"])])
+def test_a_sung_line_under_a_long_label_keeps_each_note_by_its_lyric(name, extra):
+    # the label leaves room for the lyric only on the next line: the note may not stay behind on the
+    # label's line (II.7 "Add a space between the music note and the preceding or subsequent text")
+    ln = {"id": "L1", "text": "기다리고있었죠 하루 종일토록", "start": 10.0, "end": 14.0, "words": [],
+          "name": name, "show_name": True, "language": "영어", "sung": True, "label_extra": extra}
+    d = place([ln], [], [], 24.0)
+    res = check.run(d)
+    assert not [v for v in res["violations"] if v["code"] in ("lyric_notes", "line_length", "line_count")], (
+        [c["lines"] for c in d["cells"]], res["violations"])
+    for c in d["cells"]:
+        assert all(x.rstrip() != "♪" and not re.search(r"\]\s*♪$", x) for x in c["lines"]), c["lines"]
+        assert "♪ " in c["lines"][0] or "♪ " in c["lines"][-1]
+
+
+def test_sung_lines_with_labels_never_break_the_lyric_form():
+    import random
+    rnd = random.Random(11)
+    syll = "가나다라마바사아자차카타파하"
+    for _ in range(300):
+        text = " ".join("".join(rnd.choice(syll) for _ in range(rnd.randint(1, 9))) for _ in range(rnd.randint(1, 6)))
+        ln = {"id": "L1", "text": text, "start": 10.0, "end": 10.0 + rnd.uniform(1.0, 9.0), "words": [],
+              "name": rnd.choice(["세바스찬", "영희/철수", "가나다라마바", "빌"]), "show_name": rnd.random() < 0.8,
+              "language": rnd.choice([None, "영어", "프랑스어"]), "sung": True,
+              "label_extra": rnd.choice([[], ["전화"], ["속마음"]])}
+        d = place([ln], [], [], 24.0)
+        found = [v for v in check.run(d)["violations"] if v["code"] in ("lyric_notes", "line_length", "line_count")]
+        assert not found, (text, [c["lines"] for c in d["cells"]], found)
 
 
 def test_placement_output_breaks_no_notation_rule():

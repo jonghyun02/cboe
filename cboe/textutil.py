@@ -13,7 +13,8 @@ The limits (16 units, 2 lines) and the notation come from ``cboe.style``.
               after punctuation (General Requirements 4 "after punctuation marks"; a sentence end
               more than a comma), a slightly bottom-heavy shape (I.11), no break inside ( ) or
               [ ] (a speaker label or a sound label) and none between a ♪ and the lyric next to
-              it. Korean particles and endings are written
+              it (taken only when nothing else fits; ``fits`` then says no, II.7). Korean
+              particles and endings are written
               without a space, so a space break never separates a noun from its particle; Kiwi
               adds the General Requirements 4 "should not separate" cases that a space does
               separate: a determiner from its noun (관형사 MM, "무슨 | 그림자"), an adnominal from
@@ -29,7 +30,8 @@ The limits (16 units, 2 lines) and the notation come from ``cboe.style``.
               ``style.tidy_line``) the lines come back as they are displayed and it is the
               displayed width that has to fit; where to break is still scored on the text as
               written, so a sentence end stays a preferred place although its period is not shown.
-``fits(x)``   whether a text (or a list of lines) stays within the line and line-count limits.
+``fits(x)``   whether a text (or a list of lines) stays within the line and line-count limits; for a
+              text, as displayed (``tidy``) and with no music note cut off from its lyric.
 """
 from __future__ import annotations
 
@@ -95,10 +97,16 @@ def end_bonus(piece: str) -> float:
     return 0.0
 
 
+BY_NOTE = 100.0      # the cost of a break next to a music note: only when nothing else is left
+
+
 def _spaces(text: str) -> list[tuple[int, float]]:
     """Positions of the spaces of ``text`` and the extra cost of a break there: 4 inside ( ) or
-    [ ] (a label stays whole when it can), 100 between a music note and the lyric next to it
-    (II.7: the note belongs to the text; only when no other break fits)."""
+    [ ] (a label stays whole when it can), ``BY_NOTE`` between a music note and the lyric next to
+    it (II.7 "Add a space between the music note and the preceding or subsequent text" = 음표와
+    앞뒤 글 사이에 빈칸: the note stays on the line of its lyric, '[영수] ♪ 기억하렴'). ``wrap`` takes
+    such a break only when no other one fits (one long word between the notes); ``fits`` never
+    counts a layout with one as fitting, so placement splits that text instead."""
     out, depth = [], 0
     for i, ch in enumerate(text):
         if ch in "([":
@@ -108,8 +116,22 @@ def _spaces(text: str) -> list[tuple[int, float]]:
         elif ch == " ":
             # after the opening note or before the closing one: an odd number of notes so far
             by_note = style.NOTE in (text[i - 1:i], text[i + 1:i + 2]) and text.count(style.NOTE, 0, i) % 2 == 1
-            out.append((i, 100.0 if by_note else 4.0 if depth > 0 else 0.0))
+            out.append((i, BY_NOTE if by_note else 4.0 if depth > 0 else 0.0))
     return out
+
+
+def note_left_alone(lines) -> bool:
+    """Whether a line break of ``lines`` is next to a music note: an opening note at the end of a
+    line, or a closing note at the start of the next one ('[세바스찬/영어] ♪' / '가사 ♪')."""
+    seen = 0
+    for k, line in enumerate(lines):
+        s = str(line).strip()
+        if k and s.startswith(style.NOTE) and seen % 2 == 1:
+            return True                              # the closing note went down to this line
+        seen += s.count(style.NOTE)
+        if k + 1 < len(lines) and s.endswith(style.NOTE) and seen % 2 == 1:
+            return True                              # the opening note stayed up on this line
+    return False
 
 
 # --------------------------------------------------------------------------- Kiwi hints
@@ -261,9 +283,11 @@ def fits(text, max_units: float = style.MAX_UNITS, max_lines: int = style.MAX_LI
 
     if not isinstance(text, str):
         return within([str(x) for x in text])
-    if within(wrap(text, max_units, max_lines, kiwi=False)):
-        return True                                  # a displayed line is never wider than the written one
-    return tidy is not None and within(wrap(text, max_units, max_lines, kiwi=False, tidy=tidy))
+    # the displayed lines decide: tidying mostly narrows a line, but it can widen one ('가자♪'
+    # is shown '가자 ♪'), so the written width is no shortcut. A layout that leaves a note on
+    # the other side of the break from its lyric does not fit (II.7, ``_spaces``)
+    lines = wrap(text, max_units, max_lines, kiwi=False, tidy=tidy)
+    return within(lines) and not note_left_alone(lines)
 
 
 def line_units(lines) -> list[float]:
