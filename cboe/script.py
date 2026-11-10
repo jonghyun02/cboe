@@ -314,6 +314,11 @@ def _secs(h, m, s, ms) -> float:
     return int(h) * 3600 + int(m) * 60 + int(s) + int(ms) / (10 ** len(ms))
 
 
+def _same_name(a: str | None, b: str | None) -> bool:
+    """Two spellings of one name (spaces do not count)."""
+    return bool(a) and bool(b) and re.sub(r"\s+", "", a) == re.sub(r"\s+", "", b)
+
+
 def _label(text: str, cue: dict) -> bool:
     """Read a speaker label of a subtitle (``피터/영어``, ``영희/속마음``, ``영어``) into
     ``cue``. False when it is a sound label (``달칵 - 문``, ``문이 열린다``) and names nobody."""
@@ -332,6 +337,8 @@ def _label(text: str, cue: dict) -> bool:
             cue["sung"] = True
         elif cue["name"] is None and kind in ("action", "to"):
             cue.update(name=sp.parse_cue(part)["name"], raw=part)
+        elif kind in ("action", "to") and _same_name(sp.parse_cue(part)["name"], cue["name"]):
+            continue                                  # the speaker named again ('[나래] [웃음]' / '[나래] …'): no delivery
         else:
             cue["delivery" if kind != "vocal" else "vocal"].append(part)
     return True
@@ -484,24 +491,43 @@ def _read_subtitle(path: Path) -> dict:
     (``- [미나] …`` / ``- [준호] …``) are two lines with the time of the cell. Such lines carry
     ``turn`` "<cell>-<speaker>" (1-based): the hyphen says they are two speakers even when no
     name is written (``- 누구야?`` / ``- 나야``), and the speaker stays None. A speaker's own sound
-    written alone after the label (``[미나] [웃음]``) goes to that speaker's words in the cell."""
+    written alone after the label (``[미나] [웃음]``) goes to that speaker's words in the cell; with
+    no words of that speaker in the cell (the cell is only that sound, or the other speaker of a
+    two-speaker cell only laughs) it is kept in ``wordless``: {"id", "speaker", "vocal", "start",
+    "end", "after_line" (the line before it in the file, or None), "raw", and ``turn`` in a cell of
+    two speakers} — a speaker's own sound (``cboe.cues``), not a line."""
     b = sp.Builder("timed")
     cells = _subtitle_cells(path)
     known = _labelled_names(cells)
+    wordless: list[dict] = []
     for n, (start, end, shown) in enumerate(cells, 1):
         groups = _speaker_rows(shown)
+        read = [_subtitle_line(rows, known) for rows in groups]
         mine: list[dict] = []
-        for g, rows in enumerate(groups, 1):
-            cue, texts = _subtitle_line(rows, known)
+        for g, (cue, texts) in enumerate(read, 1):
             if texts:
                 extra = {"turn": f"{n}-{g}"} if len(groups) > 1 else {}
                 mine.append(b.line(cue, _clean(" ".join(texts)), start=start, end=end, **extra))
-            elif cue["vocal"] and cue["name"]:
-                who = re.sub(r"\s+", "", cue["name"])
-                to = next((ln for ln in reversed(mine) if re.sub(r"\s+", "", ln["speaker"] or "") == who), None)
-                if to is not None:
-                    to["vocal"].extend(v for v in cue["vocal"] if v not in to["vocal"])
-    return b.document()
+        for g, ((cue, texts), rows) in enumerate(zip(read, groups), 1):
+            if texts or not (cue["vocal"] and cue["name"]):
+                continue
+            to = next((ln for ln in mine if _same_name(ln["speaker"], cue["name"])), None)
+            if to is not None:
+                to["vocal"].extend(v for v in cue["vocal"] if v not in to["vocal"])
+                continue
+            w = {"id": f"W{len(wordless) + 1:04d}", "speaker": cue["name"], "vocal": list(cue["vocal"]),
+                 "start": start, "end": end, "after_line": b.lines[-1]["id"] if b.lines else None,
+                 "raw": _clean(" ".join(r for r in rows if r))}
+            if len(groups) > 1:
+                w["turn"] = f"{n}-{g}"
+            wordless.append(w)
+    doc = b.document()
+    if wordless:
+        names = {re.sub(r"\s+", "", p["name"]): p["name"] for p in doc["people"]}
+        for w in wordless:                            # the spelling the lines use
+            w["speaker"] = names.get(re.sub(r"\s+", "", w["speaker"]), w["speaker"])
+        doc["wordless"] = wordless
+    return doc
 
 
 # ------------------------------------------------------------------------ read

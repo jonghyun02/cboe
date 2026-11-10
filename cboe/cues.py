@@ -699,7 +699,8 @@ def extract(doc: dict) -> list[dict]:
     keys (``offscreen``; ``songs``·``diegetic``·``source``·``continues``; ``music_stop``)}.
     ``after_line`` / ``before_line``: the dialogue lines of the same scene right before and after
     it (a speaker's own sound: its line). A script without elements (``format`` lines) gives the
-    speakers' own sounds of its lines only."""
+    speakers' own sounds of its lines only, and of the subtitle cells that are only such a sound
+    (``wordless``: line_id None, ``at`` = the cell's [start, end], after the line before it)."""
     doc = doc or {}
     elements = doc.get("elements") or []
     lines = doc.get("lines") or []
@@ -710,12 +711,27 @@ def extract(doc: dict) -> list[dict]:
         out.append({"id": "", "type": kind, **where, **cue})
 
     if not elements:                                   # '이름: 대사' scripts, subtitles, tables
+        # a subtitle cell that is only a speaker's own sound (script ``wordless``): after its line
+        alone: dict[str | None, list[dict]] = {}
+        for w in doc.get("wordless") or []:
+            alone.setdefault(w.get("after_line"), []).append(w)
+
+        def add_alone(after):
+            for w in alone.get(after, []):
+                v = vocal_cue(w.get("vocal") or [])
+                if v and w.get("start") is not None and w.get("end") is not None:
+                    add("vocal", v, scene_id=w.get("scene_id"), element_id=None, line_id=None,
+                        speaker=w.get("speaker"), text=w.get("raw") or "", after_line=after, before_line=None,
+                        at=[float(w["start"]), float(w["end"])])
+
+        add_alone(None)
         for ln in lines:
             v = vocal_cue(ln.get("vocal") or [])
             if v:
                 add("vocal", v, scene_id=ln.get("scene_id"), element_id=None, line_id=ln.get("id"),
                     speaker=ln.get("speaker"), text=ln.get("raw") or ln.get("text") or "",
                     after_line=ln.get("id"), before_line=ln.get("id"))
+            add_alone(ln.get("id"))
         return _numbered(out)
     # the dialogue lines of each scene in document order, to find the neighbours of an element
     pos_lines: list[tuple[int, str, str | None]] = []   # (element index, line id, scene id)
@@ -859,7 +875,8 @@ def _far_end(cue: dict) -> int:
 def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None, span=None) -> list[dict]:
     """Add ``window`` [lo, hi] (s) to every cue, or None: from the end of the nearest dialogue
     line before it that has a time to the start of the nearest one after it, in script order.
-    A speaker's own sound: its line.
+    A speaker's own sound: its line; one alone in a subtitle cell (``at``): that cell, inside
+    the processed stretch.
 
     Each end looks in the cue's own scene first ('line'). Without a timed line there, a scene
     edge from scenes.json that lies outside the scene's own lines ends it ('scene': a scene
@@ -974,6 +991,16 @@ def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None, span=No
                 c["window_by"], c["window_out"] = ["line", "line"], [False, False]
                 c["window_lines"] = [c["line_id"], c["line_id"]]
                 c["window_estimated"] = _estimated(ln)
+            continue
+        if c["type"] == "vocal" and c.get("at"):        # a subtitle cell of the sound alone: its own time
+            a, b = float(c["at"][0]), float(c["at"][1])
+            if edge[0] is not None:
+                a = max(a, float(edge[0]))
+            if edge[1] is not None:
+                b = min(b, float(edge[1]))
+            if b > a:                                  # else out of the processed stretch
+                c["window"] = [round(a, 3), round(b, 3)]
+                c["window_by"], c["window_out"] = ["line", "line"], [False, False]
             continue
         sc = st.get(scene, {})
         if scene is None or sc.get("status") in NO_SCENE_TIME or (scene not in own and sc.get("start") is None

@@ -410,6 +410,42 @@ def test_unnamed_hyphen_rows_are_two_speakers_and_a_label_keeps_its_sound(tmp_pa
     assert [(ln["speaker"], ln.get("turn")) for ln in lines[:3]] == [(None, "1-1"), (None, "1-2"), (None, None)]
 
 
+def test_a_speakers_sound_without_words_stays_that_speakers_sound(tmp_path):
+    """A cell of '[이름] [소리]' alone, or a two-speaker cell whose second speaker only laughs:
+    the sound stays that speaker's own sound (a vocal cue at the cell's time), not a line; the
+    speaker's label written again on the row of words is no delivery."""
+    from cboe import cues
+    from cboe.stages import recommend
+    f = tmp_path / "subs.srt"
+    f.write_text("1\n00:00:03,000 --> 00:00:05,000\n[나래] [웃음]\n\n"
+                 "2\n00:00:06,000 --> 00:00:08,000\n- [가람] 됐어.\n- [나래] [웃음]\n\n"
+                 "3\n00:00:09,000 --> 00:00:11,000\n[나래] [웃음]\n[나래] 정말이야?\n\n"
+                 "4\n00:00:12,000 --> 00:00:14,000\n[가람/속삭이며] [한숨]\n[가람] 조용히 해.\n\n"
+                 "5\n00:00:24,000 --> 00:00:26,000\n[가람] [한숨]\n\n"
+                 "6\n00:02:00,000 --> 00:02:02,000\n[나래] [웃음]\n", encoding="utf-8")
+    doc = script.read(f)
+    got = [(ln["speaker"], ln["text"], ln.get("turn"), ln["vocal"], ln["delivery"]) for ln in doc["lines"]]
+    assert got == [("가람", "됐어.", "2-1", [], []), ("나래", "정말이야?", None, ["웃음"], []),
+                   ("가람", "조용히 해.", None, ["한숨"], ["속삭이며"])]
+    alone = [(w["speaker"], w["vocal"], w["start"], w["end"], w["after_line"], w.get("turn")) for w in doc["wordless"]]
+    assert alone == [("나래", ["웃음"], 3.0, 5.0, None, None), ("나래", ["웃음"], 6.0, 8.0, "L0001", "2-2"),
+                     ("가람", ["한숨"], 24.0, 26.0, "L0003", None), ("나래", ["웃음"], 120.0, 122.0, "L0003", None)]
+    # the cues: in the file's order, each at its cell; the last cell is past the processed stretch
+    lines = [dict(ln, status="ok", timing="script", aligned=True) for ln in doc["lines"]]
+    got = cues.build(doc, lines, None, (0.0, 100.0))
+    assert [(c["type"], c["speaker"], c["line_id"], c["phrase"], c["window"]) for c in got] == [
+        ("vocal", "나래", None, "[웃음]", [3.0, 5.0]), ("vocal", "나래", None, "[웃음]", [6.0, 8.0]),
+        ("vocal", "나래", "L0002", "[웃음]", [9.0, 11.0]), ("vocal", "가람", "L0003", "[한숨]", [12.0, 14.0]),
+        ("vocal", "가람", None, "[한숨]", [24.0, 26.0]), ("vocal", "나래", None, "[웃음]", None)]
+    # with nothing heard there, it is a 확인 필요 candidate of the script at the cell
+    it = recommend.script_candidate(got[0])
+    assert it["category"] == "vocal" and it["t0"] == 3.0 and it["phrase"] == "[웃음]" and "source_line" not in it
+    # a subtitle without such cells: no 'wordless'
+    g = tmp_path / "plain.srt"
+    g.write_text("1\n00:00:01,000 --> 00:00:02,000\n[가람] 됐어.\n", encoding="utf-8")
+    assert "wordless" not in script.read(g)
+
+
 def test_a_sound_alone_on_its_row_names_nobody(tmp_path):
     # another writer's subtitle: a sound on the row above the words, without hyphens
     sounds = ["전화벨", "정적", "침묵", "문 열림", "음악 계속", "빵빵", "띵동", "멀리서", "통화 중"]
