@@ -443,6 +443,24 @@ def test_script_stage_on_the_start_screen(tmp_path):
     assert ws.summary("p1")["status"] == "partial"
 
 
+def test_a_folder_analysed_before_the_cues_stage_is_still_analysed(tmp_path):
+    # every stage's file of an older run, but no cues.json (the stage came later): the
+    # recommendation reads the script's cues afresh, so the folder is analysed, not '일부만 분석'
+    ws = Workspace(tmp_path / "ws")
+    work = ws.root / "old"
+    work.mkdir()
+    (work / "project.json").write_text(json.dumps({"title": "old", "video": "", "script": "s.txt", "t0": 0.0,
+                                                   "t1": 10.0}), encoding="utf-8")
+    for stage, rel in studio.KEY_OUTPUT.items():
+        if stage != "cues":
+            (work / rel).parent.mkdir(parents=True, exist_ok=True)
+            (work / rel).write_text("{}", encoding="utf-8")     # draft.json last: not older than the candidates
+    s = ws.summary("old")
+    assert s["status"] == "analysed" and "cues" in s["stages_done"]
+    (work / "items.json").unlink()                         # without the recommendation the cues are not done
+    assert "cues" not in ws.summary("old")["stages_done"]
+
+
 def test_guard_knows_renamed_copies():
     assert guard.limit("renamed.mp4", 3606.57)["title"] == "가즈아 도서관"
     assert guard.limit("renamed.mp4", 3600.0) is None

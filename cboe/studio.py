@@ -28,7 +28,7 @@ from .util import NO_WINDOW, ROOT, log, read_json, write_json
 
 STAGE_LABELS = {
     "ingest": "영상 준비", "script": "대본 읽기", "separate": "음원 분리", "cuts": "장면 나누기", "sed": "소리 검출",
-    "asr": "받아쓰기", "align": "대본 정렬", "sfx": "효과음 후보", "music": "음악 후보",
+    "asr": "받아쓰기", "align": "대본 정렬", "cues": "대본 단서", "sfx": "효과음 후보", "music": "음악 후보",
     "speaker": "화자 근거", "screen": "화면 근거", "dialog_ev": "대사 근거", "recommend": "추천",
     "agent": "재확인 에이전트", "placement": "초안 배치",
 }
@@ -36,7 +36,7 @@ ALL_STAGES = pipeline.STAGES + ["placement"]
 # the file each stage writes last (sed: env.npz after the three score files)
 KEY_OUTPUT = {
     "ingest": "audio/mix_16k.wav", "script": "script.json", "separate": "audio/effects_16k.wav", "cuts": "cuts.json",
-    "sed": "env.npz", "asr": "asr.json", "align": "dialogue.json", "sfx": "sfx.json",
+    "sed": "env.npz", "asr": "asr.json", "align": "dialogue.json", "cues": "cues.json", "sfx": "sfx.json",
     "music": "music.json", "speaker": "speaker.json", "screen": "screen.json", "dialog_ev": "dialog_ev.json",
     "recommend": "items.json", "agent": "agent_done.json", "placement": "draft.json",
 }
@@ -498,7 +498,9 @@ def _finished(work: Path, stage: str) -> bool:
     marked complete only at the end of the stage)."""
     f = work / KEY_OUTPUT[stage]
     if not f.exists():
-        return False
+        # a folder analysed before the cues stage existed: the recommendation (items.json) reads
+        # the script's cues afresh, so nothing is missing
+        return stage == "cues" and (work / KEY_OUTPUT["recommend"]).exists()
     if stage in ("screen", "dialog_ev"):
         return (read_json(f, {}) or {}).get("complete") is not False
     return True
@@ -527,6 +529,8 @@ def _note(stage: str, info: dict) -> str:
         return f"{info['words']}어절"
     if stage == "align" and "lines" in info:
         return f"대사 {info['lines']}줄"
+    if stage == "cues" and "cues" in info:
+        return f"단서 {info['cues']}개 · 시간 창 {info.get('windowed', 0)}개"
     if stage == "cuts" and "cuts" in info:
         return f"장면 전환 {info['cuts']}개"
     if stage == "agent" and "ran" in info:

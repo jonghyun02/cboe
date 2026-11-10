@@ -25,11 +25,35 @@ leans on ('앞 자막에서 이미 알림', '앞 후보를 먼저 정해야 함'
 screen can show them together and re-check them when the writer changes the earlier one.
 ``minor`` on a sound item: found by a level jump alone and nothing speaks for it yet — the screen
 may fold it (감사 4-m3).
+
+대본 단서 (``cboe.cues``, 감사 4-01 · 4-02 · 8-05 · 8-11 · 8-12): a sound, music, silence or a
+speaker's own sound the script writes down, with the window between the aligned lines around it.
+- A detected sound that starts in the window and is of the kind the cue names (or one the
+  detector could not name) gets ``cue_id`` and a '대본' evidence; the script's wording becomes the
+  default caption of an unnamed one (``named_by`` 'script'). One candidate per cue, the likeliest.
+  The cue counts as a reason to include ('대본 지문에 적힌 소리', like a plot hint) — after the
+  rules that exclude (visible, already in the dialogue, told by the caption before), which keep
+  their order. It is evidence only (``cue_reason`` false, ``cues.is_reason``) when it does not
+  say which sound it is (a cue with only a '…소리' description takes no named sound at all),
+  when its window rests on guessed line times (``cue_estimated``, 감사 1-08), and for a person's
+  own sound — a speaker's '(한숨)' (it ties the sound to its line, ``source_line``) or a laugh,
+  a cough written in an action line that is not off screen: the person is mostly in view (감사 8-12).
+- A music cue adds its wording (a song title: "[가수의 '곡명']") to the music candidate there as
+  a choice; a silence cue joins the music-stop candidate at the same place.
+- A cue no detected candidate fits becomes a candidate of its own: ``origin`` 'script', the id
+  of the cue, ``estimated`` (the time is a guess inside the window), always 확인 필요 — whether the
+  written sound is in the finished film was never measured, so the script alone includes nothing.
+  A speaker's own sound is such a candidate on its line (``source_line``). A cue without a window
+  makes no candidate (it stays in cues.json).
+'장면' (the first background sound of a scene) is the script scene the sound falls in when the
+alignment knows the scene times, else a group of six shots.
 """
 from __future__ import annotations
 
+from .. import cues as cue_mod
 from .. import phrases
 from ..util import log, read_json, write_json
+from . import cues as cue_stage
 
 SAME_SOUND_S = 20.0
 LOUD_JUMP_DB = 15.0
@@ -44,6 +68,11 @@ ESTIMATED_TIMING = ("voice", "even")          # align could not match the words:
 # dialogue line ``source`` (from the script: speaker-column tags and bracketed speakers) in evidence text
 SOURCE_KO = {"offscreen": "목소리만", "narration": "내레이션", "inner": "속마음", "phone": "전화",
              "radio": "무전", "broadcast": "방송", "video": "영상"}
+SCRIPT_WHY = "대본 지문에 적힌 소리"                # a script cue: a reason to include, like a plot hint
+SCRIPT_NOT_FOUND = "대본 지문에 적힌 소리 · 소리 검출로는 못 찾음"
+SCRIPT_KIND = {"sfx": "sfx", "vocal": "sfx", "silence": "sfx", "music": "music"}
+SCRIPT_CATEGORY = {"sfx": "script", "vocal": "vocal", "silence": "silence", "music": "music"}
+SCRIPT_SHOW_S = {"sfx": 2.0, "vocal": 1.5, "silence": 3.0, "music": 4.0}   # how long a guessed caption is shown
 
 
 # ------------------------------------------------------------------ helpers
@@ -186,8 +215,9 @@ def decide_sfx(c: dict, screen: dict | None, dia: dict | None, prev_same: dict |
     confident = lab.get("confident") and not lab.get("unknown") and not lab.get("competing")
     if agent and agent.get("label_ok"):
         confident = True
-    named = confident or any(p.get("source") == "agent" and p["text"] not in ("[소리]", "") for p in
-                             (agent or {}).get("phrases") or [])
+    by_script = c.get("named_by") == "script"          # an unnamed sound the script names (대본 단서)
+    named = confident or by_script or any(p.get("source") == "agent" and p["text"] not in ("[소리]", "") for p in
+                                          (agent or {}).get("phrases") or [])
     # 1. 이미 전해지는 정보인가 — only when we know which sound it is: for an unnamed sound
     #    the visible person or the written scream may belong to another sound at the same time
     already, mixed = [], []
@@ -208,6 +238,10 @@ def decide_sfx(c: dict, screen: dict | None, dia: dict | None, prev_same: dict |
         why.append("인물 반응")
     if (dia or {}).get("plot_hint"):
         why.append("줄거리 단서")
+    if c.get("cue_id") and c.get("cue_reason", c.get("cue_type") != "vocal"):
+        # ``cue_reason`` (cues.is_reason): not for a cue that does not say which sound it is, a
+        # window on guessed line times, or a person's own sound in view ('(웃음)', 감사 8-12)
+        why.append(SCRIPT_WHY)
     if c.get("category") == "event" and c.get("level_jump_db", 0) >= LOUD_JUMP_DB:
         why.append("갑자기 큰 소리")
     if c.get("category") == "ambient" and c.get("scene_first"):
@@ -227,7 +261,7 @@ def decide_sfx(c: dict, screen: dict | None, dia: dict | None, prev_same: dict |
     # 3. 근거 부족 · 서로 어긋남
     reasons = []
     if lab.get("unknown"):
-        reasons.append("목록에 없는 소리")
+        reasons.append("목록에 없는 소리 · 이름은 대본에서" if by_script else "목록에 없는 소리")
     elif not confident:
         reasons.append("소리 종류가 불확실")
     if mixed:
@@ -238,6 +272,8 @@ def decide_sfx(c: dict, screen: dict | None, dia: dict | None, prev_same: dict |
         reasons.append("넣을 근거 부족")
     if weak:
         reasons.append("대사 근거의 시각이 추정")
+    if c.get("cue_id") and c.get("cue_estimated"):
+        reasons.append("대본 단서의 시각이 추정")
     return "check", " · ".join(reasons) or "근거 부족", reasons
 
 
@@ -307,6 +343,111 @@ def speaker_evidence(s: dict) -> list[dict]:
     return out
 
 
+# ------------------------------------------------------------------ 대본 단서
+def _script_opts(cue: dict) -> list[dict]:
+    """The cue's captions as choices ('[소리]', the cue that says nothing of the sound, is none)."""
+    return [{"text": t, "short": t, "source": "script", "note": "대본 지문"} for t in cue.get("phrases") or []
+            if t and t != "[소리]"]
+
+
+def _merge_opts(first: list[dict], rest: list[dict]) -> list[dict]:
+    seen, out = set(), []
+    for o in first + rest:
+        if o["text"] not in seen:
+            seen.add(o["text"])
+            out.append(o)
+    return out
+
+
+def script_evidence(cue: dict, t: float, polarity: str = "include") -> dict:
+    """'대본' evidence of a cue: what the script writes ('대본 지문: "…"', a speaker's own sound
+    '대본: 가온의 한숨'), with where the window came from."""
+    if cue["type"] == "vocal":
+        who = f"{cue['speaker']}의 " if cue.get("speaker") else ""
+        txt = f"대본에 적힌 말하는 사람의 소리: {who}{cue.get('keyword') or ''}".rstrip()
+    else:
+        txt = f"대본 지문: \"{cue_mod.short(cue.get('text'), 40)}\""
+        if cue.get("offscreen"):
+            txt += " · 화면 밖 소리로 적힘"
+    if cue.get("songs"):
+        txt += " · 곡명: " + ", ".join(s["title"] for s in cue["songs"])
+    if cue.get("window_estimated"):
+        txt += " · 앞뒤 대사의 시각이 추정"
+    w = cue.get("window")
+    e = ev("대본", t, txt, polarity, "script")
+    if w:
+        e["window"] = list(w)
+    return e
+
+
+def attach_sound(c: dict, cue: dict) -> None:
+    """A detected sound candidate the script cue ``cue`` speaks for: ``cue_id``, whether the cue
+    is a reason to include it (``cue_reason``, ``cues.is_reason``) and rests on guessed times
+    (``cue_estimated``), the script's wording (the default caption of a sound the detector could
+    not name — unless the cue only has a '…소리' description, ``vague``: then a choice only), the
+    line of a speaker's own sound."""
+    c["cue_id"] = cue["id"]
+    c["cue_type"] = cue["type"]
+    c["cue_reason"] = cue_mod.is_reason(cue, cue_mod.compatible(cue, c))
+    c["cue_estimated"] = bool(cue.get("window_estimated"))
+    opts = _script_opts(cue)
+    if c["label"].get("unknown") and opts and not cue.get("vague"):
+        c["phrases"] = _merge_opts(opts, [o for o in c.get("phrases") or [] if o.get("source") != "unknown"])
+        c["phrase"], c["short"] = c["phrases"][0]["text"], c["phrases"][0]["short"]
+        c["named_by"] = "script"
+    elif opts:
+        c["phrases"] = _merge_opts(c.get("phrases") or [], opts)
+    if cue["type"] == "vocal" and cue.get("line_id"):
+        c["source_line"] = cue["line_id"]           # the script says whose sound it is
+
+
+def attach_music(m: dict, cues: list[dict]) -> None:
+    """Music cues at a music candidate: their wording (a song title) as choices right after the
+    default caption, which stays."""
+    m["cue_id"] = cues[0]["id"]
+    m["cue_ids"] = [c["id"] for c in cues]
+    opts = [o for c in cues for o in _script_opts(c)]
+    head = (m.get("phrases") or [])[:1]
+    m["phrases"] = _merge_opts(head + opts, m.get("phrases") or [])
+
+
+def script_candidate(cue: dict) -> dict | None:
+    """A 확인 필요 candidate for a script cue no detected candidate fits; None without a window,
+    for music that only goes on ('그 음악 계속 흐르고') and for a cue with no caption to suggest
+    (``vague``: only a '…소리' description, which II.9 asks not to write)."""
+    w = cue.get("window")
+    opts = _script_opts(cue)
+    if not w or not opts or cue.get("vague") or (cue["type"] == "music" and cue.get("continues")):
+        return None
+    kind = "music" if cue["type"] == "music" or (cue["type"] == "silence" and cue.get("music_stop")) else \
+        SCRIPT_KIND[cue["type"]]
+    t0 = float(cue.get("guess", w[0]))
+    t1 = max(t0 + 1.0, min(float(w[1]), t0 + SCRIPT_SHOW_S[cue["type"]]))
+    it = {"id": cue["id"], "kind": kind, "origin": "script", "cue_id": cue["id"], "estimated": True,
+          "t0": round(t0, 3), "t1": round(t1, 3), "onset": round(t0, 3),
+          "category": SCRIPT_CATEGORY[cue["type"]],
+          "label": {"class": "", "ko": cue.get("keyword") or "대본 단서", "score": 0.0, "confident": False,
+                    "unknown": False, "competing": [], "path_ko": [], "top": []},
+          "window": list(w), "phrases": opts, "phrase": opts[0]["text"], "short": opts[0]["short"],
+          "flags": ["script", "timing_estimated"]}
+    if kind == "music":
+        it["music"] = {"moods": [], "change": None, "instruments": [], "segment": [it["t0"], it["t1"]],
+                       "event": "stop" if cue.get("music_stop") else "script", "strength": None}
+    if cue["type"] == "vocal" and cue.get("line_id"):
+        it["source_line"] = cue["line_id"]
+    reason = SCRIPT_NOT_FOUND
+    if cue["type"] == "silence":
+        reason += " · 중요한 정적인지 확인"
+    elif cue["type"] == "vocal":
+        reason += " · 소리 낸 사람이 보이면 안 적어도 됨"
+    elif w[1] - w[0] > cue_mod.WIDE_S:
+        reason += " · 시각 범위가 넓음"
+    it.update(rec="check", reason=reason, agent_reasons=[],
+              evidence=[script_evidence(cue, t0, "neutral"),
+                        ev("대본", t0, "시각은 앞뒤 대사로 어림 (소리로 확인 못 함)", "neutral", "script", w[1])])
+    return it
+
+
 # ---------------------------------------------------------------------- run
 def build(p, agent_results: dict | None = None) -> list[dict]:
     agent_results = agent_results or {}
@@ -317,6 +458,11 @@ def build(p, agent_results: dict | None = None) -> list[dict]:
     all_lines = (read_json(p.path("dialogue.json"), {}) or {}).get("lines", [])
     line_by_id = {ln["id"]: ln for ln in all_lines}
     dlines = [ln for ln in all_lines if has_time(ln)]
+    scenes = (read_json(p.path("scenes.json"), {}) or {}).get("scenes")
+    starts = cue_mod.scene_starts(all_lines, scenes)
+    script_cues = cue_stage.load(p)
+    sound_hits = cue_mod.match_sounds(script_cues, sfx)
+    used_cues = {cue["id"] for cue in sound_hits.values()}
     items = []
     # 효과음 (time order so '앞 자막에서 이미 알림' sees earlier decisions)
     last_inc: dict[str, dict] = {}          # class -> the last sound of it that is an include recommendation
@@ -327,10 +473,13 @@ def build(p, agent_results: dict | None = None) -> list[dict]:
             return None                     # result of another candidate that had this id
         return ag
 
-    for c in with_scene_first(sfx, cuts):
+    for c in with_scene_first(sfx, cuts, starts):
         ag = agent_for(c)
         cls = c["label"]["class"]
         sc, dd = screen.get(c["id"]), dia.get(c["id"])
+        cue = sound_hits.get(c["id"])
+        if cue:
+            attach_sound(c, cue)
         if dd and dd.get("line_id") and timing_estimated(line_by_id.get(dd["line_id"]) or {}):
             dd = {**dd, "estimated": True}  # the evidence rests on a line whose time is a guess (감사 1-08)
         last = last_inc.get(cls)
@@ -340,6 +489,8 @@ def build(p, agent_results: dict | None = None) -> list[dict]:
         known = c["label"].get("confident") and not c["label"].get("unknown")
         prev_same = dict(last) if known and last is not None and c["onset"] - last["t"] <= span else None
         evid = sfx_evidence(c, sc, dd)
+        if cue:
+            evid.append(script_evidence(cue, c["onset"], "include" if c.get("cue_reason") else "neutral"))
         if prev_same:
             evid.append(ev("자막", prev_same["t"], "앞 자막에서 이미 알린 소리", "exclude"))
             c["follows"] = prev_same["id"]
@@ -348,7 +499,9 @@ def build(p, agent_results: dict | None = None) -> list[dict]:
             if ag.get("phrases"):
                 c["phrases"] = ag["phrases"] + [o for o in c["phrases"] if o["text"] not in {x["text"] for x in ag["phrases"]}]
                 c["phrase"], c["short"] = c["phrases"][0]["text"], c["phrases"][0]["short"]
-        if c.get("category") == "vocal" and phrases.info(c["label"]["class"])["family"] in OWN_SOUND_FAMILIES:
+        # (a source_line set by attach_sound: the script says whose sound it is)
+        if not c.get("source_line") and c.get("category") == "vocal" \
+                and phrases.info(c["label"]["class"])["family"] in OWN_SOUND_FAMILIES:
             # a laugh / cough / sigh right where a line starts is the speaker's own sound:
             # placement writes it on the same line without a hyphen ('[재채기] 나도야!', memo 5.3 ③).
             # Screams and crying are left out: a line right after someone else's scream is often
@@ -361,7 +514,7 @@ def build(p, agent_results: dict | None = None) -> list[dict]:
             reason = (ag.get("short_reason") or reason) + " → 작가 확인"
         c.update(rec=rec, reason=reason, evidence=evid, agent_reasons=agent_why if not ag else [])
         if c.get("minor"):                  # found by the level jump alone: folded until something speaks for it
-            c["minor"] = rec == "check" and not _supported(sc, dd, ag)
+            c["minor"] = rec == "check" and not _supported(sc, dd, ag) and not c.get("cue_id")
         if ag:
             c["agent"] = {k: ag.get(k) for k in ("status", "summary", "tools", "steps", "recommendation")}
             if ag.get("summary"):
@@ -375,14 +528,22 @@ def build(p, agent_results: dict | None = None) -> list[dict]:
     # 음악. An item that only continues an earlier one follows the root of its chain: prev_inc is
     # the last include recommendation, prev_any the item just before whatever its recommendation.
     prev_inc, prev_any = None, None
-    for m in music_candidates(p):
+    music_items = music_candidates(p)
+    music_hits, stop_hits = cue_mod.match_music(script_cues, music_items)
+    used_cues |= {cue["id"] for cs in music_hits.values() for cue in cs} | {cue["id"] for cue in stop_hits.values()}
+    for m in music_items:
         ag = agent_for(m)
         mus = m["music"]
         if mus["event"] == "stop":      # the music breaks off: always the writer's call, no chain
             rec, reason, why = decide_music(m, None, ag)
             drop = f" (세기 {mus['drop_db']:.0f}dB 떨어짐)" if mus.get("drop_db") is not None else ""
-            m.update(rec=rec, reason=reason, agent_reasons=why,
-                     evidence=[ev("소리", m["onset"], "음악이 갑자기 멈춤" + drop, "neutral", "rule")])
+            evid = [ev("소리", m["onset"], "음악이 갑자기 멈춤" + drop, "neutral", "rule")]
+            cue = stop_hits.get(m["id"])
+            if cue:                     # the script writes the silence here too: one candidate
+                attach_music(m, [cue])
+                evid.append(script_evidence(cue, m["onset"]))
+                reason += " · 대본 지문에도 적힘"
+            m.update(rec=rec, reason=reason, agent_reasons=why, evidence=evid)
             items.append(m)
             continue
         top = (mus.get("moods") or [{}])[0].get("key")
@@ -412,6 +573,12 @@ def build(p, agent_results: dict | None = None) -> list[dict]:
         if mus.get("change"):
             evid.append(ev("변화", m["onset"], "소리가 점점 커짐" if mus["change"] == "고조되는" else "소리가 점점 작아짐",
                            "neutral", "rule", m["onset"] + 4.0))
+        mcues = music_hits.get(m["id"])
+        if mcues:
+            attach_music(m, mcues)
+            evid.extend(script_evidence(cue, m["onset"]) for cue in mcues)
+            if any(cue.get("songs") for cue in mcues):
+                reason += " · 대본에 곡명"
         if root:
             m["follows"] = root["id"]
             if root["rec"] == "include":
@@ -432,6 +599,12 @@ def build(p, agent_results: dict | None = None) -> list[dict]:
         if rec == "include":
             prev_inc = me
         items.append(m)
+    # 대본 단서 that no detected candidate fits: a 확인 필요 candidate of their own
+    for cue in script_cues:
+        if cue["id"] not in used_cues:
+            it = script_candidate(cue)
+            if it is not None:
+                items.append(it)
     # 화자: an off-screen speaker who keeps talking is named on the first line of the run only
     # (the same name from the same source: a line that turns into narration is labelled again)
     prev, named_run, named_id = None, False, None
@@ -461,13 +634,16 @@ def _supported(screen: dict | None, dia: dict | None, agent: dict | None) -> boo
                 or dia.get("plot_hint") or agent.get("plot") == "필요" or agent.get("phrases"))
 
 
-def with_scene_first(sfx: list[dict], cuts: list[float]) -> list[dict]:
+def with_scene_first(sfx: list[dict], cuts: list[float], starts=None) -> list[dict]:
     """Copies of the sound candidates in time order with ``scene_first``: the first sound of its
-    class in a 'scene' of six shots (cuts.json has shot changes, not scenes)."""
+    class in its scene — the script scene it falls in when ``starts`` (``cues.scene_starts``:
+    scene times from the alignment) places it, else a 'scene' of six shots (cuts.json has shot
+    changes, not scenes)."""
     out, seen = [], set()
     for c in sorted(sfx, key=lambda x: x["onset"]):
         c = dict(c)
-        key = (c["label"]["class"], sum(1 for x in cuts if x <= c["onset"]) // 6)
+        sid = cue_mod.scene_at(c["onset"], starts) if starts else None
+        key = (c["label"]["class"], sid if sid is not None else sum(1 for x in cuts if x <= c["onset"]) // 6)
         c["scene_first"] = key not in seen
         seen.add(key)
         out.append(c)
@@ -493,13 +669,15 @@ def answer_matters(c: dict, which: str, screen: dict | None = None) -> bool:
     return any(len({decide_sfx(c, s, d, None)[0] for d in DIALOG_ANSWERS}) > 1 for s in screens)
 
 
-def worth_asking(sfx: list[dict], cuts: list[float], which: str, screen_items: dict | None = None) -> set[str]:
+def worth_asking(sfx: list[dict], cuts: list[float], which: str, screen_items: dict | None = None,
+                 starts=None) -> set[str]:
     """Ids of the sound candidates whose recommendation depends on the answer of the stage
     ``which`` ('screen' | 'dialog'): what ``cfg["llm_scope"] == "useful"`` asks the LLM about.
-    ``screen_items`` (screen.json "items") narrows 'dialog' by the screen answers already given."""
+    ``screen_items`` (screen.json "items") narrows 'dialog' by the screen answers already given;
+    ``starts``: the scene times (``with_scene_first``)."""
     known = screen_items or {}
     out = set()
-    for c in with_scene_first(sfx, cuts):
+    for c in with_scene_first(sfx, cuts, starts):
         sc = known.get(c["id"]) if which == "dialog" else None
         if sc is not None and (sc.get("failed") or sc.get("source") in UNSEEN):
             sc = None                       # no answer of the model: any answer is still possible
@@ -514,9 +692,14 @@ def run(p, cfg: dict) -> dict:
     agent_results = (read_json(p.path("agent_results.json"), {}) or {}).get("items", {})
     items = build(p, agent_results)
     write_json(p.path("items.json"), {"items": items})
+    # cues.json made again from the same files: a run that names only some stages ('--stages
+    # script' reruns align … recommend, not cues) leaves no cues.json older than the items
+    cue_stage.run(p, cfg)
     cnt: dict = {}
     for it in items:
         cnt.setdefault(it["kind"], {}).setdefault(it["rec"], 0)
         cnt[it["kind"]][it["rec"]] += 1
     log.info("recommend: %s", cnt)
-    return {"counts": cnt, "agent_queue": sum(1 for it in items if it.get("agent_reasons"))}
+    script = {"attached": sum(1 for it in items if it.get("cue_id") and it.get("origin") != "script"),
+              "new": sum(1 for it in items if it.get("origin") == "script")}
+    return {"counts": cnt, "agent_queue": sum(1 for it in items if it.get("agent_reasons")), "script_cues": script}

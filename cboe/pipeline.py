@@ -1,8 +1,9 @@
 # -*- coding: utf-8 -*-
 """Runs the stages of deck 5.1 in order, skipping stages whose output exists.
 
-① 후보 검출 · 근거 수집: ingest → script → separate → cuts → sed → asr → align → sfx → music
-                         → speaker → screen → dialog_ev   (align uses SED voice activity)
+① 후보 검출 · 근거 수집: ingest → script → separate → cuts → sed → asr → align → cues → sfx
+                         → music → speaker → screen → dialog_ev   (align uses SED voice activity;
+                         cues = the sounds the script writes down, with their time windows)
 ② 추천 · 에이전트 재확인: recommend → agent
 ③ 초안 배치: placement (state.Project.recompute)
 
@@ -27,7 +28,7 @@ from . import guard
 from .state import Project
 from .util import log, read_json, write_json
 
-STAGES = ["ingest", "script", "separate", "cuts", "sed", "asr", "align", "sfx", "music", "speaker", "screen",
+STAGES = ["ingest", "script", "separate", "cuts", "sed", "asr", "align", "cues", "sfx", "music", "speaker", "screen",
           "dialog_ev", "recommend", "agent"]
 
 # output file(s) per stage; --force <stage> deletes them first
@@ -37,11 +38,12 @@ OUTPUTS = {
     "separate": [f"audio/{s}_{r}.wav" for s in ("speech", "music", "effects") for r in ("48k", "16k")],
     "cuts": ["cuts.json"],
     "asr": ["asr.json"],
-    "align": ["dialogue.json"],
+    "align": ["dialogue.json", "scenes.json"],
+    "cues": ["cues.json"],                  # made again every run (cheap, pure): not skipped when present
     "sed": ["sed_effects.npz", "sed_mix.npz", "sed_music.npz", "env.npz"],
     "sfx": ["sfx.json"],
     "music": ["music.json"],
-    "speaker": ["speaker.json"],
+    "speaker": ["speaker.json", "speaker.part.json"],   # the part file: a stopped run goes on from it
     "screen": ["screen.json"],
     "dialog_ev": ["dialog_ev.json"],
     "recommend": ["items.json"],
@@ -58,7 +60,9 @@ USED_BY = {
     "cuts": ["speaker", "screen", "recommend"],
     "sed": ["sfx", "music", "align"],
     "asr": ["align"],
+    # cues is not listed: it is made again on every run, and recommend reads the cues afresh
     "align": ["speaker", "dialog_ev", "recommend"],
+    "cues": ["recommend"],
     "sfx": ["screen", "dialog_ev", "recommend"],
     "music": ["dialog_ev", "recommend"],
     "speaker": ["recommend"],

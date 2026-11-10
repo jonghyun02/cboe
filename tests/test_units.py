@@ -381,6 +381,23 @@ def test_offscreen_with_reaction_is_included():
     assert rec == "include" and "직후 비명" in reason
 
 
+def test_script_cue_is_a_reason_to_include_after_the_exclusions():
+    cued = _sfx(level_jump_db=0.0, cue_id="C0001")
+    rec, reason, _ = recommend.decide_sfx(cued, {"visible": "안 보임"}, None, None)
+    assert rec == "include" and recommend.SCRIPT_WHY in reason
+    assert recommend.decide_sfx(_sfx(level_jump_db=0.0), {"visible": "안 보임"}, None, None)[0] == "check"
+    # 보이면 제외 · 대사에 적힘 · 앞 자막 come first, as before (사용자 결정 2026-10-15)
+    assert recommend.decide_sfx(cued, {"visible": "보임", "observation": "번개가 보임"}, None, None)[0] == "exclude"
+    assert recommend.decide_sfx(cued, {"visible": "안 보임"}, {"relation": "already"}, None)[0] == "exclude"
+    assert recommend.decide_sfx(cued, {"visible": "안 보임"}, None, {"t": 5.0})[0] == "exclude"
+    # an unnamed sound the script names: not included on the script alone
+    lab = {"class": "Generic impact sounds", "ko": "부딪히는", "score": 0.17, "confident": False, "unknown": True,
+           "competing": []}
+    rec, reason, why = recommend.decide_sfx(_sfx(label=lab, cue_id="C0001", named_by="script"), {"visible": "안 보임"},
+                                            None, None)
+    assert rec == "check" and "목록에 없는 소리 · 이름은 대본에서" in why
+
+
 def test_unknown_sound_goes_to_agent():
     lab = {"class": "Generic impact sounds", "ko": "부딪히는", "score": 0.17, "confident": False, "unknown": True,
            "competing": []}

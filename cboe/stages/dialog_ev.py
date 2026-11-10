@@ -11,6 +11,11 @@ are read (music candidates are not asked about: no rule reads a dialogue answer 
 - mention: a line names the source ('전화 왔다', '비 온다')
 - none
 plus a short plot hint (사건·위험·단서) when the lines show one.
+When the script and the scene times are known (script.json elements, dialogue.json scene ids,
+scenes.json), each candidate also comes with the heading of its scene and the action lines
+written between the dialogue lines around it (``cues.context_at``) — the story around the sound,
+not only six seconds of talk (감사 4-02). A sound the script itself writes down is matched in the
+recommendation (``cboe.cues``), with or without an LLM.
 LLM: Claude, text only, 20 candidates per call. Without an LLM a keyword rule gives
 'already' for vocal sounds on vocalisation lines and 'reaction' for typical reaction
 phrases. ``cfg["llm_scope"]``: 'all' (default) asks about every candidate; 'useful' asks
@@ -24,12 +29,13 @@ from __future__ import annotations
 import re
 from concurrent.futures import ThreadPoolExecutor
 
+from .. import cues as cue_mod
 from .. import llm
 from ..util import fmt_time, log, read_json, write_json
 from . import recommend
 from .align import is_vocalisation
 
-PROMPT_VERSION = 1          # raise when SYSTEM, SCHEMA or the layout of the question changes (llm_log 'prompt')
+PROMPT_VERSION = 2          # raise when SYSTEM, SCHEMA or the layout of the question changes (llm_log 'prompt')
 BEFORE, AFTER = 6.0, 6.0
 BATCH = 20
 REACTION = re.compile(r"무슨 소리|뭐야|뭐지|누구(세요|야)?|깜짝|들렸|들려|소리|왜 이래|어떡해|살려|으악|꺅|헉|허억")
@@ -53,7 +59,8 @@ SYSTEM = (
     "그 소리에 반응함('무슨 소리야?', '누구세요?', 큰 소리 직후 비명). mention: 대사가 소리의 출처를 말함('전화 왔다'). "
     "none: 관계 없음. line_id는 근거 대사의 id(없으면 빈 문자열), evidence는 20자 안팎 한국어 근거(예: '직후 비명', "
     "'\"무슨 소리 안 들렸어요?\"'), plot_hint는 대사로 보아 이 소리가 사건·위험·단서와 관련 있으면 짧게(없으면 빈 문자열). "
-    "검출 종류는 틀릴 수 있다."
+    "후보에 대본의 장면 머리와 가까운 지문(대본에 적힌 행동·소리 설명)이 붙어 있으면 그 장면에서 무슨 일이 일어나는지 "
+    "판단하는 데 함께 쓴다(지문은 촬영 대본이라 완성된 영상과 다를 수 있다). 검출 종류는 틀릴 수 있다."
 )
 
 
@@ -76,16 +83,40 @@ def rule(c: dict, lines: list[dict]) -> dict:
     return {"id": c["id"], "relation": "none", "line_id": "", "evidence": "", "plot_hint": "", "source": "rule"}
 
 
-def _batch_call(batch: list[dict], lines: list[dict], cfg: dict, work) -> dict:
+def question(batch: list[dict], lines: list[dict], context: dict | None = None) -> str:
+    """The question of one batch. ``context``: {candidate id: ``cues.context_at`` result} — the
+    scene heading and the action lines near the sound, shown under its dialogue when there are any."""
     parts = ["아래 소리 후보마다 앞뒤 6초 대사가 있다(+는 소리 뒤, -는 소리 앞, 초). 후보마다 items에 같은 id로 답하라.\n"]
     for c in batch:
         lab = c["label"]
         name = "알 수 없는 소리" if lab.get("unknown") else lab["ko"]
         rows = [f"  {ln['id']} {ln['start'] - c['onset']:+.1f}s {ln.get('speaker') or '?'}: {ln['text']}"
                 for ln in window_lines(lines, c["onset"])]
-        parts.append(f"\n[후보 {c['id']}] {fmt_time(c['onset'])} {name}\n" + ("\n".join(rows) if rows else "  (대사 없음)"))
-    res = llm.ask(["\n".join(parts)], SCHEMA, model=cfg.get("llm_model", "sonnet"), system=SYSTEM, effort="low",
-                  work=work, tag="dialog", prompt_version=PROMPT_VERSION)
+        block = f"\n[후보 {c['id']}] {fmt_time(c['onset'])} {name}\n" + ("\n".join(rows) if rows else "  (대사 없음)")
+        ctx = (context or {}).get(c["id"]) or {}
+        if ctx.get("heading"):
+            block += f"\n  장면: {ctx['heading']}"
+        for a in ctx.get("actions") or []:
+            block += f"\n  지문: {a}"
+        parts.append(block)
+    return "\n".join(parts)
+
+
+def contexts(batch: list[dict], doc: dict, lines: list[dict], starts) -> dict:
+    """{candidate id: scene heading and nearby action lines} for the candidates whose scene is known."""
+    if not starts or not (doc or {}).get("elements"):
+        return {}
+    out = {}
+    for c in batch:
+        ctx = cue_mod.context_at(doc, lines, c["onset"], starts)
+        if ctx and (ctx.get("heading") or ctx.get("actions")):
+            out[c["id"]] = ctx
+    return out
+
+
+def _batch_call(batch: list[dict], lines: list[dict], cfg: dict, work, context: dict | None = None) -> dict:
+    res = llm.ask([question(batch, lines, context)], SCHEMA, model=cfg.get("llm_model", "sonnet"), system=SYSTEM,
+                  effort="low", work=work, tag="dialog", prompt_version=PROMPT_VERSION)
     return {it["id"]: it for it in res.get("items", [])}
 
 
@@ -116,10 +147,12 @@ def run(p, cfg: dict) -> dict:
         out = {c["id"]: rule(c, lines) for c in cands}
     errors = 0
     not_asked = 0
+    doc = read_json(p.path("script.json"), {}) or {}
+    starts = cue_mod.scene_starts(lines, (read_json(p.path("scenes.json"), {}) or {}).get("scenes"))
     if used_llm and scope == "useful":
         cuts = (read_json(p.path("cuts.json"), {}) or {}).get("cuts", [])
         seen = (read_json(p.path("screen.json"), {}) or {}).get("items", {})
-        worth = recommend.worth_asking(cands, cuts, "dialog", seen)
+        worth = recommend.worth_asking(cands, cuts, "dialog", seen, starts)
         for c in todo:
             if c["id"] not in worth:                # the answer cannot change the recommendation
                 out[c["id"]] = {**rule(c, lines), "skipped": True}
@@ -131,7 +164,9 @@ def run(p, cfg: dict) -> dict:
                 out[c["id"]] = {**rule(c, lines), "failed": True}
         batches = [todo[i:i + BATCH] for i in range(0, len(todo), BATCH)]
         with ThreadPoolExecutor(max_workers=max(1, int(cfg.get("jobs", 3)))) as ex:
-            futs = [ex.submit(_batch_call, b, lines, cfg, p.work) for b in batches]
+            ctxs = [contexts(b, doc, lines, starts) for b in batches]
+            # the script context goes along only when there is one (the call keeps its old shape otherwise)
+            futs = [ex.submit(_batch_call, b, lines, cfg, p.work, *([ctx] if ctx else [])) for b, ctx in zip(batches, ctxs)]
             from ..util import progress
             for bi, (b, f) in enumerate(zip(batches, futs)):
                 try:
