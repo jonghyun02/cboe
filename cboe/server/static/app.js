@@ -54,6 +54,19 @@
     return '로';
   }
   function hash(s) { let h = 0; for (const ch of String(s)) h = (h * 31 + ch.codePointAt(0)) >>> 0; return h; }
+  /** 가 / 이 after a name (바다가 · 하늘이). */
+  function ga(word) {
+    const c = String(word).charCodeAt(String(word).length - 1);
+    return c >= 0xac00 && c <= 0xd7a3 && (c - 0xac00) % 28 ? '이' : '가';
+  }
+  /** mm:ss.ss for the times the writer types (a frame is shorter than 0.1 s). */
+  function fmtTime2(t) {
+    if (t == null || !Number.isFinite(t)) return '';
+    const c = Math.round(Math.max(0, t) * 100);
+    const m = Math.floor(c / 6000);
+    return `${String(m).padStart(2, '0')}:${((c - m * 6000) / 100).toFixed(2).padStart(5, '0')}`;
+  }
+  const enc = encodeURIComponent;
 
   // ---------------------------------------------------------------- constants
   const KIND = {
@@ -66,7 +79,7 @@
   const SPK_LABEL = { inc: '이름 표시 추천', exc: '이름 생략 추천', check: '확인 필요', 'inc-done': '이름 표시', 'exc-done': '이름 생략', noroom: '배치 확인 필요' };
   const FILTERS = [['all', '전체'], ['include', '포함 추천'], ['exclude', '제외 추천'], ['check', '확인 필요'], ['noroom', '배치 확인 필요']];
   const TOOLS = { look_frames: '프레임 보기', describe_sound: '소리 설명', rescan_sound: '다시 검출', search_dialogue: '대사 찾기', scene_context: '앞뒤 장면' };
-  const FLAGS = { label_uncertain: '종류 불확실', unknown: '목록 밖 소리', conflict: '근거 어긋남' };
+  const FLAGS = { label_uncertain: '종류 불확실', unknown: '목록 밖 소리', conflict: '근거 어긋남', script: '대본 단서', timing_estimated: '시각 어림' };
   const CELL_FLAGS = { timing_estimated: '시각 추정', overlap: '겹친 대사', flash: '몇 프레임짜리 칸' };
   const SOURCE_NOTE = { caption: '소리 설명 모델 제안', detected: '검출 종류', parent: '상위 종류', agent: '에이전트 제안', mood: '분위기' };
   const FACE = { visible: '말하는 얼굴 보임', not_visible: '말하는 얼굴 안 보임', unclear: '얼굴 판정 애매' };
@@ -77,20 +90,63 @@
   function tlGeometry() {
     const cs = getComputedStyle(document.documentElement);
     const v = (name, d) => parseFloat(cs.getPropertyValue(name)) || d;
-    return { ruler: v('--tl-ruler', 26), pad: v('--tl-pad', 6), lane: v('--tl-lane', 26), gap: v('--tl-gap', 8) };
+    return { ruler: v('--tl-ruler', 26), band: v('--tl-band', 12), pad: v('--tl-pad', 6), lane: v('--tl-lane', 26), gap: v('--tl-gap', 8) };
   }
   const ICON = {
     play: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 4.5v15l12.5-7.5z"/></svg>',
     check: '<svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3 8.5l3.2 3L13 4.5" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/></svg>',
   };
+  // the five views of the right-hand list; the left panel shows what is picked in the view
+  const VIEWS = [['items', '후보'], ['lines', '대사'], ['extras', '대본에 없는 말'], ['people', '인물'], ['cells', '칸']];
+  const VIEW_HINT = {
+    items: '검출한 소리를 지우지 않고 모두 남긴다',
+    lines: '대본 대사 줄 · 다른 줄은 대본 글과 들린 글을 견주어 작가가 고른다',
+    extras: '받아쓰기에만 있는 말 · 저절로 넣지 않는다',
+    people: '이름이 밝혀지기 전에 쓸 표시와 이름으로 바뀌는 줄',
+    cells: '자막 칸마다 지침 검사 결과',
+  };
+  const TODO_TITLE = {
+    items: '정하지 않은 확인 필요 후보', lines: '대본과 들린 말이 다른데 고르지 않은 줄 + 자리 없는 줄',
+    extras: '정하지 않은 대본에 없는 말', people: '표시를 정하지 않은 인물 (자막 줄이 있는 사람 이름)', cells: '의무 조항에 걸린 칸',
+  };
+  /** A dialogue line's state on the list: [label, class]. */
+  const LSTATE = {
+    ok: ['맞음', 'ls-ok'], pinned: ['시각 정함', 'ls-ok'], differs: ['들린 말이 다름', 'ls-diff'], picked: ['고름', 'ls-done'],
+    unheard: ['못 들음 · 시각 추정', 'ls-guess'], absent: ['영화에 없음', 'ls-out'], out_of_range: ['구간 밖', 'ls-out'],
+    no_time: ['시각 없음', 'ls-out'], writer: ['작가가 뺌', 'ls-out'], added: ['작가가 넣음', 'ls-add'],
+    revived: ['되살림', 'ls-add'], noroom: ['자리 없음', 'ls-noroom'],
+  };
+  const PICKED = { script: '대본대로 고름', heard: '들린 대로 고름', writer: '작가가 고침' };
+  const LINE_FILTERS = [['all', '전체'], ['differs', '다름'], ['unheard', '못 들음'], ['out', '영화에 없음·구간 밖'],
+    ['spelling', '맞춤법 확인'], ['lang', '외국어·노래'], ['noroom', '자리 없음'], ['writer', '작가가 고침']];
+  const EXTRA_FILTERS = [['open', '정하지 않음'], ['overlap', '못 들은 줄과 겹침'], ['line', '대사로 넣음'], ['ignored', '무시'], ['all', '전체']];
+  const PEOPLE_FILTERS = [['all', '전체'], ['open', '정하지 않음'], ['early', '이름이 일찍 나감'], ['decided', '정함']];
+  const CELL_FILTERS = [['all', '전체'], ['must', '의무 위반'], ['should', '권고'], ['estimated', '시각 추정'], ['overlap', '겹침']];
+  const XSTATE = { open: ['정하지 않음', 'st-check'], line: ['대사로 넣음', 'st-inc-done'], ignored: ['무시', 'st-exc-done'] };
+  const SCENE_ST = { found: '찾음', unknown: '모름', absent: '영화에 없음', out_of_range: '구간 밖' };
+  const DIFF_KO = { word: '낱말이 다름', minor: '한두 글자 다름 · 받아쓰기 잘못일 수 있음', number: '숫자 표기가 다름' };
+  const CELL_KIND = { dialogue: '대사', sfx: '효과음', music: '음악', mixed: '섞임' };
+  const SCOPES = [['line', '이 줄'], ['from_here', '이 줄부터 끝까지'], ['before', '이 줄 앞까지'], ['scene', '이 장면'], ['person', '이 인물의 모든 줄']];
+  const LANGS = ['영어', '일본어', '중국어', '독일어', '프랑스어', '러시아어', '스페인어'];
+  const GENERIC = ['남자', '여자'];
+  const ENV_LANE = { speech: 'cells', effects: 'sfx', music: 'music' };
+  const CHUNK = 200;                 // rows drawn at a time; the rest when the list is scrolled down
 
   // -------------------------------------------------------------------- state
   const S = {
     st: null, P: null, sel: null, filter: 'all', kinds: new Set(Object.keys(KIND)), zoom: 15,
     t: 0, pps: 100, modal: null, moveOpen: null, lastExport: null, busy: 0, still: false,
     overlayKey: '', lastFocus: null,
+    // views: what is picked in each, its filter, scenes opened or closed by hand, the open editor
+    view: 'items', lf: 'all', xf: 'open', pf: 'all', cf: 'all', line: null, extra: null, person: null, cell: null,
+    cellAt: null, showMinor: false, sceneOpen: new Map(), limit: CHUNK, ed: null, env: null, envOn: true, envTried: false,
   };
-  const D = { items: [], byId: new Map(), lines: new Map(), cells: [], cellById: new Map(), noRoom: new Map(), spkByLine: new Map(), visible: [] };
+  const D = {
+    items: [], byId: new Map(), lines: new Map(), allLines: [], cells: [], cellById: new Map(), noRoom: new Map(),
+    lineNoRoom: new Map(), spkByLine: new Map(), visible: [], extras: [], extraById: new Map(), overlaps: new Map(),
+    scenes: [], sceneById: new Map(), people: [], personByName: new Map(), added: new Map(), cellViol: new Map(),
+    visibleLines: [], visibleExtras: [], visiblePeople: [], visibleCells: [],
+  };
   const video = $('#video');
   const pvVideo = () => $('#pv-video');
 
@@ -150,15 +206,33 @@
   function derive(st) {
     S.st = st;
     S.P = st.project;
-    D.lines = new Map((st.dialogue || []).map((l) => [l.id, l]));
+    // the merged lines in film order (the writer's choices, why a line is out); an older state: the script lines
+    D.allLines = st.lines || (st.dialogue || []).map((l) => ({ ...l, include: l.start != null }));
+    D.lines = new Map(D.allLines.map((l) => [l.id, l]));
     D.cells = ((st.draft && st.draft.cells) || []).slice().sort((a, b) => a.start - b.start);
     D.cellById = new Map(D.cells.map((c) => [c.id, c]));
-    D.noRoom = new Map(((st.draft && st.draft.no_room) || []).map((e) => [e.item, e]));
+    const nr = (st.draft && st.draft.no_room) || [];
+    D.noRoom = new Map(nr.filter((e) => !e.line).map((e) => [e.item, e]));        // sounds without a cell
+    D.lineNoRoom = new Map(nr.filter((e) => e.line).map((e) => [e.line, e]));     // guessed lines squeezed out
     D.items = (st.items || []).slice().sort((a, b) => num(a.onset) - num(b.onset)
       || (KIND_ORDER[a.kind] ?? 9) - (KIND_ORDER[b.kind] ?? 9) || a.id.localeCompare(b.id));
     D.byId = new Map(D.items.map((it) => [it.id, it]));
     D.spkByLine = new Map();
     for (const it of D.items) if (it.kind === 'speaker' && it.speaker && it.speaker.line_id) D.spkByLine.set(it.speaker.line_id, it);
+    D.extras = st.extras || [];
+    D.extraById = new Map(D.extras.map((x) => [x.id, x]));
+    D.overlaps = new Map();                     // unheard line -> the speech heard where it should be
+    for (const x of D.extras) {
+      for (const lid of x.overlaps || []) { if (!D.overlaps.has(lid)) D.overlaps.set(lid, []); D.overlaps.get(lid).push(x); }
+    }
+    D.scenes = st.scenes || [];
+    D.sceneById = new Map(D.scenes.map((s) => [s.id, s]));
+    D.people = st.people || [];
+    D.personByName = new Map(D.people.map((p) => [p.name, p]));
+    D.added = new Map((st.added || []).map((a) => [a.id, a]));
+    D.cellViol = new Map();                     // cell -> what the guide check found on it
+    const gd = st.export_check && st.export_check.guide;
+    for (const v of (gd && gd.violations) || []) { if (!D.cellViol.has(v.cell)) D.cellViol.set(v.cell, []); D.cellViol.get(v.cell).push(v); }
   }
   function stateOf(it) {
     if (D.noRoom.has(it.id)) return 'noroom';
@@ -197,16 +271,38 @@
     return (it.rec || 'check') === f;
   }
   const visibleItems = () => D.items.filter((it) => S.kinds.has(it.kind) && inFilter(it));
+  /** A small sound found by the level jump alone stays folded until the writer opens the fold (4-03). */
+  const isFolded = (it) => !!it.minor && !it.decided && !S.showMinor && it.id !== S.sel;
+  /** Short tags of where a candidate comes from: the script, the writer, a chain it follows. */
+  function itemTags(it) {
+    const t = [];
+    if (it.added) t.push('<span class="tag t-writer">작가가 넣음</span>');
+    if (it.origin === 'script') t.push('<span class="tag t-script">대본 · 시각 어림</span>');
+    else if (it.cue_id) t.push('<span class="tag t-script">대본 근거</span>');
+    if (it.music && it.music.event === 'stop') t.push('<span class="tag">음악 멈춤</span>');
+    if (it.follows && it.kind !== 'speaker') t.push('<span class="tag">딸림</span>');
+    if (it.minor) t.push('<span class="tag t-minor">작은 소리</span>');
+    return t.join('');
+  }
 
   // -------------------------------------------------------------------- apply
   function applyState(st, { keepExport = false } = {}) {
     derive(st);
     if (!keepExport) S.lastExport = null;
     if (S.sel && !D.byId.has(S.sel)) S.sel = null;
+    if (S.line && !D.lines.has(S.line)) S.line = null;
+    if (S.extra && !D.extraById.has(S.extra)) S.extra = null;
+    if (S.person && !D.personByName.has(S.person)) S.person = null;
+    if (S.cell) {         // cell ids are numbered again by every placement: keep the cell at the same time
+      const c = D.cells.find((x) => Math.abs(x.start - num(S.cellAt, -99)) < 0.05) || null;
+      S.cell = c ? c.id : null;
+    }
+    if (S.ed && !(D.lines.has(S.ed.id) || D.extraById.has(S.ed.id))) S.ed = null;
     renderHeader();
+    renderTabs();
     renderChips();
-    renderList();
-    renderEvidence();
+    renderList({ keep: true });
+    renderDetail();
     renderTimeline();
     S.overlayKey = '';
     updateOverlay();
@@ -244,6 +340,19 @@
 
   // --------------------------------------------------------------------- list
   function renderChips() {
+    const kc = $('#kind-chips');
+    kc.hidden = S.view !== 'items';
+    $('#view-note').textContent = viewNote();
+    const vm = viewModel();
+    if (vm) {
+      const cur = S[vm.key];
+      $('#state-chips').innerHTML = vm.filters.map(([key, label]) => {
+        const n = vm.rows.filter((r) => vm.pass(r, key)).length;
+        const on = cur === key;
+        return `<button type="button" class="chip${on ? ' is-on' : ''}" data-act="filter" data-filter="${key}" data-toggle="1" aria-pressed="${on}">${label}<span class="n">${n}</span></button>`;
+      }).join('');
+      return;
+    }
     const byKind = D.items.filter((it) => S.kinds.has(it.kind));
     $('#state-chips').innerHTML = FILTERS.map(([key, label]) => {
       const n = byKind.filter((it) => inFilter(it, key)).length;
@@ -261,30 +370,67 @@
   function rowHtml(it) {
     const sel = it.id === S.sel;
     const k = KIND[it.kind] || { label: it.kind, cls: '' };
-    return `<div class="row${sel ? ' is-sel' : ''}${D.noRoom.has(it.id) ? ' is-noroom' : ''}" role="option" id="row-${esc(it.id)}" data-id="${esc(it.id)}" aria-selected="${sel}">
+    return `<div class="row${sel ? ' is-sel' : ''}${D.noRoom.has(it.id) ? ' is-noroom' : ''}" role="option" id="row-${esc(it.id)}" data-view="items" data-id="${esc(it.id)}" aria-selected="${sel}">
       <span class="r-time tnum">${fmtTime(it.onset)}</span>
       <span class="badge ${k.cls}">${esc(k.label)}</span>
-      <span class="r-main"><span class="r-phrase">${phraseHtml(it)}</span><span class="r-sub">${esc(summaryOf(it))}</span></span>
+      <span class="r-main"><span class="r-phrase">${phraseHtml(it)}</span><span class="r-sub">${itemTags(it)}${esc(summaryOf(it))}</span></span>
       ${pillHtml(it)}
     </div>`;
   }
-  function renderList() {
-    const vis = (D.visible = visibleItems());
+  /** Rows of a long list a chunk at a time: the rest come when the list is scrolled to the end. */
+  function renderRows(box, rows, selIdx, tail, empty) {
+    if (!rows.length && !tail) { box.innerHTML = `<div class="empty">${empty}</div>`; return; }
+    const lim = Math.max(S.limit, selIdx >= 0 ? selIdx + 40 : 0);
+    const more = rows.length > lim ? `<button type="button" class="more-row" data-act="more">아래 ${rows.length - lim}개 더 보기</button>` : '';
+    box.innerHTML = rows.slice(0, lim).join('') + more + (tail || '');
+    watchMore(box);
+  }
+  let moreObs = null;
+  function watchMore(box) {
+    const el = box.querySelector('.more-row');
+    if (!el || !window.IntersectionObserver) return;
+    if (!moreObs) moreObs = new IntersectionObserver((es) => { if (es.some((e) => e.isIntersecting)) showMore(); }, { root: box, rootMargin: '240px' });
+    moreObs.disconnect();
+    moreObs.observe(el);
+  }
+  function showMore() {
+    const box = $('#rows'), top = box.scrollTop;
+    S.limit += CHUNK;
+    renderList({ keep: true });
+    box.scrollTop = top;
+  }
+  function finishList(opts, rowId) {
+    const box = $('#rows');
+    const row = rowId && document.getElementById(rowId);
+    box.setAttribute('aria-activedescendant', row ? row.id : '');
+    if (row && !(opts && opts.keep)) row.scrollIntoView({ block: 'nearest' });
+  }
+  function renderList(opts = {}) {
+    if (S.view === 'lines') return renderLines(opts);
+    if (S.view === 'extras') return renderExtras(opts);
+    if (S.view === 'people') return renderPeople(opts);
+    if (S.view === 'cells') return renderCells(opts);
+    const all = visibleItems();
+    const vis = (D.visible = all.filter((it) => !isFolded(it)));
+    const minor = all.filter((it) => it.minor && !it.decided);
+    const folded = all.length - vis.length;
     const box = $('#rows');
     $('#list-count').textContent = `${vis.length} / ${D.items.length}개`;
+    const tail = folded || (S.showMinor && minor.length)
+      ? `<button type="button" class="fold-row" data-act="toggle-minor">${S.showMinor ? `작은 소리 ${minor.length}개 접기`
+        : `작은 소리 ${folded}개를 접어 둠 · 세기만으로 잡힌 소리 · 펼치기`}</button>` : '';
     if (!D.items.length) box.innerHTML = '<div class="empty">후보가 아직 없습니다 · 파이프라인이 items.json 을 만든 뒤 다시 여세요</div>';
-    else if (!vis.length) box.innerHTML = '<div class="empty">이 조건에 맞는 후보가 없습니다</div>';
-    else box.innerHTML = vis.map(rowHtml).join('');
-    const row = S.sel && document.getElementById(`row-${S.sel}`);
-    box.setAttribute('aria-activedescendant', row ? row.id : '');
-    if (row) row.scrollIntoView({ block: 'nearest' });
+    else renderRows(box, vis.map(rowHtml), vis.findIndex((it) => it.id === S.sel), tail, '이 조건에 맞는 후보가 없습니다');
+    finishList(opts, S.sel && `row-${S.sel}`);
   }
   function select(id, { seek = true, reveal = true } = {}) {
     const it = D.byId.get(id);
     if (!it) return;
+    if (S.view !== 'items') { S.view = 'items'; S.limit = CHUNK; renderTabs(); renderChips(); }
     if (S.sel !== id) S.moveOpen = null;
     S.sel = id;
     for (const r of $$('#rows .row.is-sel')) { r.classList.remove('is-sel'); r.setAttribute('aria-selected', 'false'); }
+    if (!document.getElementById(`row-${id}`)) renderList();      // folded, in a later chunk or another view
     const row = document.getElementById(`row-${id}`);
     if (row) {
       row.classList.add('is-sel');
@@ -305,14 +451,20 @@
     updateOverlay();
   }
   function moveSel(delta) {
-    const vis = D.visible;
-    if (!vis.length) return;
-    let i = vis.findIndex((it) => it.id === S.sel);
+    const v = S.view;
+    const vis = { items: D.visible, lines: D.visibleLines, extras: D.visibleExtras, people: D.visiblePeople, cells: D.visibleCells }[v];
+    if (!vis || !vis.length) return;
+    const key = (r) => (v === 'people' ? r.name : r.id);
+    const cur = { items: S.sel, lines: S.line, extras: S.extra, people: S.person, cells: S.cell }[v];
+    let i = vis.findIndex((r) => key(r) === cur);
     i = i < 0 ? (delta > 0 ? 0 : vis.length - 1) : clamp(i + delta, 0, vis.length - 1);
-    select(vis[i].id);
+    pick(v, key(vis[i]));
   }
   function setFilter(f, toggle = false) {
-    S.filter = toggle && S.filter === f && f !== 'all' ? 'all' : f;
+    const vm = viewModel();
+    if (vm) S[vm.key] = toggle && S[vm.key] === f && f !== 'all' ? 'all' : f;
+    else S.filter = toggle && S.filter === f && f !== 'all' ? 'all' : f;
+    S.limit = CHUNK;
     renderChips();
     renderList();
   }
@@ -331,6 +483,11 @@
   }
   function actionsHtml(it) {
     const id = it.id, f = it.final, done = it.decided, out = [];
+    if (it.added) {                         // what the writer added: change it or take it away
+      out.push(actBtn('고치기', 'added-edit', id, { primary: true }));
+      out.push(actBtn('지우기', 'added-delete', id, { cls: 'btn-danger' }));
+      return out.join('');
+    }
     if (it.kind === 'speaker') {
       out.push(actBtn('이름 표시', 'decide', id, { decision: 'include', on: done && f === 'include' }));
       out.push(actBtn('이름 생략', 'decide', id, { decision: 'exclude', on: done && f === 'exclude' }));
@@ -370,6 +527,15 @@
     }
     for (const f of it.flags || []) bits.push(`<span class="flag">${esc(FLAGS[f] || f)}</span>`);
     if (it.placement && it.placement.action === 'move') bits.push(`작가가 ${fmtTime(it.placement.t)}로 옮김`);
+    if (it.minor) bits.push('<span class="flag">작은 소리 · 세기만으로 잡힘</span>');
+    if (it.cue_id && it.origin !== 'script') bits.push('대본 지문과 맞춰 본 후보');
+    if (it.music && it.music.event === 'stop') bits.push('음악이 멈추는 자리');
+    if (it.follows) {
+      const r = D.byId.get(it.follows) || D.lines.get(it.follows);
+      const what = !r ? it.follows : r.kind ? `${(KIND[r.kind] || {}).label || ''} ${fmtTime(r.onset)} ${cut(phraseText(r), 18)}` : `대사 ${fmtTime(r.start)} ${cut(r.text, 18)}`;
+      const act = r && r.kind ? `data-act="goto-item" data-id="${esc(r.id)}"` : `data-act="goto-line" data-id="${esc(it.follows)}"`;
+      bits.push(`<button type="button" class="link" ${act}>${it.kind === 'speaker' ? '이어 말함 · 앞 줄' : '딸림 · 앞 후보'} ${esc(what)}</button>`);
+    }
     let agent = '';
     if (it.agent && it.agent.summary) {
       const tools = (it.agent.tools || []).map((t) => TOOLS[t] || t);
@@ -389,6 +555,12 @@
     const nr = D.noRoom.get(it.id);
     if (!nr) return '';
     const t = num(nr.t, num(it.onset));
+    if (it.added) {                         // the writer's own sound: change its time or take it away
+      return `<div class="nr-card${compact ? ' nr-compact' : ''}" data-nr="${esc(it.id)}"><span class="pill st-noroom">배치 확인 필요</span>
+        <span class="nr-reason">${esc(nr.reason || '넣을 자리가 부족')}</span><div class="nr-actions">
+        <button type="button" class="btn btn-sm" data-act="added-edit" data-id="${esc(it.id)}">시각 고치기</button>
+        <button type="button" class="btn btn-sm btn-danger" data-act="added-delete" data-id="${esc(it.id)}">지우기</button></div></div>`;
+    }
     const sw = it.swap_prev || {};
     const swap = sw.error
       ? `<button type="button" class="btn btn-sm is-unavailable" data-act="swap-why" data-reason="${esc(sw.error)}" title="${esc(sw.error)}" aria-disabled="true">앞 칸과 바꾸기</button>`
@@ -429,8 +601,21 @@
         <span class="badge ${k.cls}">${k.label}</span><span class="ev-time tnum">${fmtTime(it.onset)}</span>
         <span class="ev-phrase" title="${esc(phraseText(it))}">${phraseHtml(it)}</span>${pillHtml(it)}
       </div>
-      ${noteHtml(it)}${noRoomHtml(it, true)}
+      ${noteHtml(it)}${noRoomHtml(it, true)}${scriptMoveHtml(it)}
       <div class="ev-rows">${evidenceRowsHtml(it)}</div>`;
+  }
+  /** A candidate the script writes down: its time is a guess, the writer moves it inside the span
+      the script gives (the lines before and after it). */
+  function scriptMoveHtml(it) {
+    if (it.origin !== 'script' || it.added || !(it.kind === 'sfx' || it.kind === 'music')) return '';
+    const w = it.window || [it.t0, it.t1];
+    const t = it.placement && it.placement.action === 'move' ? it.placement.t : num(it.onset);
+    return `<div class="move-box" data-box="move"><span class="mb-k">대본 단서 · 시각 어림</span>
+      <span class="muted tnum">대본이 말한 범위 ${fmtTime(w[0])}–${fmtTime(w[1])}</span>
+      <span class="move-form"><input class="time-input" data-f="t" value="${fmtTime2(t)}" aria-label="옮길 시각 (분:초)" inputmode="decimal" autocomplete="off">
+      <button type="button" class="btn btn-sm btn-text" data-act="ed-now" data-f="t" title="지금 재생 위치를 넣는다">지금 위치</button>
+      <button type="button" class="btn btn-sm btn-primary" data-act="item-move" data-id="${esc(it.id)}" data-primary="1">여기로 옮기기</button>
+      ${it.placement && it.placement.action === 'move' ? `<button type="button" class="btn btn-sm btn-text" data-act="place" data-action="clear" data-id="${esc(it.id)}">옮기기 취소</button>` : ''}</span></div>`;
   }
 
   // ----------------------------------------------------------------- timeline
@@ -504,10 +689,24 @@
       lanes[it.kind].push({ s, e, it });
     }
     const TLG = tlGeometry();
+    // the scene band under the ruler: found / not sure where / not in the film (a mark where it would be)
+    let prevEnd = P.t0;
+    for (const sc of D.scenes) {
+      const head = `장면 ${sc.number || sc.id} · ${SCENE_ST[sc.status] || sc.status || ''}${sc.heading ? ` · ${sc.heading}` : ''}`;
+      if (sc.start != null && sc.end != null) {
+        prevEnd = sc.end;
+        if (sc.end < P.t0 || sc.start > P.t1) continue;
+        const l = x(Math.max(sc.start, P.t0)), w = Math.max(2, x(Math.min(sc.end, P.t1)) - l - 1);
+        parts.push(`<div class="scb sc-${esc(sc.status || 'found')}" data-scene="${esc(sc.id)}" style="left:${l.toFixed(1)}px;width:${w.toFixed(1)}px;top:${TLG.ruler + 1}px;height:${TLG.band - 3}px" title="${esc(`${head}\n${fmtTime(sc.start)}–${fmtTime(sc.end)}`)}"></div>`);
+      } else if (sc.status === 'absent' && prevEnd >= P.t0 && prevEnd <= P.t1) {
+        parts.push(`<div class="scb-miss" style="left:${x(prevEnd).toFixed(1)}px;top:${TLG.ruler}px;height:${TLG.band - 1}px" title="${esc(head)}"></div>`);
+      }
+    }
+    placeEnv(TLG, pps);
     for (const [name, blocks] of Object.entries(lanes)) {
       blocks.sort((a, b) => a.s - b.s);
       pack(blocks);
-      const laneTop = TLG.ruler + TLG.pad + LANE[name] * (TLG.lane + TLG.gap);
+      const laneTop = TLG.ruler + TLG.band + TLG.pad + LANE[name] * (TLG.lane + TLG.gap);
       for (const b of blocks) {
         const n = b.ntr;
         const top = laneTop + b.track * (TLG.lane / n);
@@ -534,11 +733,15 @@
   }
   function markTimeline() {
     for (const el of $$('#tl-content .is-sel, #tl-content .is-rel')) el.classList.remove('is-sel', 'is-rel');
-    const it = D.byId.get(S.sel);
-    if (!it) return;
-    const blk = $(`#tl-content [data-id="${cssEsc(it.id)}"]`);
+    let blkId = null, cells = [], cls = 'is-rel';
+    if (S.view === 'items') { const it = D.byId.get(S.sel); if (it) { blkId = it.id; cells = it.cells || []; } }
+    else if (S.view === 'lines') {
+      const ln = D.lines.get(S.line);
+      if (ln) { const sp = D.spkByLine.get(ln.id); blkId = sp ? sp.id : null; cells = ln.cells || []; }
+    } else if (S.view === 'cells' && S.cell) { cells = [S.cell]; cls = 'is-sel'; }
+    const blk = blkId && $(`#tl-content [data-id="${cssEsc(blkId)}"]`);
     if (blk) blk.classList.add('is-sel');
-    for (const cid of it.cells || []) { const c = $(`#tl-content [data-cell="${cssEsc(cid)}"]`); if (c) c.classList.add('is-rel'); }
+    for (const cid of cells) { const c = $(`#tl-content [data-cell="${cssEsc(cid)}"]`); if (c) c.classList.add(cls); }
   }
   function updatePlayhead() {
     if (S.P) $('#tl-head').style.transform = `translateX(${((S.t - S.P.t0) * S.pps).toFixed(1)}px)`;
@@ -563,6 +766,15 @@
     const c = D.cellById.get(cid);
     if (!c) return;
     if (S.modal) closeModal();
+    if (S.view === 'cells') { pick('cells', cid); return; }
+    if (S.view === 'lines') {
+      const lid = (c.refs || []).find((r) => D.lines.has(r));
+      if (lid) pick('lines', lid, { seek: false });
+      clearRange(video);
+      seekTo(c.start + 0.02);
+      revealInTimeline(c.start, c.end);
+      return;
+    }
     const ref = (c.refs || []).find((r) => D.byId.has(r)) || (c.refs || []).map((r) => D.spkByLine.get(r)).find(Boolean);
     const id = typeof ref === 'string' ? ref : ref && ref.id;
     if (id) select(id, { seek: false });
@@ -579,26 +791,35 @@
       const m = /^(-\s*)?(\[[^\]]+\])(\s*)([\s\S]*)$/.exec(ln);
       // a leading [ ] is a speaker label only when it is the label of one of this cell's lines;
       // any other one is a sound ([재채기] 나도야!) or the language of a later piece ([영어] …)
-      const lid = m && refs.find((r) => !used.has(r) && spkLabel(D.spkByLine.get(r)) === m[2]);
+      // the label of a line with a speaker item opens the speaker dialog; one without (a line the
+      // writer added or brought back) opens the line
+      const lid = m && refs.find((r) => !used.has(r) && (spkLabel(D.spkByLine.get(r)) || (D.lines.get(r) || {}).label) === m[2]);
       if (!lid) return `<div class="sub-line">${esc(ln)}</div>`;
       used.add(lid);
       const sp = D.spkByLine.get(lid);
-      return `<div class="sub-line">${esc(m[1] || '')}<span class="sub-name" data-act="name" data-id="${esc(sp.id)}" title="화자 고치기">${esc(m[2])}</span>${esc(m[3])}${esc(m[4])}</div>`;
+      const act = sp ? `data-act="name" data-id="${esc(sp.id)}"` : `data-act="goto-line" data-id="${esc(lid)}"`;
+      return `<div class="sub-line">${esc(m[1] || '')}<span class="sub-name" ${act} title="화자 고치기">${esc(m[2])}</span>${esc(m[3])}${esc(m[4])}</div>`;
     }).join('')}</div>`;
   }
   function updateOverlay() {
     const t = S.t;
     const act = D.cells.filter((c) => c.start <= t + 1e-3 && t < c.end - 1e-3);
-    // the selected sound that is not in any cell is shown as a ghost, so the writer sees what is left out
-    const it = D.byId.get(S.sel);
-    const ghost = it && it.kind !== 'speaker' && !(it.cells || []).length && t >= num(it.onset) - 0.6 && t < num(it.onset) + 3 ? it : null;
-    const key = act.map((c) => `${c.id}|${c.pos || ''}|${(c.lines || []).join('\n')}`).join('||') + (ghost ? `#${ghost.id}|${ghost.phrase}|${stateOf(ghost)}` : '');
+    // the selected sound or line that is not in any cell is shown as a ghost, so the writer sees what is left out
+    const it = S.view === 'items' ? D.byId.get(S.sel) : null;
+    let ghost = it && it.kind !== 'speaker' && !(it.cells || []).length && t >= num(it.onset) - 0.6 && t < num(it.onset) + 3
+      ? { id: it.id, text: it.phrase || '', tag: `${stateLabel(it)} · 자막에 없음`, cls: `st-${stateOf(it)}` } : null;
+    const ln = S.view === 'lines' ? D.lines.get(S.line) : null;
+    const span = ln && (ln.start != null ? [ln.start, ln.end] : ln.guess);
+    if (!ghost && ln && span && !(ln.cells || []).length && t >= span[0] - 0.3 && t < Math.max(span[1], span[0] + 1)) {
+      ghost = { id: ln.id, text: `${ln.label ? `${ln.label} ` : ''}${ln.text}`, tag: `${lineStateLabel(ln)} · 자막에 없음`, cls: 'st-noroom' };
+    }
+    const key = act.map((c) => `${c.id}|${c.pos || ''}|${(c.lines || []).join('\n')}`).join('||') + (ghost ? `#${ghost.id}|${ghost.text}|${ghost.tag}` : '');
     if (key === S.overlayKey) return;
     S.overlayKey = key;
     // a cell with pos "top" is drawn at the top of the picture, as the TTML export places it
     let html = act.filter((c) => c.pos !== 'top').map(cellHtml).join('');
     if (ghost) {
-      html += `<div class="sub-ghost"><span class="ghost-tag st-${stateOf(ghost)}">${esc(stateLabel(ghost))} · 자막에 없음</span><div class="sub-line">${esc(ghost.phrase || '')}</div></div>`;
+      html += `<div class="sub-ghost"><span class="ghost-tag ${ghost.cls}">${esc(ghost.tag)}</span><div class="sub-line">${esc(ghost.text)}</div></div>`;
     }
     $('#subs').innerHTML = html;
     const top = $('#subs-top');
@@ -615,9 +836,21 @@
     return t;
   }
   const seekTo = (t) => seekVideo(video, t);
+  const fpsOf = () => num(S.P && S.P.fps, 25) || 25;
+  /** The frame shown at t (frames start at k / fps, as the cell times do). */
+  const frameOf = (t) => Math.floor(num(t) * fpsOf() + 1e-6);
+  /** One frame back or on (the middle of the frame, so the decoder shows that frame); Shift: a second. */
+  function stepFrame(n, second = false) {
+    if (!S.P) return;
+    if (!video.paused) video.pause();
+    clearRange(video);
+    if (second) { seekTo(S.t + n); return; }
+    seekTo((frameOf(S.t) + n + 0.5) / fpsOf());
+    followPlayhead();
+  }
   function onTimeUI() {
     $('#stage-time').textContent = fmtTime(S.t);
-    $('#tl-clock').textContent = `${fmtTime(S.t)} / ${fmtTime(S.P.t1)}`;
+    $('#tl-clock').textContent = `${fmtTime(S.t)} · ${frameOf(S.t)}프레임 / ${fmtTime(S.P.t1)}`;
     updatePlayhead();
     updateOverlay();
     if (S.still) scheduleStill();
@@ -741,6 +974,7 @@
   function decide(id, d) {
     const it = D.byId.get(id);
     if (!it) return Promise.resolve(null);
+    if (it.added) { toast('작가가 넣은 것은 고치거나 지웁니다', 'error'); return Promise.resolve(null); }
     return mutate(`api/items/${encodeURIComponent(id)}`, { decision: d }, decisionMsg(it, d));
   }
   function acceptRec() {
@@ -791,6 +1025,7 @@
   function openEdit(id) {
     const it = D.byId.get(id);
     if (!it) return;
+    if (it.added) { const a = D.added.get(id); if (a) openAdd(a.kind, a); return; }
     pauseMain();
     teardownPreview();
     if (it.kind === 'speaker') openSpeaker(it);
@@ -1045,8 +1280,22 @@
   }
   /** The chosen name without brackets: a writer who types "[빌]" or "(빌)" means the name 빌 (the label adds [ ]). */
   function chosenName(m) { return String(m.who === 'new' ? m.newName : m.chars[Number(m.who)] || '').trim().replace(/^[[(]\s*|\s*[\])]$/g, ''); }
+  /** The lines a name change on line ``lineId`` reaches, by person as the server counts them
+      (cboe.people.scope_lines): line · from_here · before (this one left out) · scene · person. */
+  function scopeLines(lineId, which) {
+    const all = D.allLines;
+    const idx = all.findIndex((l) => l.id === lineId);
+    if (idx < 0 || which === 'line') return [lineId];
+    const me = all[idx];
+    const same = all.map((l, i) => [i, l]).filter(([, l]) => (l.name || null) === (me.name || null));
+    const pickIds = (f) => same.filter(f).map(([, l]) => l.id);
+    if (which === 'from_here') return pickIds(([i]) => i >= idx);
+    if (which === 'before') return pickIds(([i]) => i < idx);
+    if (which === 'scene') return pickIds(([, l]) => (l.scene_id || null) === (me.scene_id || null));
+    return pickIds(() => true);
+  }
   function syncSpeaker() {
-    const m = S.modal, it = D.byId.get(m.id);
+    const m = S.modal, it = m.it || D.byId.get(m.id);
     for (const el of $$('#modal-box .opt[data-who]')) {
       const on = el.dataset.who === m.who;
       el.classList.toggle('is-on', on);
@@ -1087,21 +1336,22 @@
     const cur = (it.speaker && it.speaker.name) || scriptName || '';
     const chars = (S.st.characters || []).slice();
     if (cur && !chars.includes(cur)) chars.unshift(cur);
-    const key = !ln ? null : ln.speaker != null ? 'speaker' : ln.voice != null ? 'voice' : null;
-    const same = key ? D.items.filter((o) => o.kind === 'speaker' && (lineOf(o) || {})[key] === ln[key]).length : 1;
-    S.modal = { type: 'speaker', id: it.id, chars, who: cur ? String(chars.indexOf(cur)) : 'new', newName: '', show: it.final !== 'exclude', scope: 'line', scopeKey: key, same };
-    const t = (ln ? ln.start : num(it.onset)) + 0.3;
+    const lid = ln ? ln.id : null;
+    const counts = Object.fromEntries(SCOPES.map(([k]) => [k, lid ? scopeLines(lid, k).length : 1]));
+    S.modal = { type: 'speaker', id: it.id, it: it.lineMode ? it : null, chars, who: cur ? String(chars.indexOf(cur)) : 'new', newName: '', show: it.final !== 'exclude', scope: 'line', counts };
+    const t = (ln && ln.start != null ? ln.start : num(it.onset)) + 0.3;
     const near = D.items.filter((o) => o.kind === 'speaker');
     const pos = near.findIndex((o) => o.id === it.id);
-    const nb = near.slice(Math.max(0, pos - 2), pos + 3);
+    const nb = pos < 0 ? [] : near.slice(Math.max(0, pos - 2), pos + 3);
     $('#modal-box').innerHTML = `<div class="mdl-grid">
       <section class="mdl-card">
         ${headLeft(it)}
         ${previewHtml(t)}
-        <div class="sec">자막의 이름이나 목록의 화자를 누르면 고칠 수 있다</div>
+        ${nb.length ? `<div class="sec">자막의 이름이나 목록의 화자를 누르면 고칠 수 있다</div>
         <div class="nb-lines">${nb.map((o) => `<button type="button" class="nb-line${o.id === it.id ? ' is-cur' : ''}" data-act="edit" data-id="${esc(o.id)}">
           <span class="t tnum">${fmtTime(o.onset)}</span><span class="badge k-speaker">화자</span>
-          <span class="tx">${phraseHtml(o)}<small>${esc(summaryOf(o))}</small></span>${pillHtml(o)}</button>`).join('')}</div>
+          <span class="tx">${phraseHtml(o)}<small>${esc(summaryOf(o))}</small></span>${pillHtml(o)}</button>`).join('')}</div>`
+        : '<div class="sec">화자 항목이 없는 줄 · 이름 표시는 이 줄에만 정한다</div>'}
       </section>
       <section class="mdl-card">
         <div class="mdl-head"><span class="badge k-speaker">화자</span><h3 id="modal-title">화자와 표시 고치기</h3><span class="spacer"></span>
@@ -1115,9 +1365,8 @@
         <div class="ev-rows framed">${evidenceRowsHtml(it, 'pv')}</div>
         <div class="mdl-row2">
           <div><div class="sec">이름 표시</div><label class="switch"><input type="checkbox" id="f-show" role="switch"${S.modal.show ? ' checked' : ''}><span id="f-show-label">표시</span></label></div>
-          <div><div class="sec">바꿀 범위</div><div class="seg seg-scope" role="radiogroup" aria-label="바꿀 범위">
-            <label><input type="radio" name="m-scope" value="line" checked><span>이 줄만</span></label>
-            <label title="${key ? '대본에서 같은 화자인 줄의 이름을 모두 바꾼다' : '대본 화자가 없는 줄'}"><input type="radio" name="m-scope" value="all"${key ? '' : ' disabled'}><span>같은 화자 줄 모두 · ${same}줄</span></label>
+          <div><div class="sec">이름을 바꿀 범위<span class="sub">같은 인물의 줄만 · 인물 표의 표시와 따로</span></div><div class="seg seg-scope seg-wrap" role="radiogroup" aria-label="이름을 바꿀 범위">
+            ${SCOPES.map(([k, label]) => `<label title="${esc(k === 'before' ? '이 줄은 그대로 두고 앞의 줄만 바꾼다' : `${label}의 이름을 바꾼다`)}"><input type="radio" name="m-scope" value="${k}"${k === 'line' ? ' checked' : ''}${counts[k] ? '' : ' disabled'}><span>${label} · ${counts[k]}줄</span></label>`).join('')}
           </div></div>
         </div>
         <div class="mdl-actions"><button type="button" class="btn btn-primary btn-lg" data-act="m-confirm">확정</button><button type="button" class="btn btn-lg" data-act="close">취소</button>
@@ -1129,17 +1378,40 @@
     focusFirst();
   }
   async function confirmSpeaker() {
-    const m = S.modal, it = D.byId.get(m.id);
+    const m = S.modal, it = m.it || D.byId.get(m.id);
     const name = chosenName(m);
     if (!name) { toast('이름을 고르거나 입력하세요', 'error'); const f = $('#f-newname'); if (f) f.focus(); return; }
-    const body = { decision: m.show ? 'include' : 'exclude' };
-    const scope = m.scope === 'all' && m.scopeKey ? m.scopeKey : 'line';
-    if (name !== ((it.speaker && it.speaker.name) || '') || scope !== 'line') { body.name = name; body.scope = scope; }
+    const scope = m.scope || 'line';
+    const renamed = name !== ((it.speaker && it.speaker.name) || '') || scope !== 'line';
+    const scopeKo = (SCOPES.find(([k]) => k === scope) || [])[1] || '이 줄';
     const msg = scope !== 'line'
-      ? `같은 화자 ${m.same}줄의 이름을 ${name}${ro(name)} 바꿈 · 이 줄은 ${m.show ? '이름 표시' : '이름 생략'}`
+      ? `${scopeKo} ${num(m.counts && m.counts[scope])}줄의 이름을 ${name}${ro(name)} 바꿈 · 이 줄은 ${m.show ? '이름 표시' : '이름 생략'}`
       : `${m.show ? '이름 표시' : '이름 생략'} · ${cut(m.show ? `${nameLabel(name, (it.speaker && it.speaker.label_tail) || '')} ${speakerText(it)}` : speakerText(it), 34)}`;
+    if (it.lineMode) {                      // a line without a speaker item: its name and show_name directly
+      const ln = D.lines.get(it.speaker.line_id);
+      if (!ln) return;
+      let st = true;
+      if (renamed) st = await mutate(`api/lines/${enc(ln.id)}/speaker`, { name, scope }, msg);
+      if (st && m.show !== !!ln.show_name) st = await lineUpdate(ln, { show_name: m.show }, renamed ? null : msg);
+      if (st) closeModal();
+      return;
+    }
+    const body = { decision: m.show ? 'include' : 'exclude' };
+    if (renamed) { body.name = name; body.scope = scope; }
     const st = await mutate(`api/items/${encodeURIComponent(m.id)}`, body, msg);
     if (st) closeModal();
+  }
+  /** The speaker dialog for a line: its speaker item, or the line itself when it has none. */
+  function openLineSpeaker(ln) {
+    if (ln.speaker_item && D.byId.has(ln.speaker_item)) { openEdit(ln.speaker_item); return; }
+    pauseMain();
+    teardownPreview();
+    const tail = ln.language ? `${STYLE().label_sep}${ln.language}` : '';
+    openSpeaker({
+      id: ln.id, kind: 'speaker', lineMode: true, onset: ln.start != null ? ln.start : 0, decided: true,
+      final: ln.show_name ? 'include' : 'exclude', evidence: [], cells: ln.cells || [], flags: [],
+      speaker: { line_id: ln.id, name: ln.name || '', label: ln.label || '', label_tail: tail },
+    });
   }
 
   // 내보내기 전 검사 (3.5)
@@ -1151,6 +1423,23 @@
   function xpRow(kind, name, desc, actions = '') {
     const icon = { ok: '✓', warn: '!', bad: '!', info: '…' }[kind];
     return `<div class="xp-row"><span class="xi ${kind}" aria-hidden="true">${icon}</span><span class="nm2">${name}</span><span class="ds">${desc}</span><span class="ac">${actions}</span></div>`;
+  }
+  /** 내보내기 전 검사: the dialogue lines, the speech that is in no script line and the names shown early. */
+  function linesXpHtml(chk) {
+    const ln = chk.lines || {}, n = (k) => (ln[k] || []).length;
+    const go = (view, f, label = '보기') => `<button type="button" class="btn btn-sm" data-act="xp-view" data-view="${view}" data-filter="${f}">${label}</button>`;
+    const bits = [n('differs_open') && `다른데 고르지 않은 줄 ${n('differs_open')}개 (대본 글로 나감)`,
+      n('no_room') && `자리가 없어 빠진 줄 ${n('no_room')}개`, n('unheard') && `시각 추정 ${n('unheard')}줄`].filter(Boolean);
+    const out = [xpRow(n('no_room') ? 'bad' : n('differs_open') ? 'warn' : n('unheard') ? 'info' : 'ok', '대사 줄',
+      bits.length ? bits.join(' · ') : '고를 줄 없음',
+      [n('differs_open') && go('lines', 'differs', '다른 줄 보기'), n('no_room') && go('lines', 'noroom', '자리 없는 줄')].filter(Boolean).join(''))];
+    const out2 = [n('absent') && `영화에 없음 ${n('absent')}`, n('out_of_range') && `구간 밖 ${n('out_of_range')}`, n('writer_excluded') && `작가가 뺌 ${n('writer_excluded')}`].filter(Boolean);
+    if (out2.length) out.push(xpRow('info', '빠진 줄', `${out2.join(' · ')} · 자막에 넣지 않음`, go('lines', 'out')));
+    const nx = (chk.extras_open || []).length;
+    if (nx) out.push(xpRow('info', '대본에 없는 말', `${nx}개 정하지 않음 · 자막에 넣지 않음`, go('extras', 'open')));
+    const ne = (chk.names_early || []).length;
+    if (ne) out.push(xpRow('warn', '이름이 일찍 나감', `${ne}명 · 이름이 밝혀지기 전에 이름 표시가 나간다`, go('people', 'early')));
+    return out.join('');
   }
   function savedHtml() {
     const r = S.lastExport;
@@ -1194,6 +1483,7 @@
             nC ? '<button type="button" class="btn btn-sm" data-act="xp-goto" data-filter="check">목록에서 보기</button>' : '')}
           ${(chk.check_speaker || []).length ? xpRow('warn', '화자 확인 필요', `${chk.check_speaker.length}줄 · 정하지 않으면 이름 없이 대사만 나감`,
             '<button type="button" class="btn btn-sm" data-act="xp-goto" data-filter="check">목록에서 보기</button>') : ''}
+          ${linesXpHtml(chk)}
           ${xpRow(nN ? 'bad' : 'ok', '배치 확인 필요', nN ? `${nN}개 · 아래에서 정한다` : '0개 · 모두 자리를 찾음')}
           ${xpRow(nE ? 'info' : 'ok', '제외 추천', nE ? `${nE}개 · 목록을 훑어본 뒤 묶어서 확정` : '모두 확정함',
             nE ? '<button type="button" class="btn btn-sm" data-act="xp-goto" data-filter="exclude">목록에서 보기</button><button type="button" class="btn btn-sm btn-primary" data-act="bulk-exclude">묶어서 확정</button>' : '')}
@@ -1272,10 +1562,857 @@
     if (m.type === 'sfx') confirmSfx();
     else if (m.type === 'music') confirmMusic();
     else if (m.type === 'speaker') confirmSpeaker();
+    else if (m.type === 'add') saveAdd();
   }
   function focusFirst() {
     const el = $('#modal-box .opt.is-on input[type=radio]') || $('#modal-box [data-act="m-confirm"]');
     if (el) el.focus({ preventScroll: true });
+  }
+
+  // ==================================================================== views
+  // 대사 · 대본에 없는 말 · 인물 · 칸 (감사 1-01·1-04·1-06·3-01·3-10·9-x3): each view lists its rows on
+  // the right and shows the picked one on the left, where the writer decides. Nothing in a line's
+  // words changes unless the writer picks it.
+  function viewModel(v = S.view) {
+    if (v === 'lines') return { rows: D.allLines, filters: LINE_FILTERS, key: 'lf', pass: lineIn };
+    if (v === 'extras') return { rows: D.extras, filters: EXTRA_FILTERS, key: 'xf', pass: extraIn };
+    if (v === 'people') return { rows: D.people, filters: PEOPLE_FILTERS, key: 'pf', pass: personIn };
+    if (v === 'cells') return { rows: D.cells, filters: CELL_FILTERS, key: 'cf', pass: cellIn };
+    return null;
+  }
+  const peopleOpen = () => D.people.filter((p) => personIn(p, 'open'));
+  function todoCount(v) {
+    const sm = (S.st && S.st.summary) || {};
+    if (v === 'items') return num(sm.final && sm.final.check);
+    if (v === 'lines') return num(sm.lines && sm.lines.differs_open) + num(sm.lines && sm.lines.no_room);
+    if (v === 'extras') return num(sm.extras && sm.extras.open);
+    if (v === 'people') return peopleOpen().length;
+    if (v === 'cells') return num(sm.guide && sm.guide.must);
+    return 0;
+  }
+  function renderTabs() {
+    $('#tabs').innerHTML = VIEWS.map(([v, label], i) => {
+      const on = S.view === v, n = todoCount(v);
+      return `<button type="button" class="tab${on ? ' is-on' : ''}" role="tab" aria-selected="${on}" data-act="view" data-view="${v}" title="${esc(VIEW_HINT[v])} · 단축키 ${i + 1}">${label}${n ? `<span class="n" title="${esc(TODO_TITLE[v])}">${n}</span>` : ''}</button>`;
+    }).join('');
+    $('#list-hint').textContent = VIEW_HINT[S.view];
+    $('#list-title').textContent = (VIEWS.find(([v]) => v === S.view) || [])[1] || '';
+    renderKeys();
+  }
+  function viewNote() {
+    const sm = (S.st && S.st.summary) || {};
+    if (S.view === 'lines') {
+      const l = sm.lines || {}, ex = l.excluded || {};
+      const out = num(ex.absent) + num(ex.out_of_range) + num(ex.writer) + num(ex.no_time);
+      return `자막에 ${num(l.included)}줄 · 빠짐 ${out}줄${num(l.added) ? ` · 작가가 넣은 줄 ${l.added}` : ''}`;
+    }
+    if (S.view === 'extras') { const x = sm.extras || {}; return `정하지 않음 ${num(x.open)} / ${num(x.total)}개 · 정하지 않으면 자막에 넣지 않음`; }
+    if (S.view === 'people') return `정하지 않은 인물 ${peopleOpen().length}명 · 이름이 일찍 나가는 인물 ${num(sm.people && sm.people.early)}명`;
+    if (S.view === 'cells') { const g = sm.guide || {}; return `의무 위반 ${num(g.must)}칸 · 권고 ${num(g.should)}칸`; }
+    return '';
+  }
+  function renderKeys() {
+    const k = (keys, label) => `<span>${keys.map((x) => `<kbd>${x}</kbd>`).join('')} ${label}</span>`;
+    const per = {
+      items: [k(['Enter'], '추천대로'), k(['I'], '포함'), k(['E'], '제외')],
+      lines: [k(['I'], '넣기'), k(['E'], '빼기')],
+      extras: [k(['E'], '무시')],
+    }[S.view] || [];
+    const tail = S.view === 'items' ? '<span class="keys-tail">두 번 누르면 고치기</span>' : `<span class="keys-tail">${k(['1'], '~')}${k(['5'], '보기')}</span>`;
+    $('#keys').innerHTML = [k(['↑', '↓'], '이동'), k(['←', '→'], '한 프레임'), k(['Space'], '재생'), ...per, k(['N'], '새로 넣기'), tail].join('');
+  }
+  function setView(v) {
+    if (!VIEWS.some(([x]) => x === v) || S.view === v) return;
+    S.view = v;
+    S.limit = CHUNK;
+    S.ed = null;
+    renderTabs();
+    renderChips();
+    renderList();
+    renderDetail();
+    markTimeline();
+    S.overlayKey = '';
+    updateOverlay();
+  }
+  const SEL_KEY = { lines: 'line', extras: 'extra', people: 'person', cells: 'cell' };
+  /** Pick a row of a view (and switch to that view): the list marks it, the left panel shows it, the
+      video goes to it. */
+  function pick(view, id, { seek = true } = {}) {
+    if (view === 'items') { select(id, { seek }); return; }
+    if (S.view !== view) { S.view = view; S.limit = CHUNK; renderTabs(); renderChips(); }
+    const k = SEL_KEY[view];
+    if (S[k] !== id) S.ed = null;
+    S[k] = id;
+    if (view === 'cells') S.cellAt = (D.cellById.get(id) || {}).start;
+    renderList();
+    renderDetail();
+    markTimeline();
+    if (seek) {
+      const span = spanOf(view, id);
+      if (span) {
+        clearRange(video);
+        if (!video.paused) video.pause();
+        seekTo(span[0]);
+        revealInTimeline(span[0], span[1]);
+      }
+    }
+    S.overlayKey = '';
+    updateOverlay();
+  }
+  function spanOf(view, id) {
+    if (view === 'lines') {
+      const ln = D.lines.get(id);
+      if (!ln) return null;
+      const c = (ln.cells || []).map((x) => D.cellById.get(x)).find(Boolean);
+      if (c) return [c.start + 0.02, c.end];                 // its first cell shows on the picture
+      if (ln.start != null) return [ln.start, ln.end];
+      return ln.guess ? [ln.guess[0], ln.guess[1]] : null;
+    }
+    if (view === 'extras') { const x = D.extraById.get(id); return x ? [x.start, x.end] : null; }
+    if (view === 'cells') { const c = D.cellById.get(id); return c ? [c.start + 0.02, c.end] : null; }
+    return null;
+  }
+  function renderDetail() {
+    if (S.view === 'lines') return renderLineDetail();
+    if (S.view === 'extras') return renderExtraDetail();
+    if (S.view === 'people') return renderPersonDetail();
+    if (S.view === 'cells') return renderCellDetail();
+    return renderEvidence();
+  }
+  const detailHead = (title, hint, actions) => `<div class="ev-head"><h2>${title}</h2>${hint ? `<span class="hint">${hint}</span>` : ''}<div class="ev-actions">${actions || ''}</div></div>`;
+  /** A line's time from its text, for a line put back without a time: the reading speed and the
+      shortest and longest cell of the style the server sent. */
+  function lineDur(text) {
+    const st = STYLE();
+    const d = width(text || '') / (num(st.cps) || 1) + 0.3;
+    return clamp(d, num(st.min_dur, d), Math.max(num(st.min_dur, d), num(st.max_dur, d)));
+  }
+  /** Store a change of a line: a script line through /api/lines, a line the writer added through /api/added. */
+  function lineUpdate(ln, fields, msg) {
+    if (D.added.has(ln.id)) {
+      const f = { ...fields };
+      delete f.include;
+      delete f.text_from;
+      if (!Object.keys(f).length) return Promise.resolve(null);
+      return mutate(`api/added/${enc(ln.id)}`, f, msg);
+    }
+    return mutate(`api/lines/${enc(ln.id)}`, fields, msg);
+  }
+  /** [start, end] typed in a time box (the nearest [data-box] around ``el``), or null. */
+  function readSpan(el) {
+    const box = el.closest('[data-box]');
+    const v = (f) => { const i = box && box.querySelector(`[data-f="${f}"]`); return parseTime(i && i.value); };
+    const s = v('start'), e = v('end');
+    if (!Number.isFinite(s) || !Number.isFinite(e) || e <= s) {
+      toast('시작과 끝을 03:52.40 처럼 적고, 끝은 시작보다 뒤로', 'error');
+      return null;
+    }
+    return [Math.round(s * 1000) / 1000, Math.round(e * 1000) / 1000];
+  }
+  function timeBoxHtml(box, s, e, buttons) {
+    return `<div class="ed-time" data-box="${box}">
+      <label>시작 <input class="time-input" data-f="start" value="${fmtTime2(s)}" inputmode="decimal" autocomplete="off"></label>
+      <button type="button" class="btn btn-sm btn-text" data-act="ed-now" data-f="start" title="지금 재생 위치를 넣는다">지금</button>
+      <label>끝 <input class="time-input" data-f="end" value="${fmtTime2(e)}" inputmode="decimal" autocomplete="off"></label>
+      <button type="button" class="btn btn-sm btn-text" data-act="ed-now" data-f="end" title="지금 재생 위치를 넣는다">지금</button>
+      ${buttons}</div>`;
+  }
+
+  // ---------------------------------------------------------- 대사 (lines)
+  function lineIn(ln, f) {
+    switch (f) {
+      case 'differs': return ln.status === 'differs';
+      case 'unheard': return ln.status === 'unheard';
+      case 'out': return ln.status === 'absent' || ln.status === 'out_of_range';
+      case 'spelling': return (ln.hints || []).includes('spelling');
+      case 'lang': return !!(ln.language || ln.sung);
+      case 'noroom': return !!ln.no_room;
+      case 'writer': return D.added.has(ln.id) || !!(ln.decision && Object.keys(ln.decision).length);
+      default: return true;
+    }
+  }
+  function lineState(ln) {
+    if (ln.no_room) return 'noroom';
+    if (D.added.has(ln.id)) return 'added';
+    if (ln.excluded) return LSTATE[ln.excluded] ? ln.excluded : 'no_time';      // absent · out_of_range · writer · no_time
+    if (ln.status === 'absent' || ln.status === 'out_of_range') return 'revived';
+    if (ln.status === 'differs') return ln.decision && (ln.decision.text_from || ln.decision.text) ? 'picked' : 'differs';
+    if (ln.status === 'unheard') return ln.estimated ? 'unheard' : 'pinned';
+    return ln.pinned ? 'pinned' : 'ok';
+  }
+  function lineStateLabel(ln, s = lineState(ln)) {
+    if (s === 'picked') return PICKED[ln.decision.text_from || 'writer'] || '고름';
+    return LSTATE[s][0];
+  }
+  const linePill = (ln) => { const s = lineState(ln); return `<span class="pill ${LSTATE[s][1]}">${esc(lineStateLabel(ln, s))}</span>`; };
+  const whoOf = (ln) => ln.label_name || ln.name || ln.speaker || '';
+  function lineSub(ln) {
+    const bits = [];
+    const s = lineState(ln);
+    if (s === 'noroom') bits.push(`자리 없음 · ${ln.no_room.reason || ''}`);
+    else if (ln.excluded) bits.push(((S.st.line_codes || {}).excluded || {})[ln.excluded] || ln.excluded);
+    if (ln.status === 'differs') bits.push(`들린 말: ${ln.asr_text || '없음'}`);
+    else if (s === 'unheard') bits.push('받아쓰기로 못 맞춰 시각을 어림');
+    if ((ln.hints || []).includes('spelling')) bits.push('맞춤법 확인');
+    if (ln.language) bits.push(ln.language);
+    if (ln.sung) bits.push('노래');
+    if (D.overlaps.has(ln.id)) bits.push('같은 자리에 대본에 없는 말');
+    if (!bits.length && ln.include) bits.push(`자막 ${(ln.cells || []).length}칸`);
+    return bits.join(' · ');
+  }
+  function lineRowHtml(ln) {
+    const sel = ln.id === S.line;
+    const t = ln.start != null ? fmtTime(ln.start) : ln.guess ? `~${fmtTime(ln.guess[0])}` : '--:--.-';
+    return `<div class="row row-line${sel ? ' is-sel' : ''}${ln.include ? '' : ' is-out'}" role="option" id="lines-row-${esc(ln.id)}" data-view="lines" data-id="${esc(ln.id)}" aria-selected="${sel}">
+      <span class="r-time tnum">${t}</span><span class="r-who" title="${esc(whoOf(ln))}">${esc(whoOf(ln))}</span>
+      <span class="r-main"><span class="r-phrase">${esc(ln.text)}</span><span class="r-sub">${esc(lineSub(ln))}</span></span>
+      ${linePill(ln)}</div>`;
+  }
+  /** A scene is open when one of its lines is in the subtitles (or picked); the writer opens and closes by hand. */
+  function sceneOpen(g) {
+    if (S.sceneOpen.has(g.sid)) return S.sceneOpen.get(g.sid) || g.lines.some((l) => l.id === S.line);
+    return g.lines.some((l) => l.include || l.id === S.line);
+  }
+  const sceneName = (sid) => { const sc = D.sceneById.get(sid); return sc ? `장면 ${sc.number || sc.id}` : ''; };
+  function sceneHeadHtml(g, open) {
+    const sc = D.sceneById.get(g.sid);
+    const head = sc ? sc.heading || `장면 ${sc.number || sc.id}` : g.sid ? g.sid : '장면 없음';
+    const span = sc && sc.start != null ? `${fmtTime(sc.start)}–${fmtTime(sc.end)}` : '';
+    const nIn = g.lines.filter((l) => l.include).length;
+    return `<button type="button" class="scene-row${open ? ' is-open' : ''}" data-act="scene" data-sid="${esc(g.sid)}" aria-expanded="${open}">
+      <span class="chev" aria-hidden="true"></span><span class="sc-h" title="${esc(head)}">${esc(head)}</span>
+      ${sc && sc.status ? `<span class="sc-st sc-${esc(sc.status)}">${esc(SCENE_ST[sc.status] || sc.status)}</span>` : ''}
+      <span class="sc-t tnum">${span}</span><span class="sc-n tnum">${g.lines.length}줄${nIn !== g.lines.length ? ` · 자막 ${nIn}` : ''}</span></button>`;
+  }
+  function renderLines(opts) {
+    const box = $('#rows');
+    const list = D.allLines.filter((ln) => lineIn(ln, S.lf));
+    $('#list-count').textContent = `${list.length} / ${D.allLines.length}줄`;
+    if (!D.allLines.length) {
+      box.innerHTML = '<div class="empty">대사 줄이 없습니다 · 대본 정렬 단계가 dialogue.json 을 만든 뒤 다시 여세요</div>';
+      D.visibleLines = [];
+      return;
+    }
+    const groups = [];
+    for (const ln of list) {
+      const sid = ln.scene_id || '';
+      let g = groups[groups.length - 1];
+      if (!g || g.sid !== sid) groups.push((g = { sid, lines: [] }));
+      g.lines.push(ln);
+    }
+    const rows = [];
+    let selIdx = -1;
+    D.visibleLines = [];
+    for (const g of groups) {
+      const open = sceneOpen(g);
+      rows.push(sceneHeadHtml(g, open));
+      if (!open) continue;
+      for (const ln of g.lines) {
+        if (ln.id === S.line) selIdx = rows.length;
+        rows.push(lineRowHtml(ln));
+        D.visibleLines.push(ln);
+      }
+    }
+    renderRows(box, rows, selIdx, '', '이 조건에 맞는 줄이 없습니다');
+    finishList(opts, S.line && `lines-row-${S.line}`);
+  }
+  /** Script and heard text with the words that differ marked (the line's diff gives the script word
+      range; the heard words are found in order). */
+  function diffHtml(text, diff, side) {
+    const toks = String(text || '').split(/\s+/).filter(Boolean);
+    const mark = new Array(toks.length).fill(null);
+    if (side === 'script') {
+      for (const d of diff) if (Array.isArray(d.at)) for (let i = d.at[0]; i < d.at[1] && i < toks.length; i++) mark[i] = d;
+    } else {
+      let from = 0;
+      for (const d of diff) {
+        const h = String(d.heard || '').split(/\s+/).filter(Boolean);
+        if (!h.length) continue;
+        for (let i = from; i + h.length <= toks.length; i++) {
+          if (h.every((w, k) => toks[i + k] === w)) { for (let k = 0; k < h.length; k++) mark[i + k] = d; from = i + h.length; break; }
+        }
+      }
+    }
+    return toks.map((w, i) => {
+      const d = mark[i];
+      if (!d) return esc(w);
+      return `<mark class="d-${esc(d.kind || 'word')}${d.spelling ? ' d-spell' : ''}" title="${esc(d.spelling ? '맞춤법만 다를 수 있음' : DIFF_KO[d.kind] || '')}">${esc(w)}</mark>`;
+    }).join(' ');
+  }
+  const editingText = (ln) => S.ed && S.ed.id === ln.id && S.ed.mode === 'text';
+  function textEditHtml(ln) {
+    return `<div class="cmp-edit" data-box="text"><input class="input" data-f="text" value="${esc(ln.text)}" aria-label="자막 글" autocomplete="off">
+      <button type="button" class="btn btn-sm btn-primary" data-act="ln-text-save" data-primary="1">저장</button>
+      <button type="button" class="btn btn-sm btn-text" data-act="ln-text-cancel">취소</button></div>`;
+  }
+  function compareHtml(ln) {
+    const added = D.added.has(ln.id);
+    if (added || ln.asr_text == null) {                 // nothing heard to compare: the text and 직접 고치기
+      const changed = !added && ln.script_text && ln.script_text !== ln.text;
+      return `<div class="sec">글<span class="sub">${added ? (ln.extra ? '대본에 없는 말에서 넣은 줄' : '작가가 넣은 줄') : changed ? '작가가 고친 글' : '대본 글 그대로 나간다'}</span></div>
+        <div class="cmp"><div class="cmp-row is-on"><span class="cmp-k">${changed ? '작가 글' : '자막 글'}</span><span class="cmp-t">${esc(ln.text)}</span></div>
+          ${changed ? `<div class="cmp-row"><span class="cmp-k">대본</span><span class="cmp-t">${esc(ln.script_text)}</span><button type="button" class="btn btn-sm" data-act="ln-from" data-from="script">대본대로</button></div>` : ''}
+          ${editingText(ln) ? textEditHtml(ln) : '<div class="cmp-foot"><button type="button" class="btn btn-sm" data-act="ln-edit-text">직접 고치기</button></div>'}</div>`;
+    }
+    const script = ln.script_text || ln.text;
+    const dec = ln.decision || {};
+    const chosen = dec.text_from || (dec.text ? 'writer' : null);
+    const diff = ln.diff || [];
+    const heard = ln.asr_text || '';
+    const spell = (ln.hints || []).includes('spelling');
+    const row = (k, label, html, btn) => `<div class="cmp-row${chosen === k ? ' is-on' : ''}"><span class="cmp-k">${label}</span><span class="cmp-t">${html}</span>${btn || ''}</div>`;
+    const b = (k, label, dis) => `<button type="button" class="btn btn-sm${chosen === k ? ' is-on' : ''}" data-act="ln-from" data-from="${k}"${dis ? ' disabled' : ''}${chosen === k ? ' aria-pressed="true"' : ''}>${label}</button>`;
+    const rows = [row('script', '대본', diffHtml(script, diff, 'script'), b('script', '대본대로')),
+      row('heard', '들린 말', heard ? diffHtml(heard, diff, 'heard') : '<span class="muted">들린 말 없음 · 받아쓰기가 이 줄을 못 맞춤</span>', b('heard', '들린 대로', !heard))];
+    if (chosen === 'writer') rows.push(row('writer', '작가 글', esc(ln.text), ''));
+    const hint = [diff.length ? `다른 곳 ${diff.length}곳` : '', spell ? '맞춤법만 다를 수 있음 · 대본 글을 확인' : '',
+      chosen ? `지금 ${PICKED[chosen] || ''}` : ln.status === 'differs' ? '아직 고르지 않음 · 지금은 대본 글로 나감' : ''].filter(Boolean).join(' · ');
+    return `<div class="sec">대조<span class="sub">대본 글과 그 구간에서 들린 글 · 저절로 바꾸지 않는다</span></div>
+      <div class="cmp">${rows.join('')}
+        ${editingText(ln) ? textEditHtml(ln) : `<div class="cmp-foot"><button type="button" class="btn btn-sm" data-act="ln-edit-text">직접 고치기</button>${chosen ? '<button type="button" class="btn btn-sm btn-text" data-act="ln-from" data-from="">고르기 취소</button>' : ''}<span class="cmp-hint${spell ? ' is-spell' : ''}">${esc(hint)}</span></div>`}
+      </div>`;
+  }
+  function lineNoteHtml(ln) {
+    const bits = [];
+    const sc = D.sceneById.get(ln.scene_id);
+    if (sc) bits.push(`장면 ${esc(sc.number || sc.id)} · ${esc(SCENE_ST[sc.status] || sc.status || '')}`);
+    bits.push(D.added.has(ln.id) ? (ln.extra ? '대본에 없는 말에서 넣은 줄' : '작가가 넣은 줄') : `대본 ${esc(ln.id)}`);
+    if (ln.name && ln.speaker && ln.name !== ln.speaker) bits.push(`대본 화자 ${esc(ln.speaker)} → ${esc(ln.name)}`);
+    if (ln.include && ln.label) bits.push(ln.show_name ? `이름 표시 ${esc(ln.label)}` : '이름 생략');
+    if (ln.generic) bits.push('이름이 밝혀지기 전 일반 표시');
+    if (ln.name_early) bits.push(`<button type="button" class="link flag" data-act="goto-person" data-id="${esc(ln.name)}">이름이 밝혀지기 전에 이름이 나감</button>`);
+    const cells = (ln.cells || []).map((c) => D.cellById.get(c)).filter(Boolean);
+    if (cells.length) bits.push(cells.map((c, i) => `<button type="button" class="g-cell" data-act="goto-cell" data-cell="${esc(c.id)}" title="${esc((c.lines || []).join(' / '))}">${i + 1}칸 ${fmtTime(c.start)}</button>`).join(' '));
+    else if (ln.include) bits.push('자막 칸 없음');
+    const notes = new Set(cells.flatMap((c) => (c.check && c.check.notes) || []));
+    for (const n of notes) bits.push(`<span class="flag">${esc(n)}</span>`);
+    let out = `<div class="ev-note">${bits.join('<i>·</i>')}</div>`;
+    if (ln.raw && ln.raw !== (ln.script_text || ln.text)) out += `<div class="raw"><b>대본 원문</b>${esc(ln.raw)}</div>`;
+    return out;
+  }
+  function lineNoRoomHtml(ln) {
+    return `<div class="nr-card nr-compact"><span class="pill st-noroom">자리 없음</span>
+      <span class="nr-reason" title="${esc(ln.no_room.reason || '')}">${esc(ln.no_room.reason || '앞뒤 칸 사이에 자리가 없음')}</span>
+      <div class="nr-actions"><button type="button" class="btn btn-sm" data-act="ln-focus-time">시작·끝 정하기</button>
+      ${D.added.has(ln.id) ? '' : '<button type="button" class="btn btn-sm btn-danger" data-act="ln-include" data-v="0">빼기</button>'}</div></div>`;
+  }
+  function reviveHtml(ln) {
+    if (ln.include || D.added.has(ln.id) || ln.excluded === 'writer') return '';
+    const g = ln.guess;
+    const s = g && S.t >= g[0] && S.t <= g[1] ? S.t : g ? g[0] : S.t;
+    const why = { absent: '이 줄의 장면을 영화에서 찾지 못했다', out_of_range: '처리한 구간 밖의 줄이다', no_time: '시각이 없는 줄이다' }[ln.excluded] || '';
+    return `<div class="sec">되살리기<span class="sub">${why} · 영화에서 들리면 시각을 정해 넣는다</span></div>
+      ${timeBoxHtml('revive', s, Math.min(num(S.P.t1, s + 2), s + lineDur(ln.text)),
+        `<button type="button" class="btn btn-sm btn-primary" data-act="ln-revive" data-primary="1">이 시각으로 넣기</button>
+        <button type="button" class="btn btn-sm" data-act="ln-revive-now" title="지금 재생 위치부터 글 길이만큼">지금 위치에 넣기</button>`)}
+      ${g ? `<div class="field-hint">어림 ${fmtTime(g[0])}–${fmtTime(g[1])} · 앞뒤 장면으로 어림한 범위라 넓을 수 있다</div>` : ''}`;
+  }
+  function timeEditHtml(ln) {
+    const added = D.added.has(ln.id);
+    const revived = !added && (ln.status === 'absent' || ln.status === 'out_of_range');
+    const sub = ln.estimated ? '받아쓰기로 못 맞춰 어림한 시각 · 소리에 맞춰 정하면 추정 표시가 없어진다'
+      : ln.pinned ? '작가가 정한 시각' : '받아쓰기로 맞춘 시각';
+    const extra = revived ? '<button type="button" class="btn btn-sm btn-text" data-act="ln-unrevive">다시 빼기</button>'
+      : ln.pinned && !added ? '<button type="button" class="btn btn-sm btn-text" data-act="ln-unpin">시각 고정 풀기</button>' : '';
+    return `<div class="sec">시각<span class="sub">${sub}</span></div>
+      ${timeBoxHtml('time', ln.start, ln.end, `<button type="button" class="btn btn-sm btn-primary" data-act="ln-time" data-primary="1">시각 정하기</button>${extra}`)}`;
+  }
+  function breaksHtml(ln) {
+    const toks = String(ln.text || '').split(/\s+/).filter(Boolean);
+    const keep = `<label class="switch sm"><input type="checkbox" data-change="ln-keep"${ln.keep ? ' checked' : ''}><span>한 칸에 두기</span></label>`;
+    if (toks.length < 2) return `<div class="sec">칸 나누기</div><div class="ed-row">${keep}</div>`;
+    const set = new Set(ln.breaks || []);
+    return `<div class="sec">끊을 자리<span class="sub">어절 사이를 누르면 그 자리에서 다음 칸으로 넘긴다 · 비워 두면 저절로</span></div>
+      <div class="toks">${toks.map((w, i) => `${i ? `<button type="button" class="gap${set.has(i) ? ' is-on' : ''}" data-act="ln-gap" data-k="${i}" aria-pressed="${set.has(i)}" aria-label="${i}번째 어절 뒤에서 끊기" title="${i}번째 어절 뒤에서 끊기"></button>` : ''}<span class="tok">${esc(w)}</span>`).join('')}</div>
+      <div class="ed-row">${keep}${set.size ? '<button type="button" class="btn btn-sm btn-text" data-act="ln-breaks-clear">끊을 자리 지우기</button>' : ''}</div>`;
+  }
+  function markHtml(ln) {
+    const dec = ln.decision || {};
+    const own = !D.added.has(ln.id) && ('language' in dec || 'sung' in dec);
+    return `<div class="sec">말 표시<span class="sub">외국어는 [언어] 표시 · 노래는 ♪ 가사 ♪</span></div>
+      <div class="ed-row"><label>언어 <input class="input input-sm" list="lang-list" data-change="ln-lang" value="${esc(ln.language || '')}" placeholder="한국어" autocomplete="off"></label>
+        <label class="switch sm"><input type="checkbox" data-change="ln-sung"${ln.sung ? ' checked' : ''}><span>노래</span></label>
+        ${own ? '<button type="button" class="btn btn-sm btn-text" data-act="ln-mark-reset">대본대로</button>' : ''}</div>`;
+  }
+  function overlapHtml(ln) {
+    const xs = D.overlaps.get(ln.id) || [];
+    if (!xs.length) return '';
+    return `<div class="sec">같은 자리의 대본에 없는 말<span class="sub">받아쓰기가 이 줄을 다른 말로 들었을 수 있다</span></div>
+      <div class="x-rows">${xs.map((x) => { const [lab, cls] = XSTATE[x.state] || XSTATE.open; return `<div class="x-row">
+        <button type="button" class="ev-play x-play" data-act="x-play" data-id="${esc(x.id)}" aria-label="듣기">${ICON.play}</button>
+        <span class="ev-t tnum">${fmtTime(x.start)}</span><span class="ev-text" title="${esc(x.text)}">${esc(x.text)}</span><span class="pill ${cls}">${lab}</span>
+        <button type="button" class="btn btn-sm" data-act="x-use-time" data-id="${esc(x.id)}" data-line="${esc(ln.id)}" title="이 말의 시작·끝을 이 줄에 주고, 이 말은 무시">이 시각을 줄에 쓰기</button>
+        <button type="button" class="btn btn-sm btn-text" data-act="goto-extra" data-id="${esc(x.id)}">보기</button></div>`; }).join('')}</div>`;
+  }
+  function renderLineDetail() {
+    const box = $('#evidence');
+    const ln = D.lines.get(S.line);
+    if (!ln) {
+      box.innerHTML = `${detailHead('대사 줄', '', '')}<div class="ev-empty">목록에서 줄을 고르면 대본 글과 들린 글을 나란히 보인다 · 다른 낱말은 칠해 보인다</div>`;
+      return;
+    }
+    const added = D.added.has(ln.id);
+    const timed = ln.start != null && ln.end != null;
+    const acts = [];
+    if (timed || ln.guess) acts.push(`<button type="button" class="btn" data-act="ln-play" title="이 줄의 구간을 재생">${ICON.play}${timed ? '구간 듣기' : '어림 구간 듣기'}</button>`);
+    acts.push('<button type="button" class="btn" data-act="ln-speaker">화자 고치기</button>');
+    if (added) {
+      acts.push(`<button type="button" class="btn" data-act="added-edit" data-id="${esc(ln.id)}">고치기</button>`);
+      acts.push(`<button type="button" class="btn btn-danger" data-act="added-delete" data-id="${esc(ln.id)}">지우기</button>`);
+    } else if (ln.include) acts.push('<button type="button" class="btn btn-danger" data-act="ln-include" data-v="0">이 줄 빼기</button>');
+    else if (ln.excluded === 'writer') acts.push('<button type="button" class="btn btn-primary" data-act="ln-include" data-v="">다시 넣기</button>');
+    const span = timed ? `${fmtTime(ln.start)}–${fmtTime(ln.end)}` : ln.guess ? `어림 ${fmtTime(ln.guess[0])}–${fmtTime(ln.guess[1])}` : '시각 없음';
+    box.innerHTML = `${detailHead('대사 줄', '', acts.join(''))}
+      <div class="ev-subject"><span class="badge k-line">대사</span><span class="ev-time tnum">${span}</span>
+        <span class="ev-phrase" title="${esc(ln.text)}">${ln.include && ln.show_name && ln.label ? `<span class="nm">${esc(ln.label)}</span> ` : ''}${esc(ln.text)}</span>${linePill(ln)}</div>
+      ${lineNoteHtml(ln)}
+      ${ln.no_room ? lineNoRoomHtml(ln) : ''}
+      ${compareHtml(ln)}
+      ${reviveHtml(ln)}
+      ${ln.include && timed ? timeEditHtml(ln) : ''}
+      ${ln.include ? breaksHtml(ln) : ''}
+      ${markHtml(ln)}
+      ${overlapHtml(ln)}`;
+  }
+
+  // -------------------------------------------- 대본에 없는 말 (extras, 1-04)
+  function extraIn(x, f) {
+    if (f === 'all') return true;
+    if (f === 'overlap') return !!(x.overlaps || []).length;
+    return (x.state || 'open') === f;
+  }
+  function extraRowHtml(x) {
+    const sel = x.id === S.extra;
+    const ov = (x.overlaps || []).map((l) => D.lines.get(l)).filter(Boolean);
+    const sub = [sceneName(x.scene_id), ov.length ? `못 들은 줄과 겹침: ${ov.map((l) => cut(l.text, 16)).join(', ')}` : '',
+      x.short ? '짧은 말' : '', x.state === 'line' && x.added ? '대사로 넣음' : ''].filter(Boolean).join(' · ');
+    const [lab, cls] = XSTATE[x.state] || XSTATE.open;
+    return `<div class="row${sel ? ' is-sel' : ''}${x.state === 'ignored' ? ' is-out' : ''}" role="option" id="extras-row-${esc(x.id)}" data-view="extras" data-id="${esc(x.id)}" aria-selected="${sel}">
+      <span class="r-time tnum">${fmtTime(x.start)}</span><span class="badge k-extra">말</span>
+      <span class="r-main"><span class="r-phrase">${esc(x.text)}</span><span class="r-sub">${esc(sub)}</span></span>
+      <span class="pill ${cls}">${lab}</span></div>`;
+  }
+  function renderExtras(opts) {
+    const box = $('#rows');
+    const list = (D.visibleExtras = D.extras.filter((x) => extraIn(x, S.xf)));
+    $('#list-count').textContent = `${list.length} / ${D.extras.length}개`;
+    renderRows(box, list.map(extraRowHtml), list.findIndex((x) => x.id === S.extra), '',
+      D.extras.length ? '이 조건에 맞는 말이 없습니다' : '대본에 없는 들린 말이 없습니다 · 받아쓰기와 대본 정렬 뒤에 생긴다');
+    finishList(opts, S.extra && `extras-row-${S.extra}`);
+  }
+  function extraFormHtml(x) {
+    const chars = S.st.characters || [];
+    return `<div class="sec">대사로 넣기<span class="sub">들린 대로 글을 다듬고 화자를 고른다 · 넣으면 작가가 넣은 줄이 된다</span></div>
+      <div class="x-form" data-box="x-line">
+        <div class="ed-row"><label class="grow">글 <input class="input" data-f="text" value="${esc(x.text)}" autocomplete="off"></label></div>
+        <div class="ed-row"><label>화자 <select class="input input-sm" data-f="name"><option value="">모름 (이름 없이)</option>${chars.map((n) => `<option value="${esc(n)}">${esc(n)}</option>`).join('')}</select></label>
+          <input class="input input-sm" data-f="newname" placeholder="새 이름" autocomplete="off" aria-label="새 이름">
+          <label>언어 <input class="input input-sm" list="lang-list" data-f="language" placeholder="한국어" autocomplete="off"></label>
+          <label class="switch sm"><input type="checkbox" data-f="sung"><span>노래</span></label></div>
+        ${timeBoxHtml('x-time', x.start, x.end, '')}
+        <div class="ed-row"><button type="button" class="btn btn-primary" data-act="x-line" data-id="${esc(x.id)}" data-primary="1">대사로 넣기</button></div>
+      </div>`;
+  }
+  function renderExtraDetail() {
+    const box = $('#evidence');
+    const x = D.extraById.get(S.extra);
+    if (!x) {
+      box.innerHTML = `${detailHead('대본에 없는 말', '', '')}<div class="ev-empty">받아쓰기에서 들렸지만 어느 대본 줄에도 없는 말 · 고르면 듣고 대사로 넣거나 무시한다</div>`;
+      return;
+    }
+    const st = x.state || 'open';
+    const [lab, cls] = XSTATE[st] || XSTATE.open;
+    const acts = [`<button type="button" class="btn" data-act="x-play" data-id="${esc(x.id)}">${ICON.play}듣기</button>`];
+    if (st === 'open') acts.push(`<button type="button" class="btn" data-act="x-ignore" data-id="${esc(x.id)}">무시</button>`);
+    else {
+      if (x.added && D.lines.has(x.added)) acts.push(`<button type="button" class="btn" data-act="goto-line" data-id="${esc(x.added)}">넣은 줄 보기</button>`);
+      acts.push(`<button type="button" class="btn btn-text" data-act="x-clear" data-id="${esc(x.id)}">되돌리기</button>`);
+    }
+    const sc = D.sceneById.get(x.scene_id);
+    const note = [sc ? `장면 ${esc(sc.number || sc.id)} · ${esc(SCENE_ST[sc.status] || '')}` : '', `${(num(x.end) - num(x.start)).toFixed(1)}초`,
+      x.short ? '<span class="flag">짧은 말 · 낱말 조각일 수 있음</span>' : ''].filter(Boolean);
+    const ov = (x.overlaps || []).map((l) => D.lines.get(l)).filter(Boolean);
+    box.innerHTML = `${detailHead('대본에 없는 말', '', acts.join(''))}
+      <div class="ev-subject"><span class="badge k-extra">말</span><span class="ev-time tnum">${fmtTime(x.start)}–${fmtTime(x.end)}</span>
+        <span class="ev-phrase" title="${esc(x.text)}">${esc(x.text)}</span><span class="pill ${cls}">${lab}</span></div>
+      <div class="ev-note">${note.join('<i>·</i>')}</div>
+      ${ov.length ? `<div class="sec">같은 자리의 못 들은 대본 줄<span class="sub">이 말이 그 줄일 수 있다</span></div>
+        <div class="x-rows">${ov.map((l) => `<div class="x-row"><span class="ev-t tnum">${fmtTime(l.start)}</span>
+          <span class="ev-text" title="${esc(l.text)}">${l.label ? `<span class="nm">${esc(l.label)}</span> ` : ''}${esc(l.text)}</span>${linePill(l)}
+          <button type="button" class="btn btn-sm" data-act="x-use-time" data-id="${esc(x.id)}" data-line="${esc(l.id)}" title="이 말의 시작·끝을 그 줄에 주고, 이 말은 무시">이 시각을 그 줄에 쓰기</button>
+          <button type="button" class="btn btn-sm btn-text" data-act="goto-line" data-id="${esc(l.id)}">줄 보기</button></div>`).join('')}</div>` : ''}
+      ${st === 'open' ? extraFormHtml(x) : ''}`;
+  }
+  function extraAct(id, action, fields = {}, msg) {
+    const x = D.extraById.get(id);
+    const what = { ignore: `무시 · ${cut(x ? x.text : id, 28)}`, clear: `되돌림 · ${cut(x ? x.text : id, 28)}`, line: '대사로 넣음' }[action];
+    return mutate(`api/extras/${enc(id)}`, { action, ...fields }, msg === undefined ? what : msg);
+  }
+  async function extraToLine(id, el) {
+    const box = el.closest('[data-box="x-line"]');
+    if (!box) return;
+    const v = (f) => { const e = box.querySelector(`[data-f="${f}"]`); return !e ? null : e.type === 'checkbox' ? e.checked : e.value; };
+    const span = readSpan(box.querySelector('[data-box="x-time"] [data-f="start"]'));
+    if (!span) return;
+    const text = String(v('text') || '').trim();
+    if (!text) { toast('넣을 글을 적어 주세요', 'error'); return; }
+    const fields = { text, start: span[0], end: span[1], sung: !!v('sung') };
+    const name = String(v('newname') || '').trim() || v('name');
+    if (name) fields.name = name;
+    const lang = String(v('language') || '').trim();
+    if (lang) fields.language = lang;
+    await extraAct(id, 'line', fields, `대사로 넣음 · ${cut(text, 28)}`);
+  }
+  /** An unheard line and the speech heard where it should be: the line takes that time, the speech is set aside. */
+  async function useExtraTime(xid, lid) {
+    const x = D.extraById.get(xid), ln = D.lines.get(lid);
+    if (!x || !ln) return;
+    const st = await lineUpdate(ln, { start: x.start, end: x.end }, null);
+    if (st) await extraAct(xid, 'ignore', {}, `줄의 시각을 이 말에 맞춤 · ${fmtTime(x.start)}–${fmtTime(x.end)} · 이 말은 무시`);
+  }
+
+  // ------------------------------------------------------ 인물 (people, 3-01)
+  function personIn(p, f) {
+    if (f === 'open') return num(p.lines) > 0 && !p.decision && !p.role;
+    if (f === 'early') return !!p.early;
+    if (f === 'decided') return !!p.decision;
+    return true;
+  }
+  function personState(p) {
+    if (p.decision) return ['정함', 'st-inc-done'];
+    if (p.early) return ['이름이 일찍 나감', 'st-noroom'];
+    if (p.role) return ['역할 이름', 'st-exc'];
+    if (!num(p.lines)) return ['자막 줄 없음', 'st-exc'];
+    return ['정하지 않음', 'st-check'];
+  }
+  function personSub(p) {
+    const bits = [`자막 ${num(p.lines)}줄`];
+    const told = p.told && D.lines.get(p.told.line);
+    if (p.told) bits.push(`처음 불림 ${told && told.start != null ? fmtTime(told.start) : p.told.line}${p.told.how === 'self' ? ' · 스스로 밝힘' : p.told.by ? ` · ${p.told.by}${ga(p.told.by)} 부름` : ''}`);
+    else bits.push('대사에서 불리지 않음');
+    if (p.mode === 'generic' && p.before) bits.push(`그 전에는 [${p.before}]`);
+    else if (p.mode === 'name') bits.push('처음부터 이름');
+    return bits.join(' · ');
+  }
+  function personRowHtml(p) {
+    const sel = p.name === S.person;
+    const [lab, cls] = personState(p);
+    const cues = (p.cues || []).filter((c) => c !== p.name);
+    return `<div class="row row-person${sel ? ' is-sel' : ''}${num(p.lines) ? '' : ' is-out'}" role="option" id="people-row-${esc(p.id)}" data-view="people" data-id="${esc(p.name)}" aria-selected="${sel}">
+      ${avatarHtml(p.name)}<span class="r-main"><span class="r-phrase">${esc(p.name)}${cues.length ? `<small> · ${esc(cues.join(', '))}</small>` : ''}</span>
+      <span class="r-sub">${esc(personSub(p))}</span></span><span class="pill ${cls}">${esc(lab)}</span></div>`;
+  }
+  function renderPeople(opts) {
+    const box = $('#rows');
+    const list = (D.visiblePeople = D.people.filter((p) => personIn(p, S.pf)).sort((a, b) => (num(b.lines) > 0) - (num(a.lines) > 0)));
+    $('#list-count').textContent = `${list.length} / ${D.people.length}명`;
+    renderRows(box, list.map(personRowHtml), list.findIndex((p) => p.name === S.person), '',
+      D.people.length ? '이 조건에 맞는 인물이 없습니다' : '인물이 없습니다 · 대본(script.json)의 인물 표에서 온다');
+    const cur = D.personByName.get(S.person);
+    finishList(opts, cur && `people-row-${cur.id}`);
+  }
+  function renderPersonDetail() {
+    const box = $('#evidence');
+    const p = D.personByName.get(S.person);
+    if (!p) {
+      box.innerHTML = `${detailHead('인물', '', '')}<div class="ev-empty">인물을 고르면 이름이 처음 불리는 줄과, 그 전에 쓸 표시([남자]·[여자])를 정한다</div>`;
+      return;
+    }
+    const split = STYLE().name_split || '/';
+    const shown = D.allLines.filter((l) => l.include && String(l.name || '').split(split).map((x) => x.trim()).includes(p.name));
+    const told = p.told && D.lines.get(p.told.line);
+    const dec = p.decision || {};
+    const mode = dec.mode || null, before = dec.before || '';
+    const [lab, cls] = personState(p);
+    const opt = (on, attrs, label) => `<button type="button" class="mchip${on ? ' is-on' : ''}" ${attrs} aria-pressed="${on}">${label}</button>`;
+    const custom = mode === 'generic' && !GENERIC.includes(before) ? before : '';
+    const modes = [
+      ...GENERIC.map((g) => opt(mode === 'generic' && before === g, `data-act="pp-mode" data-mode="generic" data-before="${g}"`, esc(bracket(g)))),
+      `<span class="pp-custom" data-box="pp"><input class="input input-sm" data-f="before" value="${esc(custom)}" placeholder="직접 (예: 경찰)" autocomplete="off" aria-label="일반 표시 직접 쓰기">
+        <button type="button" class="btn btn-sm${custom ? ' is-on' : ''}" data-act="pp-custom" data-primary="1">쓰기</button></span>`,
+      opt(mode === 'name', 'data-act="pp-mode" data-mode="name"', '처음부터 이름'),
+      opt(!mode, 'data-act="pp-mode" data-mode=""', '정하지 않음'),
+    ];
+    const reveal = dec.reveal || 'auto';
+    const from = p.from_line && D.lines.get(p.from_line);
+    const revealHtml = mode !== 'generic' ? '' : `<div class="sec">이름으로 바뀌는 줄<span class="sub">그 줄부터 ${esc(bracket(before))} 대신 이름을 쓴다</span></div>
+      <div class="mchips">
+        ${opt(reveal === 'auto', 'data-act="pp-reveal" data-reveal="auto"', `저절로 · 이름이 불린 다음 줄${from && reveal === 'auto' ? ` · ${fmtTime(from.start)}` : ''}`)}
+        ${opt(reveal === 'never', 'data-act="pp-reveal" data-reveal="never"', '끝까지 일반 표시')}
+        <label class="pp-line${reveal === 'line' ? ' is-on' : ''}">이 줄부터 <select class="input input-sm" data-change="pp-reveal-line"><option value="">고르기</option>${shown.map((l) => `<option value="${esc(l.id)}"${dec.reveal_line === l.id ? ' selected' : ''}>${fmtTime(l.start)} ${esc(cut(l.text, 22))}</option>`).join('')}</select></label>
+      </div>`;
+    const lineBtn = (l, small) => `<button type="button" class="nb-line" data-act="goto-line" data-id="${esc(l.id)}"><span class="t tnum">${fmtTime(l.start)}</span><span class="badge k-line">대사</span>
+      <span class="tx">${l.show_name && l.label ? `<span class="nm">${esc(l.label)}</span> ` : ''}${esc(l.text)}${small ? `<small>${esc(small)}</small>` : ''}</span></button>`;
+    box.innerHTML = `${detailHead('인물', '', '')}
+      <div class="ev-subject">${avatarHtml(p.name)}<span class="ev-phrase">${esc(p.name)}</span><span class="pill ${cls}">${esc(lab)}</span></div>
+      <div class="ev-note">${[`대본 표기 ${esc((p.cues && p.cues.length ? p.cues : [p.name]).join(', '))}`, `자막 ${num(p.lines)}줄`,
+        p.role ? '역할 이름 (숫자로 끝남) · 기본은 이름 그대로' : ''].filter(Boolean).join('<i>·</i>')}</div>
+      <div class="sec">이름이 처음 불리는 줄</div>
+      ${told ? `<div class="nb-lines">${lineBtn(told, p.told.how === 'self' ? '스스로 이름을 밝힘' : `${p.told.by || ''}${ga(p.told.by || '')} 이름을 부름`)}</div>`
+        : '<div class="ev-empty">대사에서 이름이 불리지 않는다 · 끝까지 일반 표시를 쓰거나, 이름이 화면 글자로 나오는 줄을 고른다</div>'}
+      ${p.early ? `<div class="nr-card nr-compact"><span class="pill st-noroom">이름이 일찍 나감</span><span class="nr-reason">이름이 밝혀지기 전 줄에 이름이 나간다 · 아래에서 그 전 표시를 정한다</span>
+        <div class="nr-actions"><button type="button" class="btn btn-sm" data-act="goto-line" data-id="${esc(p.early.line)}">처음 나가는 줄</button></div></div>` : ''}
+      <div class="sec">이름이 밝혀지기 전에 쓸 표시<span class="sub">지침 II.8 · 아직 알려지지 않은 이름은 [남자]·[여자]</span></div>
+      <div class="mchips">${modes.join('')}</div>
+      ${revealHtml}
+      <div class="sec">이 인물의 자막 줄<span class="sub">${shown.length}줄 · 누르면 그 줄로</span></div>
+      ${shown.length ? `<div class="nb-lines">${shown.slice(0, 120).map((l) => lineBtn(l)).join('')}</div>` : '<div class="ev-empty">자막에 들어간 줄이 없다</div>'}`;
+  }
+  function peopleSet(fields) {
+    const p = D.personByName.get(S.person);
+    if (!p) return null;
+    const what = 'mode' in fields
+      ? (fields.mode === 'generic' ? `이름이 밝혀지기 전 ${bracket(fields.before)}` : fields.mode === 'name' ? '처음부터 이름' : '정하지 않음으로')
+      : fields.reveal === 'never' ? '끝까지 일반 표시' : fields.reveal === 'line' ? '고른 줄부터 이름' : '이름이 불린 다음 줄부터 이름';
+    return mutate('api/people', { names: [p.name], ...fields }, `${p.name} · ${what}`);
+  }
+
+  // ------------------------------------------------------------ 칸 (cells, 9-x3)
+  function cellIn(c, f) {
+    const vs = D.cellViol.get(c.id) || [];
+    if (f === 'must') return vs.some((v) => v.level === 'must');
+    if (f === 'should') return vs.some((v) => v.level !== 'must');
+    if (f === 'estimated') return (c.flags || []).includes('timing_estimated');
+    if (f === 'overlap') return (c.flags || []).includes('overlap');
+    return true;
+  }
+  function cellState(c) {
+    const vs = D.cellViol.get(c.id) || [];
+    const must = vs.filter((v) => v.level === 'must').length, should = vs.length - must;
+    if (must) return [`의무 ${must}`, 'st-noroom'];
+    if (should) return [`권고 ${should}`, 'st-check'];
+    if ((c.flags || []).length) return [CELL_FLAGS[c.flags[0]] || c.flags[0], 'st-exc'];
+    return ['통과', 'st-inc'];
+  }
+  function cellRowHtml(c, i) {
+    const sel = c.id === S.cell;
+    const vs = D.cellViol.get(c.id) || [];
+    const ch = c.check || {};
+    const [lab, cls] = cellState(c);
+    const sub = vs.length ? vs.map((v) => `${v.level === 'must' ? '의무' : '권고'} ${v.clause} ${v.message || ''}`).join(' · ')
+      : [`${num(ch.dur, c.end - c.start).toFixed(2)}초`, `초당 ${num(ch.cps).toFixed(1)}자`, ...(c.flags || []).map((f) => CELL_FLAGS[f] || f)].join(' · ');
+    return `<div class="row row-cell${sel ? ' is-sel' : ''}" role="option" id="cells-row-${esc(c.id)}" data-view="cells" data-id="${esc(c.id)}" aria-selected="${sel}">
+      <span class="r-time tnum">${fmtTime(c.start)}</span><span class="r-no tnum" title="${esc(CELL_KIND[c.kind] || '')}">${i + 1}</span>
+      <span class="r-main"><span class="r-phrase">${esc((c.lines || []).join(' / '))}</span><span class="r-sub">${esc(sub)}</span></span>
+      <span class="pill ${cls}">${esc(lab)}</span></div>`;
+  }
+  function renderCells(opts) {
+    const box = $('#rows');
+    const list = (D.visibleCells = D.cells.filter((c) => cellIn(c, S.cf)));
+    const idx = new Map(D.cells.map((c, i) => [c.id, i]));
+    $('#list-count').textContent = `${list.length} / ${D.cells.length}칸`;
+    renderRows(box, list.map((c) => cellRowHtml(c, idx.get(c.id))), list.findIndex((c) => c.id === S.cell), '',
+      D.cells.length ? '이 조건에 맞는 칸이 없습니다' : '자막 칸이 아직 없습니다');
+    finishList(opts, S.cell && `cells-row-${S.cell}`);
+  }
+  function renderCellDetail() {
+    const box = $('#evidence');
+    const c = D.cellById.get(S.cell);
+    if (!c) {
+      box.innerHTML = `${detailHead('자막 칸', '', '')}<div class="ev-empty">칸을 고르면 지침 검사 결과와, 그 칸을 만든 줄·후보를 보인다 · ← → 로 한 프레임씩</div>`;
+      return;
+    }
+    const ch = c.check || {};
+    const i = D.cells.indexOf(c);
+    const vs = D.cellViol.get(c.id) || [];
+    const own = S.st.export_check ? [] : (ch.violations || []).map(violText);       // placement's own count, when the guide check could not run
+    const f0 = frameOf(c.start), f1 = frameOf(c.end);
+    const [lab, cls] = cellState(c);
+    const acts = [`<button type="button" class="btn" data-act="cell-play">${ICON.play}칸 재생</button>`,
+      `<button type="button" class="btn btn-text" data-act="cell-step" data-d="-1"${i <= 0 ? ' disabled' : ''}>앞 칸</button>`,
+      `<button type="button" class="btn btn-text" data-act="cell-step" data-d="1"${i >= D.cells.length - 1 ? ' disabled' : ''}>뒤 칸</button>`];
+    const facts = [`${fmtTime2(c.start)}–${fmtTime2(c.end)}`, `${f0}–${f1}프레임 · ${f1 - f0}프레임`, `${num(ch.dur, c.end - c.start).toFixed(2)}초`,
+      `초당 ${num(ch.cps).toFixed(1)}자`, (ch.chars || []).length ? `줄 폭 ${ch.chars.map((x) => String(Math.round(num(x) * 10) / 10)).join(' / ')}자` : '',
+      ch.gap_next != null ? `다음 칸까지 ${num(ch.gap_next).toFixed(2)}초` : '', c.pos === 'top' ? '화면 위' : ''].filter(Boolean);
+    const refs = (c.refs || []).map((r) => {
+      const ln = D.lines.get(r);
+      if (ln) {
+        return `<button type="button" class="nb-line" data-act="goto-line" data-id="${esc(r)}"><span class="t tnum">${fmtTime(ln.start)}</span><span class="badge k-line">대사</span>
+          <span class="tx">${ln.show_name && ln.label ? `<span class="nm">${esc(ln.label)}</span> ` : ''}${esc(ln.text)}<small>${esc(lineStateLabel(ln))}</small></span></button>`;
+      }
+      const it = D.byId.get(r);
+      if (!it) return '';
+      const k = KIND[it.kind] || { label: it.kind, cls: '' };
+      return `<button type="button" class="nb-line" data-act="goto-item" data-id="${esc(r)}"><span class="t tnum">${fmtTime(it.onset)}</span><span class="badge ${k.cls}">${esc(k.label)}</span>
+        <span class="tx">${esc(phraseText(it))}<small>${esc(stateLabel(it))}</small></span></button>`;
+    }).join('');
+    const flags = (c.flags || []).map((f) => CELL_FLAGS[f] || f).concat(ch.notes || []);
+    box.innerHTML = `${detailHead(`자막 칸 ${i + 1}`, `${D.cells.length}칸 가운데`, acts.join(''))}
+      <div class="ev-subject"><span class="badge k-cell">${esc(CELL_KIND[c.kind] || '칸')}</span><span class="ev-time tnum">${fmtTime(c.start)}–${fmtTime(c.end)}</span>
+        <span class="spacer"></span><span class="pill ${cls}">${esc(lab)}</span></div>
+      <div class="cell-pv">${(c.lines || []).map((l) => `<div>${esc(l)}</div>`).join('')}</div>
+      <div class="ev-note">${facts.map(esc).join('<i>·</i>')}</div>
+      ${flags.length ? `<div class="ev-note">${flags.map((f) => `<span class="flag">${esc(f)}</span>`).join('<i>·</i>')}</div>` : ''}
+      <div class="sec">지침 검사</div>
+      ${vs.length || own.length ? `<div class="guide">${vs.map((v) => `<div class="g-rule g-rule2"><span class="g-lv ${v.level === 'must' ? 'must' : 'should'}">${v.level === 'must' ? '의무' : '권고'}</span>
+        <span class="g-cl tnum">${esc(v.clause)}</span><span class="g-tt" title="${esc(v.message || '')}">${esc(v.message || '')}</span></div>`).join('')}
+        ${own.map((t) => `<div class="g-rule g-rule2"><span class="g-lv must">한도</span><span class="g-cl"></span><span class="g-tt">${esc(t)}</span></div>`).join('')}</div>`
+        : '<div class="ev-empty">걸린 조항이 없다</div>'}
+      <div class="sec">이 칸을 만든 것<span class="sub">누르면 그 줄이나 후보로</span></div>
+      ${refs ? `<div class="nb-lines">${refs}</div>` : '<div class="ev-empty">없음</div>'}`;
+  }
+
+  // ------------------------------------------------ 새로 넣기 (added, 4-05)
+  function openAdd(kind = 'line', row = null) {
+    pauseMain();
+    teardownPreview();
+    const t = clamp(S.t, S.P.t0, Math.max(S.P.t0, S.P.t1 - 0.5));
+    const a = row || {};
+    S.modal = {
+      type: 'add', id: a.id || null, kind: a.kind || kind, start: a.start != null ? a.start : t,
+      end: a.end != null ? a.end : Math.min(S.P.t1, t + 2), text: a.text || '', phrase: unbracket(a.phrase || ''),
+      name: a.name || '', language: a.language || '', sung: !!a.sung, show: a.show_name !== false, timeOk: true,
+    };
+    renderAdd();
+    showModal();
+    const f = $('#add-text') || $('#add-phrase');
+    if (f) f.focus();
+  }
+  function readAdd() {
+    const m = S.modal, box = $('#modal-box');
+    const v = (sel) => { const el = box.querySelector(sel); return el ? el.value : null; };
+    const s = parseTime(v('[data-f="start"]')), e = parseTime(v('[data-f="end"]'));
+    m.timeOk = Number.isFinite(s) && Number.isFinite(e) && e > s;
+    if (Number.isFinite(s)) m.start = s;
+    if (Number.isFinite(e)) m.end = e;
+    if (m.kind === 'line') {
+      m.text = v('#add-text') ?? m.text;
+      m.name = String(v('#add-newname') || '').trim() || v('#add-name') || '';
+      m.language = v('#add-lang') ?? m.language;
+      const sung = box.querySelector('#add-sung');
+      if (sung) m.sung = sung.checked;
+      const show = box.querySelector('#add-show');
+      if (show) m.show = show.checked;
+    } else m.phrase = v('#add-phrase') ?? m.phrase;
+  }
+  /** How it will read in a cell: the label as placement writes it, ♪ for a song, [ ] for a sound. */
+  function addPreview(m) {
+    if (m.kind !== 'line') return bracket(m.phrase);
+    const st = STYLE();
+    const tail = String(m.language || '').trim() ? `${st.label_sep}${String(m.language).trim()}` : '';
+    const lab = nameLabel(m.show ? m.name : '', tail);
+    const body = m.sung ? `${st.note || '♪'} ${m.text} ${st.note || '♪'}` : m.text;
+    return `${lab ? `${lab} ` : ''}${body}`;
+  }
+  function syncAddPreview() {
+    readAdd();
+    const el = $('#add-preview');
+    if (el) el.textContent = addPreview(S.modal);
+  }
+  function renderAdd() {
+    const m = S.modal;
+    const chars = (S.st.characters || []).slice();
+    const inChars = !m.name || chars.includes(m.name);
+    const kinds = [['line', '대사'], ['sfx', '효과음'], ['music', '음악']];
+    const music = STYLE().music || '음악';
+    $('#modal-box').innerHTML = `<div class="xp add">
+      <div class="xp-head"><span class="logo" aria-hidden="true">SDH</span><h3 id="modal-title">${m.id ? '넣은 것 고치기' : '새로 넣기'}</h3>
+        <span class="muted">작가가 넣은 것은 그대로 자막에 들어간다</span><span class="spacer"></span>${CLOSE_BTN}</div>
+      <div class="xp-body">
+        <div class="seg seg-scope" role="radiogroup" aria-label="넣을 것">${kinds.map(([k, l]) => `<label><input type="radio" name="add-kind" value="${k}"${m.kind === k ? ' checked' : ''}${m.id && m.kind !== k ? ' disabled' : ''}><span>${l}</span></label>`).join('')}</div>
+        ${timeBoxHtml('add', m.start, m.end, '')}
+        ${m.kind === 'line' ? `
+          <div class="field"><label for="add-text">대사 글</label><input class="input" id="add-text" value="${esc(m.text)}" placeholder="들린 말 그대로" autocomplete="off"></div>
+          <div class="ed-row"><label>화자 <select class="input input-sm" id="add-name"><option value="">모름 (이름 없이)</option>${chars.map((n) => `<option value="${esc(n)}"${n === m.name ? ' selected' : ''}>${esc(n)}</option>`).join('')}</select></label>
+            <input class="input input-sm" id="add-newname" value="${inChars ? '' : esc(m.name)}" placeholder="새 이름" autocomplete="off" aria-label="새 이름">
+            <label class="switch sm"><input type="checkbox" id="add-show"${m.show ? ' checked' : ''}><span>이름 표시</span></label></div>
+          <div class="ed-row"><label>언어 <input class="input input-sm" id="add-lang" list="lang-list" value="${esc(m.language)}" placeholder="한국어" autocomplete="off"></label>
+            <label class="switch sm"><input type="checkbox" id="add-sung"${m.sung ? ' checked' : ''}><span>노래</span></label></div>`
+        : `<div class="field"><label for="add-phrase">문구</label><input class="input" id="add-phrase" value="${esc(m.phrase)}" placeholder="${m.kind === 'music' ? `예: 음악이 멈춘다 · 잔잔한 ${esc(music)}` : '예: 쿵 · 달칵 - 문'}" autocomplete="off">
+            <span class="field-hint">대괄호 [ ] 는 저절로 붙는다</span></div>
+          ${m.kind === 'music' ? `<div class="mchips">${['음악이 멈춘다', music].map((p) => `<button type="button" class="mchip" data-act="add-phrase" data-val="${esc(p)}">${esc(bracket(p))}</button>`).join('')}</div>` : ''}`}
+        <div class="add-pv"><span class="muted">자막에는</span><b id="add-preview">${esc(addPreview(m))}</b></div>
+        <div class="mdl-actions"><button type="button" class="btn btn-primary btn-lg" data-act="add-save">${m.id ? '저장' : '넣기'}</button><button type="button" class="btn btn-lg" data-act="close">취소</button>
+          ${m.id ? '<button type="button" class="btn btn-lg btn-danger" data-act="add-delete">지우기</button>' : ''}</div>
+      </div></div>`;
+  }
+  async function saveAdd() {
+    const m = S.modal;
+    readAdd();
+    if (!m.timeOk) { toast('시작과 끝을 03:52.40 처럼 적고, 끝은 시작보다 뒤로', 'error'); return; }
+    const body = { start: Math.round(m.start * 1000) / 1000, end: Math.round(m.end * 1000) / 1000 };
+    if (m.kind === 'line') {
+      const text = String(m.text || '').trim();
+      if (!text) { toast('대사 글을 적어 주세요', 'error'); const f = $('#add-text'); if (f) f.focus(); return; }
+      Object.assign(body, { text, name: m.name || null, language: String(m.language || '').trim() || null, sung: m.sung, show_name: m.show });
+    } else {
+      const phrase = String(m.phrase || '').trim();
+      if (!phrase) { toast('문구를 적어 주세요', 'error'); const f = $('#add-phrase'); if (f) f.focus(); return; }
+      body.phrase = phrase;
+    }
+    const before = new Set(D.added.keys());
+    const what = cut(addPreview(m), 30);
+    const st = m.id ? await mutate(`api/added/${enc(m.id)}`, body, `고침 · ${what}`)
+      : await mutate('api/added', { kind: m.kind, ...body }, `넣음 · ${what}`);
+    if (!st) return;
+    const id = m.id || [...D.added.keys()].find((k) => !before.has(k));
+    const kind = m.kind;
+    closeModal();
+    if (id) pick(kind === 'line' ? 'lines' : 'items', id);
+  }
+  /** 지우기 asks once more on the same button (no dialog), then removes what the writer added. */
+  async function armDelete(el, id) {
+    if (!id || !D.added.has(id)) return;
+    if (el.dataset.armed !== '1') {
+      el.dataset.armed = '1';
+      el.dataset.label = el.textContent;
+      el.textContent = '한 번 더 누르면 지움';
+      setTimeout(() => { if (document.body.contains(el)) { el.dataset.armed = ''; el.textContent = el.dataset.label; } }, 3000);
+      return;
+    }
+    const a = D.added.get(id);
+    setBusy(true);
+    try {
+      const st = await api('DELETE', `api/added/${enc(id)}`);
+      if (S.modal && S.modal.type === 'add') closeModal();
+      applyState(st);
+      toast(`지움 · ${cut(a.text || a.phrase || id, 30)}`);
+    } catch (e) {
+      toast(e.message || String(e), 'error', 4500);
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ---------------------------------------- 소리 세기 곡선 (env.npz, 9-x3)
+  async function loadEnv() {
+    if (S.envTried || !S.P) return;
+    S.envTried = true;
+    try {
+      const step = Math.max(0.05, (S.P.t1 - S.P.t0) / 20000);
+      const res = await fetch(`api/envelope?step=${step.toFixed(3)}`);
+      if (!res.ok) return;                       // the sed stage has not run: no curve
+      S.env = await res.json();
+      buildEnv();
+      const b = $('#env-toggle');
+      b.hidden = false;
+      b.classList.toggle('is-on', S.envOn);
+      renderTimeline();
+    } catch (_) { /* the timeline works without the curve */ }
+  }
+  /** One filled curve per track, in its own lane (speech under the cells, effects, music), drawn once
+      in data units: the timeline only stretches it. */
+  function buildEnv() {
+    const lo = -70, hi = -10;
+    $('#tl-env').innerHTML = Object.entries(S.env.tracks || {}).filter(([k, v]) => ENV_LANE[k] && v.length).map(([k, vals]) => {
+      let d = 'M0 1';
+      for (let i = 0; i < vals.length; i++) d += `L${i + 0.5} ${(1 - clamp((vals[i] - lo) / (hi - lo), 0, 1)).toFixed(3)}`;
+      d += `L${vals.length} 1Z`;
+      return `<svg class="env env-${k}" data-lane="${ENV_LANE[k]}" data-n="${vals.length}" viewBox="0 0 ${vals.length} 1" preserveAspectRatio="none" aria-hidden="true"><path d="${d}"/></svg>`;
+    }).join('');
+  }
+  function placeEnv(TLG, pps) {
+    const box = $('#tl-env');
+    if (!box) return;
+    box.hidden = !(S.env && S.envOn);
+    if (box.hidden) return;
+    for (const svg of box.children) {
+      const lane = LANE[svg.dataset.lane];
+      Object.assign(svg.style, {
+        left: `${((num(S.env.t0) - S.P.t0) * pps).toFixed(1)}px`, width: `${(Number(svg.dataset.n) * num(S.env.step) * pps).toFixed(1)}px`,
+        top: `${TLG.ruler + TLG.band + TLG.pad + lane * (TLG.lane + TLG.gap)}px`, height: `${TLG.lane}px`,
+      });
+    }
   }
 
   // ------------------------------------------------------------------- events
@@ -1283,15 +2420,129 @@
     const el = ev.target.closest('[data-act]');
     if (!el) {
       const row = ev.target.closest('.row[data-id]');
-      if (row) select(row.dataset.id);
+      if (row) pick(row.dataset.view || 'items', row.dataset.id);
       return;
     }
+    if (el.disabled) return;
     const id = el.dataset.id;
+    const ln = D.lines.get(S.line);
     switch (el.dataset.act) {
       case 'decide': decide(id, el.dataset.decision || null); break;
       case 'edit': openEdit(id); break;
       case 'name': ev.stopPropagation(); openEdit(id); break;
-      case 'filter': setFilter(el.dataset.filter, !!el.dataset.toggle); break;
+      case 'filter':
+        if (!el.closest('#state-chips')) setView('items');           // the header pills filter the candidates
+        setFilter(el.dataset.filter, !!el.dataset.toggle);
+        break;
+      case 'view': setView(el.dataset.view); break;
+      case 'scene': S.sceneOpen.set(el.dataset.sid, !el.classList.contains('is-open')); renderList({ keep: true }); break;
+      case 'more': showMore(); break;
+      case 'toggle-minor': S.showMinor = !S.showMinor; renderList({ keep: true }); break;
+      case 'goto-line': if (S.modal) closeModal(); pick('lines', id); break;
+      case 'goto-item': if (S.modal) closeModal(); pick('items', id); break;
+      case 'goto-extra': pick('extras', id); break;
+      case 'goto-person': pick('people', id, { seek: false }); break;
+      case 'xp-view': closeModal(); setView(el.dataset.view); setFilter(el.dataset.filter); break;
+      case 'frame': stepFrame(Number(el.dataset.d)); break;
+      case 'env-toggle': S.envOn = !S.envOn; el.classList.toggle('is-on', S.envOn); renderTimeline(); break;
+      case 'ed-now': {
+        const box = el.closest('[data-box]');
+        const inp = box && box.querySelector(`[data-f="${el.dataset.f}"]`);
+        if (inp) inp.value = fmtTime2(S.t);
+        if (S.modal && S.modal.type === 'add') syncAddPreview();
+        break;
+      }
+      // 대사 줄
+      case 'ln-play': { const sp = ln && (ln.start != null ? [ln.start, ln.end] : ln.guess); if (sp) playRange(video, sp[0] - 0.3, sp[1] + 0.3); break; }
+      case 'ln-speaker': if (ln) openLineSpeaker(ln); break;
+      case 'ln-include':
+        if (ln) lineUpdate(ln, { include: el.dataset.v === '0' ? false : null }, el.dataset.v === '0' ? `뺌 · ${cut(ln.text, 28)}` : `다시 넣음 · ${cut(ln.text, 26)}`);
+        break;
+      case 'ln-from': {
+        if (!ln) break;
+        const f = el.dataset.from;
+        S.ed = null;
+        lineUpdate(ln, f ? { text_from: f } : { text_from: null, text: null }, f ? `${PICKED[f]} · ${cut(ln.text, 26)}` : `고르기 취소 · ${cut(ln.text, 26)}`);
+        break;
+      }
+      case 'ln-edit-text': {
+        S.ed = { id: S.line, mode: 'text' };
+        renderDetail();
+        const inp = $('#evidence [data-box="text"] [data-f="text"]');
+        if (inp) { inp.focus(); inp.select(); }
+        break;
+      }
+      case 'ln-text-cancel': S.ed = null; renderDetail(); break;
+      case 'ln-text-save': {
+        const inp = el.closest('[data-box]').querySelector('[data-f="text"]');
+        const v = String(inp.value || '').replace(/\s+/g, ' ').trim();
+        if (!ln) break;
+        if (!v) { toast('글을 비울 수는 없습니다 · 줄을 빼려면 이 줄 빼기', 'error'); inp.focus(); break; }
+        lineUpdate(ln, { text: v }, `글을 고침 · ${cut(v, 28)}`).then((st) => { if (st) { S.ed = null; renderDetail(); } });
+        break;
+      }
+      case 'ln-time': { const sp = ln && readSpan(el); if (sp) lineUpdate(ln, { start: sp[0], end: sp[1] }, `시각을 정함 · ${fmtTime(sp[0])}–${fmtTime(sp[1])}`); break; }
+      case 'ln-focus-time': {
+        const inp = $('#evidence [data-box="time"] [data-f="start"]') || $('#evidence [data-box="revive"] [data-f="start"]');
+        if (inp) { inp.focus(); inp.select(); }
+        break;
+      }
+      case 'ln-unpin': if (ln) lineUpdate(ln, { start: null, end: null }, `시각 고정을 풂 · ${cut(ln.text, 26)}`); break;
+      case 'ln-revive': { const sp = ln && readSpan(el); if (sp) lineUpdate(ln, { include: true, start: sp[0], end: sp[1] }, `되살림 · ${fmtTime(sp[0])} ${cut(ln.text, 24)}`); break; }
+      case 'ln-revive-now': {
+        if (!ln) break;
+        const s = Math.round(S.t * 1000) / 1000, e = Math.round(Math.min(S.P.t1, S.t + lineDur(ln.text)) * 1000) / 1000;
+        lineUpdate(ln, { include: true, start: s, end: e }, `지금 위치에 되살림 · ${fmtTime(s)} ${cut(ln.text, 24)}`);
+        break;
+      }
+      case 'ln-unrevive': if (ln) lineUpdate(ln, { include: null, start: null, end: null }, `다시 뺌 · ${cut(ln.text, 26)}`); break;
+      case 'ln-gap': {
+        if (!ln) break;
+        const k = Number(el.dataset.k);
+        const set = new Set(ln.breaks || []);
+        if (set.has(k)) set.delete(k); else set.add(k);
+        ln.breaks = [...set].sort((a, b) => a - b);          // the next click before the answer builds on this one
+        el.classList.toggle('is-on', set.has(k));
+        lineUpdate(ln, { breaks: ln.breaks }, set.has(k) ? `${k}번째 어절 뒤에서 끊음` : `${k}번째 어절 뒤 끊기를 지움`);
+        break;
+      }
+      case 'ln-breaks-clear': if (ln) lineUpdate(ln, { breaks: [] }, '끊을 자리를 모두 지움'); break;
+      case 'ln-mark-reset': if (ln) lineUpdate(ln, { language: null, sung: null }, '말 표시를 대본대로'); break;
+      // 대본에 없는 말
+      case 'x-play': { const x = D.extraById.get(id); if (x) playRange(video, x.start - 0.3, x.end + 0.3); break; }
+      case 'x-ignore': extraAct(id, 'ignore'); break;
+      case 'x-clear': extraAct(id, 'clear'); break;
+      case 'x-line': extraToLine(id, el); break;
+      case 'x-use-time': useExtraTime(id, el.dataset.line); break;
+      // 인물
+      case 'pp-mode': peopleSet(el.dataset.mode === 'generic' ? { mode: 'generic', before: el.dataset.before } : { mode: el.dataset.mode || null }); break;
+      case 'pp-custom': {
+        const inp = el.closest('[data-box]').querySelector('[data-f="before"]');
+        const v = String(inp.value || '').trim().replace(/^\[\s*|\s*\]$/g, '');
+        if (!v) { toast('쓸 표시를 적어 주세요 (예: 경찰)', 'error'); inp.focus(); break; }
+        peopleSet({ mode: 'generic', before: v });
+        break;
+      }
+      case 'pp-reveal': peopleSet({ reveal: el.dataset.reveal }); break;
+      // 칸
+      case 'cell-play': { const c = D.cellById.get(S.cell); if (c) playRange(video, c.start, c.end); break; }
+      case 'cell-step': { const i = D.cells.findIndex((c) => c.id === S.cell); const c = D.cells[i + Number(el.dataset.d)]; if (c) pick('cells', c.id); break; }
+      // 새로 넣기
+      case 'open-add': openAdd('line'); break;
+      case 'add-phrase': { const inp = $('#add-phrase'); if (inp) { inp.value = el.dataset.val; syncAddPreview(); } break; }
+      case 'add-save': saveAdd(); break;
+      case 'add-delete': armDelete(el, S.modal && S.modal.id); break;
+      case 'added-edit': { const a = D.added.get(id); if (a) openAdd(a.kind, a); break; }
+      case 'added-delete': armDelete(el, id); break;
+      case 'item-move': {
+        const inp = el.closest('[data-box]').querySelector('[data-f="t"]');
+        const t = parseTime(inp && inp.value);
+        if (!Number.isFinite(t)) { toast('시각을 03:52.40 처럼 적어 주세요', 'error'); if (inp) inp.focus(); break; }
+        const it = D.byId.get(id), w = it && it.window;
+        if (w && (t < w[0] - 0.5 || t > w[1] + 0.5)) toast('대본이 말한 범위 밖으로 옮깁니다', 'error', 3200);
+        placement(id, 'move', t);
+        break;
+      }
       case 'kind': toggleKind(el.dataset.kind); break;
       case 'zoom': setZoom(Number(el.dataset.zoom)); break;
       case 'toggle-play': togglePlay(); break;
@@ -1312,8 +2563,8 @@
       case 'open-export': openExport(el.dataset.fmt); break;
       case 'export': doExport(el.dataset.fmt); break;
       case 'bulk-exclude': bulkExclude(); break;
-      case 'xp-goto': closeModal(); setFilter(el.dataset.filter); break;
-      case 'goto-cell': gotoCell(el.dataset.cell); break;
+      case 'xp-goto': closeModal(); setView('items'); setFilter(el.dataset.filter); break;
+      case 'goto-cell': if (el.closest('#modal-box')) setView('cells'); gotoCell(el.dataset.cell); break;
       case 'copy-path': copyPath(); break;
       case 'open-folder': openFolder(); break;
       case 'close': closeModal(); break;
@@ -1324,7 +2575,20 @@
   });
   document.addEventListener('dblclick', (ev) => {
     const row = ev.target.closest('.row[data-id]');
-    if (row) openEdit(row.dataset.id);
+    if (row && (row.dataset.view || 'items') === 'items') openEdit(row.dataset.id);
+    else if (row && row.dataset.view === 'lines') { const ln = D.lines.get(row.dataset.id); if (ln) openLineSpeaker(ln); }
+  });
+  // the left panel's switches, the language field and the reveal line (they store as soon as they change)
+  $('#evidence').addEventListener('change', (ev) => {
+    const t = ev.target, act = t.dataset && t.dataset.change;
+    if (!act) return;
+    const ln = D.lines.get(S.line);
+    if (act === 'ln-keep' && ln) lineUpdate(ln, { keep: t.checked || null }, t.checked ? '한 칸에 둠' : '한 칸에 두기를 풂');
+    else if (act === 'ln-sung' && ln) lineUpdate(ln, { sung: t.checked }, t.checked ? '노래로 표시 (♪ … ♪)' : '노래 표시를 뺌');
+    else if (act === 'ln-lang' && ln) {
+      const v = t.value.trim().replace(/^\[\s*|\s*\]$/g, '');
+      if (v !== (ln.language || '')) lineUpdate(ln, { language: v }, v ? `${bracket(v)} 표시` : '한국어 (언어 표시 없음)');
+    } else if (act === 'pp-reveal-line' && t.value) peopleSet({ reveal: 'line', reveal_line: t.value });
   });
   // Mouse clicks must not leave focus on toolbar buttons, so Space/Enter keep working as shortcuts.
   $('#app').addEventListener('mousedown', (ev) => {
@@ -1336,6 +2600,10 @@
     const m = S.modal;
     if (!m) return;
     const t = ev.target;
+    if (m.type === 'add') {
+      if (t.name === 'add-kind') { readAdd(); m.kind = t.value; renderAdd(); } else syncAddPreview();
+      return;
+    }
     if (t.name === 'm-opt') { m.choice = t.value; if (m.type === 'sfx') syncSfx(); else syncMusic(false); }
     else if (t.name === 'm-who') { m.who = t.value; syncSpeaker(); if (t.value === 'new') $('#f-newname').focus(); }
     else if (t.id === 'f-show') { m.show = t.checked; syncSpeaker(); }
@@ -1345,6 +2613,7 @@
     const m = S.modal;
     if (!m) return;
     const t = ev.target;
+    if (m.type === 'add') { syncAddPreview(); return; }
     if (t.id === 'f-custom') { m.custom = t.value; m.choice = 'custom'; if (m.type === 'sfx') syncSfx(); else syncMusic(false); }
     else if (t.id === 'f-short') { m.short = t.value; m.shortTouched = true; }
     else if (t.id === 'f-newname') { m.newName = t.value; m.who = 'new'; syncSpeaker(); }
@@ -1360,26 +2629,45 @@
     if (ev.isComposing || ev.keyCode === 229) return;
     const tgt = ev.target;
     const inInput = !!(tgt.closest && tgt.closest('input, textarea, select, [contenteditable="true"]'));
-    if (inInput && tgt.classList.contains('time-input') && (ev.code === 'Enter' || ev.code === 'NumpadEnter')) {
-      ev.preventDefault();
-      const go = tgt.closest('.nr-card').querySelector('[data-action="move"]');
-      if (go) go.click();
-      return;
+    const enter = ev.code === 'Enter' || ev.code === 'NumpadEnter';
+    if (inInput && enter && tgt.tagName !== 'SELECT') {
+      // Enter in a field of a box runs the box's main button (옮기기, 시각 정하기, 저장, 대사로 넣기 ...)
+      const box = tgt.closest('.nr-card, [data-box]');
+      let go = box && (box.querySelector('[data-primary]') || box.querySelector('[data-action="move"]'));
+      if (!go && box && box.parentElement) { const up = box.parentElement.closest('[data-box]'); go = up && up.querySelector('[data-primary]'); }
+      if (go) { ev.preventDefault(); go.click(); return; }
     }
     if (S.modal) {
       if (ev.code === 'Escape') { ev.preventDefault(); closeModal(); }
-      else if ((ev.code === 'Enter' || ev.code === 'NumpadEnter') && inInput && tgt.type === 'text' && S.modal.type !== 'export') { ev.preventDefault(); confirmModal(); }
+      else if (enter && inInput && tgt.type === 'text' && S.modal.type !== 'export') { ev.preventDefault(); confirmModal(); }
       return;
     }
+    if (inInput && ev.code === 'Escape' && S.ed) { ev.preventDefault(); S.ed = null; renderDetail(); return; }
     if (inInput || ev.ctrlKey || ev.metaKey || ev.altKey) return;
     const onButton = !!(tgt.closest && tgt.closest('button, a[href]'));
+    const ln = S.view === 'lines' ? D.lines.get(S.line) : null;
     switch (ev.code) {
       case 'Space': if (onButton) return; ev.preventDefault(); togglePlay(); break;
       case 'ArrowUp': ev.preventDefault(); moveSel(-1); break;
       case 'ArrowDown': ev.preventDefault(); moveSel(1); break;
-      case 'Enter': case 'NumpadEnter': if (onButton) return; ev.preventDefault(); acceptRec(); break;
-      case 'KeyI': ev.preventDefault(); if (S.sel) decide(S.sel, 'include'); break;
-      case 'KeyE': ev.preventDefault(); if (S.sel) decide(S.sel, 'exclude'); break;
+      case 'ArrowLeft': case 'Comma': ev.preventDefault(); stepFrame(-1, ev.shiftKey && ev.code === 'ArrowLeft'); break;
+      case 'ArrowRight': case 'Period': ev.preventDefault(); stepFrame(1, ev.shiftKey && ev.code === 'ArrowRight'); break;
+      case 'Digit1': case 'Digit2': case 'Digit3': case 'Digit4': case 'Digit5':
+        ev.preventDefault(); setView(VIEWS[Number(ev.code.slice(5)) - 1][0]); break;
+      case 'KeyN': ev.preventDefault(); openAdd('line'); break;
+      case 'Enter': case 'NumpadEnter': if (onButton) return; ev.preventDefault(); if (S.view === 'items') acceptRec(); break;
+      case 'KeyI':
+        ev.preventDefault();
+        if (S.view === 'items' && S.sel) decide(S.sel, 'include');
+        else if (ln && !ln.include && ln.excluded === 'writer') lineUpdate(ln, { include: null }, `다시 넣음 · ${cut(ln.text, 26)}`);
+        else if (ln && !ln.include) toast('시각이 없는 줄입니다 · 왼쪽에서 시작·끝을 정해 되살린다', 'error');
+        break;
+      case 'KeyE':
+        ev.preventDefault();
+        if (S.view === 'items' && S.sel) decide(S.sel, 'exclude');
+        else if (ln && ln.include && !D.added.has(ln.id)) lineUpdate(ln, { include: false }, `뺌 · ${cut(ln.text, 28)}`);
+        else if (S.view === 'extras' && S.extra) { const x = D.extraById.get(S.extra); if (x && x.state === 'open') extraAct(x.id, 'ignore'); }
+        break;
       default: break;
     }
   });
@@ -1390,7 +2678,13 @@
   tlScroll.addEventListener('pointerdown', (ev) => {
     if (ev.button !== 0 || !S.P || ev.target === tlScroll) return;     // the scrollbar itself
     const blk = ev.target.closest('.blk');
-    if (blk && blk.dataset.id) { select(blk.dataset.id); return; }
+    if (blk && blk.dataset.id) {
+      const it = D.byId.get(blk.dataset.id);
+      // in the dialogue view a speaker block opens its line; anything else opens the candidate
+      if (S.view === 'lines' && it && it.kind === 'speaker' && it.speaker && D.lines.has(it.speaker.line_id)) pick('lines', it.speaker.line_id);
+      else select(blk.dataset.id);
+      return;
+    }
     if (blk && blk.dataset.cell) { gotoCell(blk.dataset.cell); return; }
     ev.preventDefault();
     clearRange(video);
@@ -1428,9 +2722,11 @@
     bindVideo();
     try {
       const st = await api('GET', 'api/state');
+      document.body.insertAdjacentHTML('beforeend', `<datalist id="lang-list">${LANGS.map((l) => `<option value="${l}"></option>`).join('')}</datalist>`);
       applyState(st);
       layoutStage();
       renderTimeline();
+      loadEnv();
       if (S.P.video) video.src = S.P.video_url;
       else showStageMsg('영상 파일을 찾을 수 없습니다 · project.json 의 video 경로를 확인하세요');
       const first = D.visible[0];

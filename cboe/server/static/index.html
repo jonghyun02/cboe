@@ -47,24 +47,18 @@
     </section>
 
     <section class="card list-card" aria-labelledby="list-title">
+      <h2 class="sr-only" id="list-title">후보</h2>
       <div class="list-head">
-        <h2 id="list-title">후보 목록</h2>
-        <span class="hint">검출한 소리를 지우지 않고 모두 남긴다</span>
+        <div class="tabs" id="tabs" role="tablist" aria-label="보기"></div>
         <span class="list-count tnum" id="list-count"></span>
       </div>
+      <div class="list-sub"><span class="hint" id="list-hint"></span><span class="view-note" id="view-note"></span></div>
       <div class="filters">
-        <div class="chips" id="state-chips" role="group" aria-label="추천으로 거르기"></div>
+        <div class="chips" id="state-chips" role="group" aria-label="거르기"></div>
         <div class="chips chips-kind" id="kind-chips" role="group" aria-label="종류로 거르기"></div>
       </div>
-      <div class="rows" id="rows" role="listbox" aria-label="후보"></div>
-      <div class="keys" aria-label="단축키">
-        <span><kbd>↑</kbd><kbd>↓</kbd> 이동</span>
-        <span><kbd>Enter</kbd> 추천대로</span>
-        <span><kbd>I</kbd> 포함</span>
-        <span><kbd>E</kbd> 제외</span>
-        <span><kbd>Space</kbd> 재생</span>
-        <span class="keys-tail">두 번 누르면 고치기</span>
-      </div>
+      <div class="rows" id="rows" role="listbox" aria-labelledby="list-title"></div>
+      <div class="keys" id="keys" aria-label="단축키"></div>
     </section>
   </main>
 
@@ -72,11 +66,18 @@
     <div class="tl-bar">
       <span class="tl-title">타임라인</span>
       <span class="tl-clock tnum" id="tl-clock"></span>
+      <span class="seg seg-frame" role="group" aria-label="프레임 이동">
+        <button type="button" data-act="frame" data-d="-1" title="한 프레임 앞 (← · Shift+← 1초)">◀ 프레임</button>
+        <button type="button" data-act="frame" data-d="1" title="한 프레임 뒤 (→ · Shift+→ 1초)">프레임 ▶</button>
+      </span>
       <span class="tl-legend" aria-hidden="true">
         <i class="lg st-inc"></i>포함 <i class="lg st-exc"></i>제외 <i class="lg st-check"></i>확인 필요
         <i class="lg st-noroom"></i>배치 확인 필요 <i class="lg-cut"></i>장면 전환
+        <i class="lg lg-sc"></i>장면 찾음 <i class="lg lg-sc-u"></i>모름 <i class="lg-miss"></i>없음
       </span>
       <span class="tl-stub" id="tl-stub" hidden>임시 배치 규칙</span>
+      <button type="button" class="btn btn-sm btn-text tl-btn" id="env-toggle" data-act="env-toggle" hidden title="분리한 대사·효과음·음악 트랙의 소리 세기를 각 줄에 그린다">소리 세기</button>
+      <button type="button" class="btn btn-sm tl-btn tl-add" data-act="open-add" title="지금 재생 위치에 대사·효과음·음악을 새로 넣는다 (N)">+ 넣기</button>
       <span class="seg seg-zoom" role="group" aria-label="확대">
         <button type="button" data-act="zoom" data-zoom="15">15초</button>
         <button type="button" data-act="zoom" data-zoom="60">60초</button>
@@ -85,11 +86,13 @@
     </div>
     <div class="tl-body">
       <div class="tl-labels" aria-hidden="true">
+        <span class="tl-band-label">장면</span>
         <span style="--lane:0">대사 칸</span><span style="--lane:1">화자</span>
         <span style="--lane:2">효과음</span><span style="--lane:3">음악</span>
       </div>
       <div class="tl-scroll" id="tl-scroll">
         <div class="tl-inner" id="tl-inner">
+          <div class="tl-env" id="tl-env" hidden></div>
           <div class="tl-content" id="tl-content"></div>
           <div class="tl-head" id="tl-head"></div>
         </div>
