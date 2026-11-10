@@ -33,6 +33,7 @@ from concurrent.futures import ThreadPoolExecutor
 from .. import cues as cue_mod
 from .. import llm
 from ..util import fmt_time, log, read_json, write_json
+from . import cues as cue_stage
 from . import recommend
 from .align import is_vocalisation
 
@@ -157,7 +158,8 @@ def run(p, cfg: dict) -> dict:
     errors = 0
     not_asked = 0
     doc = read_json(p.path("script.json"), {}) or {}
-    starts = cue_mod.scene_starts(lines, (read_json(p.path("scenes.json"), {}) or {}).get("scenes"))
+    starts = cue_mod.scene_starts(lines, (read_json(p.path("scenes.json"), {}) or {}).get("scenes"),
+                                  cue_stage.span(p))
     if used_llm and scope == "useful":
         for c in todo:
             if c["id"] not in worth:                # the answer cannot change the recommendation

@@ -107,7 +107,9 @@ SOURCES = (
     (r"폭죽|불꽃놀이", "폭죽", "펑", "폭죽", ("explosion",)),
     (r"폭발|폭음|폭탄|포탄|포성|포격|수류탄|최루탄", None, "쾅", "폭발음", ("explosion", "gun")),
     (r"노크|두드리|두드린|두들기|똑똑", "문", "똑똑", "노크", ("door", "impact", "hit")),
-    (r"문[이을]?\s*(?:쾅|닫|열|여닫)|문\s*닫히|문\s*열리|문소리|문\s*여는|문\s*닫는", "문", "덜컥", "문소리", ("door", "impact")),
+    # also with the onomatopoeia between the door and its verb: '문이 끼익 열린다', '철문이 삐걱- 닫힌다'
+    (r"문[이을]?\s*(?:쾅|닫|열|여닫)|문[이을]?\s+[가-힣]{1,4}[-~!]*\s*(?:(?:하고|하며|하더니)\s*)?(?:닫|열|여닫)|"
+     r"문\s*닫히|문\s*열리|문소리|문\s*여는|문\s*닫는", "문", "덜컥", "문소리", ("door", "impact")),
     (r"전화벨|벨이?\s*울|벨소리|따르릉|휴대폰|핸드폰|휴대전화|전화가?\s*(?:울|온|와)|"
      r"울리는\s*(?:[가-힣]+\s+){0,3}전화(?![가-힣])", "전화", "따르릉", "전화벨", ("phone", "alarm", "bell")),
     (r"인터폰", "인터폰", None, "인터폰", ("doorbell", "phone", "bell", "alarm")),
@@ -166,6 +168,9 @@ _SOURCES = tuple((re.compile(p), noun, ono, desc, fam) for p, noun, ono, desc, f
 _DOOR_NOUNS = ("현관문", "대문", "창문", "철문", "문")
 _HEARD = {"들리", "들려", "들린", "울려", "울리", "울린"}      # 'is heard' / 'rings': say nothing of what sounds
 _SOUND_NAMES = {"함성", "환호", "야유", "비명", "고함", "박수", "울음", "웃음", "기침", "한숨"}   # sounds, not sources
+# families that say how a thing sounds, not what sounds: all an onomatopoeia written inside the
+# words of the source that names the cue adds ('문이 끼익 열린다': a creak of the door, no car)
+MANNER_FAMILIES = {"creak", "scrape", "click", "impact", "hit"}
 
 # music
 MUSIC_WORD = re.compile(r"음악|노래(?!방)|노랫|선율|멜로디|연주|BGM|O\.?S\.?T|애국가|(?<![가-힣])가요(?![가-힣])|팝송|"
@@ -338,9 +343,11 @@ def _ono_run(text: str, start: int) -> str:
     return out
 
 
-def _sound_name(text: str) -> tuple[str | None, list[str], list[str], tuple[int, int] | None]:
-    """(description of what sounds, '- 출처' nouns, families, (where the naming entry matched, its
-    index in SOURCES)) from the SOURCES table."""
+def _sound_name(text: str) -> tuple[str | None, list[str], list[str], tuple[int, int, int] | None]:
+    """(description of what sounds, '- 출처' nouns, families, (where the naming entry's match
+    starts, its index in SOURCES, where the match ends)) from the SOURCES table. An entry that
+    matches only inside the naming entry's match (the '끼익' of '문이 끼익 열린다') adds only its
+    ``MANNER_FAMILIES``."""
     desc, nouns, fams, onos, first, at = None, [], [], [], True, None
     for k, (rx, noun, ono, d, fam) in enumerate(_SOURCES):
         m = rx.search(text)
@@ -348,13 +355,15 @@ def _sound_name(text: str) -> tuple[str | None, list[str], list[str], tuple[int,
             if desc is None:
                 desc = d
             if first:                                  # the first entry that matches names the source
-                first, at = False, (m.start(), k)
+                first, at = False, (m.start(), k, m.end())
                 if noun == "문":
                     noun = next((n for n in _DOOR_NOUNS if n in text), "문")
                 if noun:
                     nouns.append(noun)
                 if ono:
                     onos.append(ono)
+            elif at[0] <= m.start() and m.end() <= at[2]:
+                fam = tuple(f for f in fam if f in MANNER_FAMILIES)
             fams.extend(f for f in fam if f not in fams)
     return desc, nouns + [f"@{o}" for o in onos], fams, at
 
@@ -483,15 +492,17 @@ def sfx_cue(text: str) -> dict | None:
         at = t.index("소리")
         near_desc, near_srcs, _, near_at = _sound_name(t[max(0, at - 8):at + 2])
         if near_desc and near_at:
-            desc, srcs, src_at = near_desc, near_srcs, (max(0, at - 8) + near_at[0], near_at[1])
+            desc, srcs, src_at = near_desc, near_srcs, (max(0, at - 8) + near_at[0], near_at[1],
+                                                        max(0, at - 8) + near_at[2])
     nouns = [s for s in srcs if not s.startswith("@")]
     if onos and src_at and abs(src_at[0] - onos[0][0]) > NEAR_CHARS and not _ono_fits(ono, src_at[1]):
         nouns = []           # '[의성어 - 출처]' only when they belong together: '끼이익' far from '사이렌' is a brake
     table_ono = next((s[1:] for s in srcs if s.startswith("@")), None)
-    for _, o in onos:                                  # the written onomatopoeia says what it is, too
+    for pos, o in onos:                                # the written onomatopoeia says what it is, too
+        inside = bool(src_at) and src_at[0] <= pos < src_at[2]      # how the named source sounds
         for rx, _n, _o, _d, fam in _SOURCES:
             if rx.search(o):
-                fams.extend(f for f in fam if f not in fams)
+                fams.extend(f for f in fam if f not in fams and (not inside or f in MANNER_FAMILIES))
     generic = _generic_desc(t, t.index("소리")) if desc is None and "소리" in t else None
     if generic and ono and re.sub(r"[!\s]", "", ono) in generic.replace(" ", ""):
         generic = None                                 # '[꽈당]' says it: no '[꽈당 소리]'
@@ -778,13 +789,14 @@ def _numbered(cues: list[dict]) -> list[dict]:
 
 # ----------------------------------------------------------------------------- time windows
 def scene_times(scenes) -> dict[str, dict]:
-    """scenes.json scenes by id: {"start", "end", "status"}; a scene marked absent or without
-    times has no time."""
+    """scenes.json scenes by id: {"start", "end", "status"}; a scene marked absent has no time.
+    One end may be missing: a scene without dialogue before the first scene with lines (or after
+    the last) has only the time on the side of its neighbour."""
     out = {}
     for s in scenes or []:
         if not isinstance(s, dict) or not s.get("id"):
             continue
-        ok = s.get("status") != "absent" and s.get("start") is not None and s.get("end") is not None
+        ok = s.get("status") != "absent"
         out[s["id"]] = {"start": s.get("start") if ok else None, "end": s.get("end") if ok else None,
                         "status": s.get("status")}
     return out
@@ -814,11 +826,14 @@ def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None, span=No
     without dialogue holds the time between its neighbours). The scene-first alignment writes a
     found scene's start / end as the range of its matched lines, so a scene's first or last
     line says nothing more and the end goes on to the nearest timed line of another scene
-    ('other_scene'), else to the edge of the processed stretch ``span`` = (t0, t1) ('range').
-    A cue whose way to a timed line passes a line out of the processed stretch (align status
-    out_of_range) is out of it too: no window. A cue of a scene that is not in the video
-    (scenes.json absent / out_of_range) gets none either; nor does a cue of a scene with no
-    timed line and no scenes.json time (it is not known to be in the video).
+    ('other_scene'), else to the edge of the processed stretch ``span`` = (t0, t1) ('range'):
+    a first (last) scene without dialogue has only its end (start) in scenes.json, and its
+    other end is the start (end) of the stretch. A cue whose way to a timed line passes a line
+    out of the processed stretch (align status out_of_range) is out of it too: no window; so is
+    a cue of a scene without a timed line whose way to the edge of the stretch passes one (the
+    head or tail was cut off: the scene may lie outside). A cue of a scene that is not in the
+    video (scenes.json absent / out_of_range) gets none either; nor does a cue of a scene with
+    no timed line and no scenes.json time (it is not known to be in the video).
 
     A dialogue.json line counts only when it carries the same ``scene_id`` as the script line
     (an older dialogue.json without it gives no window). ``window_by``: what each end came from
@@ -887,6 +902,8 @@ def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None, span=No
             t = scene_edge(scene, side)
             if t is not None:
                 return t, "scene", None
+        if passed_out and scene not in own:
+            return None                                # a scene without a timed line beyond lines out of the stretch
         t = edge[0] if side < 0 else edge[1]
         return (float(t), "range", None) if t is not None else None
 
@@ -967,12 +984,32 @@ def counts(cues: list[dict]) -> dict:
 
 
 # ----------------------------------------------------------------------------- scenes in time
-def scene_starts(lines: list[dict], scenes=None) -> list[tuple[float, str]]:
+def scene_starts(lines: list[dict], scenes=None, span=None) -> list[tuple[float, str]]:
     """(start, scene id) of the scenes with a known time, in time order: from scenes.json when
     it has times, else the first timed dialogue line of each scene (dialogue.json ``scene_id``).
-    Empty for an older dialogue.json without scene ids."""
+    Empty for an older dialogue.json without scene ids.
+
+    Scenes without dialogue in a row hold the same gap between their neighbours in scenes.json:
+    they share it in script order (each its part, as ``windows`` shares it among their cues). A
+    first scene without dialogue, which has only its end, starts at the start of the processed
+    stretch ``span`` = (t0, t1)."""
     st = scene_times(scenes)
-    out = [(float(v["start"]), sid) for sid, v in st.items() if v["start"] is not None]
+    quiet = {s["id"] for s in scenes or [] if isinstance(s, dict) and s.get("id") and not s.get("lines")}
+    t0 = span[0] if span and span[0] is not None else None
+    rows = []
+    for sid, v in st.items():                          # script order
+        start = v["start"] if v["start"] is not None else t0 if v["end"] is not None else None
+        if start is not None:
+            rows.append([float(start), sid, v])
+    gaps: dict[tuple, list[list]] = {}
+    for row in rows:
+        v = row[2]
+        if row[1] in quiet and v["status"] == "unknown" and v["start"] is not None and v["end"] is not None:
+            gaps.setdefault((float(v["start"]), float(v["end"])), []).append(row)
+    for (lo, hi), share in gaps.items():
+        for k, row in enumerate(share):
+            row[0] = lo + (hi - lo) * k / len(share)
+    out = [(round(s, 3), sid) for s, sid, _ in rows]
     if not out:
         first: dict[str, float] = {}
         for ln in lines or []:
@@ -1046,14 +1083,17 @@ def compatible(cue: dict, c: dict) -> str | None:
     return None
 
 
-def is_reason(cue: dict, how: str | None) -> bool:
-    """Whether a cue attached to a detected sound (``how`` = ``compatible``) is a reason to include
-    it ('대본 지문에 적힌 소리'). Not when: the cue does not say which sound it is (``vague``, or a
-    named sound matched to it only as 'any'); the window rests on guessed times
-    (``window_estimated``, 감사 1-08); it is a person's own sound — a laugh, a cough, crying — that
-    is not written as off screen (the person is mostly in view, 감사 8-12; a scream counts); or it
-    is a speaker's own sound from the dialogue (``vocal``)."""
+def is_reason(cue: dict, how: str | None, onset: float | None = None) -> bool:
+    """Whether a cue attached to a detected sound (``how`` = ``compatible``) at ``onset`` is a
+    reason to include it ('대본 지문에 적힌 소리'). Not when: the cue does not say which sound it is
+    (``vague``, or a named sound matched to it only as 'any'); the window rests on guessed times
+    (``window_estimated``, 감사 1-08); the sound lies far from the cue's own scene (``off_scene``);
+    it is a person's own sound — a laugh, a cough, crying — that is not written as off screen
+    (the person is mostly in view, 감사 8-12; a scream counts); or it is a speaker's own sound
+    from the dialogue (``vocal``)."""
     if cue.get("type") != "sfx" or how not in ("kind", "unnamed") or cue.get("vague") or cue.get("window_estimated"):
+        return False
+    if onset is not None and off_scene(cue, onset):
         return False
     fams = set(cue.get("families") or [])
     if fams and fams <= VOICE_FAMILIES and "scream" not in fams and not cue.get("offscreen"):
@@ -1082,35 +1122,113 @@ def anchor(cue: dict) -> float | None:
     return float(w[1]) if far < 0 else float(w[0])
 
 
+NEAR_S = 5.0     # in a wide window: candidates this much farther from the cue's place than the nearest are as near
+
+
+def _wide(cue: dict) -> bool:
+    w = cue.get("window")
+    return bool(w) and float(w[1]) - float(w[0]) > WIDE_S
+
+
+def off_scene(cue: dict, onset: float) -> bool:
+    """A sound in a wide window (> ``WIDE_S``) that reaches into another scene or to the edge of
+    the processed stretch, farther than ``WIDE_S`` from the end in the cue's own scene
+    (``anchor``): it may be a sound of the scene next to it (where one scene ends inside the
+    window is not known)."""
+    a = anchor(cue)
+    return a is not None and _wide(cue) and abs(float(onset) - a) > WIDE_S
+
+
+def places(cues: list[dict]) -> dict[int, float]:
+    """{id(cue): where in its wide window its sound is looked for first}: the end in its own
+    scene (``anchor``); cues that share the window and that end, or share a window without one,
+    each their ``guess`` (script order). A cue alone in a wide window without an anchor has no
+    place: the likeliest candidate of its kind is taken wherever it is."""
+    groups: dict[tuple, list[dict]] = {}
+    for c in cues:
+        if c["type"] in ("sfx", "vocal") and _wide(c):
+            groups.setdefault(tuple(c["window"]), []).append(c)
+    out = {}
+    for group in groups.values():
+        for c in group:
+            a = anchor(c)
+            if a is not None and sum(1 for d in group if anchor(d) == a) == 1:
+                out[id(c)] = a
+            elif len(group) > 1 and c.get("guess") is not None:
+                out[id(c)] = float(c["guess"])
+    return out
+
+
+def _fits(cue: dict, c: dict, wide: bool) -> str | None:
+    """``compatible`` as matching takes it: None for a candidate the cue does not take."""
+    how = compatible(cue, c)
+    return None if how is None or how == "any" or (wide and how != "kind") else how
+
+
 def match_sounds(cues: list[dict], sfx: list[dict]) -> dict[str, dict]:
     """{sound candidate id: cue} — every sound or speaker's-own-sound cue with a window takes the
     most likely detected candidate that starts in it (one whose best guess is of the kind the cue
     names before one that only has it as a runner-up; a named candidate of the kind before an
-    unnamed one; louder first), each candidate at most once. In a window longer than ``WIDE_S``
-    only a candidate of the named kind is taken. A cue that does not say which sound it is takes
-    no named candidate ('any'): nothing tells that the two are the same sound."""
+    unnamed one; louder first), each candidate at most once. A cue that does not say which sound
+    it is takes no named candidate ('any'): nothing tells that the two are the same sound.
+
+    In a window longer than ``WIDE_S`` only a candidate of the named kind is taken, and where the
+    cue is matters before how likely the candidate is (``_match_placed``): the cues of one wide
+    window with ``places`` take, together, the candidates nearest their places — for each cue the
+    likeliest of those within ``NEAR_S`` of its nearest one, the nearest pairs first — in script
+    order (a cue takes no sound before one an earlier cue of the window took)."""
     taken: dict[str, dict] = {}
-    for cue in cues:
-        if cue["type"] not in ("sfx", "vocal") or not cue.get("window"):
+    place = places(cues)
+    order = [c for c in cues if c["type"] in ("sfx", "vocal") and c.get("window")]
+    done: set[int] = set()
+    for cue in order:
+        if id(cue) in done:
             continue
-        wide = cue["window"][1] - cue["window"][0] > WIDE_S
-        fams = set(cue.get("families") or [])
-        best, best_key = None, None
-        for c in sfx:
-            if c.get("id") in taken or not in_window(cue, c["onset"]):
-                continue
-            how = compatible(cue, c)
-            if how is None or how == "any" or (wide and how != "kind"):
-                continue
-            if cue["type"] == "vocal" and how != "kind" and how != "unnamed":
-                continue
-            first = phrases.info((c.get("label") or {}).get("class", "")).get("family") in fams
-            key = (first, _TIER[how], not c.get("minor"), float(c.get("level_jump_db") or 0.0), -float(c["onset"]))
-            if best_key is None or key > best_key:
-                best, best_key = c, key
-        if best is not None:
-            taken[best["id"]] = cue
+        if id(cue) in place:                           # the cues of its wide window, together
+            group = [d for d in order if id(d) in place and tuple(d["window"]) == tuple(cue["window"])]
+            done.update(id(d) for d in group)
+            taken.update(_match_placed(group, sfx, place, taken))
+            continue
+        wide = _wide(cue)
+        pool = [(c, how) for c in sfx if c.get("id") not in taken and in_window(cue, c["onset"])
+                for how in [_fits(cue, c, wide)] if how is not None]
+        if pool:
+            taken[max(pool, key=lambda ch: _likely(cue, *ch))[0]["id"]] = cue
     return taken
+
+
+def _likely(cue: dict, c: dict, how: str) -> tuple:
+    """How likely candidate ``c`` is the sound of ``cue``: its best guess is of a family the cue
+    names (not only a runner-up), named before unnamed, not minor, louder, earlier."""
+    first = phrases.info((c.get("label") or {}).get("class", "")).get("family") in set(cue.get("families") or [])
+    return first, _TIER[how], not c.get("minor"), float(c.get("level_jump_db") or 0.0), -float(c["onset"])
+
+
+def _match_placed(group: list[dict], sfx: list[dict], place: dict[int, float], taken: dict) -> dict[str, dict]:
+    """{candidate id: cue} for the cues of one wide window (script order) that have places."""
+    pairs = []
+    for i, cue in enumerate(group):
+        ref = place[id(cue)]
+        pool = [(c, how) for c in sfx if c.get("id") not in taken and in_window(cue, c["onset"])
+                for how in [_fits(cue, c, True)] if how is not None]
+        if not pool:
+            continue
+        nearest = min(abs(float(c["onset"]) - ref) for c, _ in pool)
+        for c, how in pool:
+            d = abs(float(c["onset"]) - ref)
+            pairs.append((nearest if d <= nearest + NEAR_S else d, _likely(cue, c, how), i, c))
+    pairs.sort(key=lambda p: p[2])
+    pairs.sort(key=lambda p: p[1], reverse=True)
+    pairs.sort(key=lambda p: p[0])                     # nearest first, then the likeliest, then script order
+    got: dict[int, float] = {}
+    out: dict[str, dict] = {}
+    for _, _, i, c in pairs:
+        t = float(c["onset"])
+        if i in got or c["id"] in out or any((j < i and tj > t) or (j > i and tj < t) for j, tj in got.items()):
+            continue
+        got[i] = t
+        out[c["id"]] = group[i]
+    return out
 
 
 def match_music(cues: list[dict], music: list[dict]) -> tuple[dict[str, list[dict]], dict[str, dict]]:

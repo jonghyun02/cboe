@@ -37,9 +37,14 @@ speaker's own sound the script writes down, with the window between the aligned 
   rules that exclude (visible, already in the dialogue, told by the caption before), which keep
   their order. It is evidence only (``cue_reason`` false, ``cues.is_reason``) when it does not
   say which sound it is (a cue with only a '…소리' description takes no named sound at all),
-  when its window rests on guessed line times (``cue_estimated``, 감사 1-08), and for a person's
+  when its window rests on guessed line times (``cue_estimated``, 감사 1-08), when the sound lies
+  in a wide window that reaches into the next scene, far from the cue's own (``cue_far``,
+  ``cues.off_scene``: 확인 필요 says '대본 단서의 장면에서 먼 소리'), and for a person's
   own sound — a speaker's '(한숨)' (it ties the sound to its line, ``source_line``) or a laugh,
   a cough written in an action line that is not off screen: the person is mostly in view (감사 8-12).
+  In a wide window the cue takes the sound nearest its own scene (``cues.match_sounds``).
+  The '대본' evidence and a cue's own candidate carry ``window_by`` (what each end of the window
+  came from: 'other_scene' / 'range' reach out of the cue's scene).
 - A music cue adds its wording (a song title: "[가수의 '곡명']") to the music candidate there as
   a choice; a silence cue joins the music-stop candidate at the same place.
 - A cue no detected candidate fits becomes a candidate of its own: ``origin`` 'script', the id
@@ -281,6 +286,8 @@ def decide_sfx(c: dict, screen: dict | None, dia: dict | None, prev_same: dict |
         reasons.append("대사 근거의 시각이 추정")
     if c.get("cue_id") and c.get("cue_estimated"):
         reasons.append("대본 단서의 시각이 추정")
+    if c.get("cue_id") and c.get("cue_far"):
+        reasons.append("대본 단서의 장면에서 먼 소리")
     return "check", " · ".join(reasons) or "근거 부족", reasons
 
 
@@ -384,6 +391,8 @@ def script_evidence(cue: dict, t: float, polarity: str = "include") -> dict:
     e = ev("대본", t, txt, polarity, "script")
     if w:
         e["window"] = list(w)
+        if cue.get("window_by"):                    # what each end came from: 'other_scene' / 'range' reach out of the scene
+            e["window_by"] = list(cue["window_by"])
     return e
 
 
@@ -395,8 +404,10 @@ def attach_sound(c: dict, cue: dict) -> None:
     line of a speaker's own sound."""
     c["cue_id"] = cue["id"]
     c["cue_type"] = cue["type"]
-    c["cue_reason"] = cue_mod.is_reason(cue, cue_mod.compatible(cue, c))
+    c["cue_reason"] = cue_mod.is_reason(cue, cue_mod.compatible(cue, c), c.get("onset"))
     c["cue_estimated"] = bool(cue.get("window_estimated"))
+    if c.get("onset") is not None and cue_mod.off_scene(cue, c["onset"]):
+        c["cue_far"] = True                         # far from the cue's own scene: maybe the next scene's sound
     opts = _script_opts(cue)
     if c["label"].get("unknown") and opts and not cue.get("vague"):
         c["phrases"] = _merge_opts(opts, [o for o in c.get("phrases") or [] if o.get("source") != "unknown"])
@@ -437,6 +448,8 @@ def script_candidate(cue: dict) -> dict | None:
                     "unknown": False, "competing": [], "path_ko": [], "top": []},
           "window": list(w), "phrases": opts, "phrase": opts[0]["text"], "short": opts[0]["short"],
           "flags": ["script", "timing_estimated"]}
+    if cue.get("window_by"):
+        it["window_by"] = list(cue["window_by"])
     if kind == "music":
         it["music"] = {"moods": [], "change": None, "instruments": [], "segment": [it["t0"], it["t1"]],
                        "event": "stop" if cue.get("music_stop") else "script", "strength": None}
@@ -466,7 +479,7 @@ def build(p, agent_results: dict | None = None) -> list[dict]:
     line_by_id = {ln["id"]: ln for ln in all_lines}
     dlines = [ln for ln in all_lines if has_time(ln)]
     scenes = (read_json(p.path("scenes.json"), {}) or {}).get("scenes")
-    starts = cue_mod.scene_starts(all_lines, scenes)
+    starts = cue_mod.scene_starts(all_lines, scenes, cue_stage.span(p))
     script_cues = cue_stage.load(p)
     sound_hits = cue_mod.match_sounds(script_cues, sfx)
     used_cues = {cue["id"] for cue in sound_hits.values()}
@@ -722,7 +735,7 @@ def worth_asking_in(p, sfx: list[dict], which: str, screen_items: dict | None = 
         if c["id"] in hits:
             attach_sound(c, hits[c["id"]])
         seen.append(c)
-    return worth_asking(seen, cuts, which, screen_items, cue_mod.scene_starts(lines, scenes))
+    return worth_asking(seen, cuts, which, screen_items, cue_mod.scene_starts(lines, scenes, cue_stage.span(p)))
 
 
 def run(p, cfg: dict) -> dict:

@@ -141,6 +141,25 @@ def test_sound_cues_that_are_sounds(text, first):
     assert not any(", " in p for p in c["phrases"])                  # no '[의성어, 설명]' (style 3절)
 
 
+@pytest.mark.parametrize("text, phrase", [
+    ("문이 끼익 열린다.", "[끼익 - 문]"),
+    ("지어낸 창고. 철문이 끼익 열린다.", "[끼익 - 철문]"),
+    ("대문이 끼이익- 닫힌다.", "[끼이익 - 대문]"),
+    ("현관문이 삐걱 열린다.", "[삐걱 - 현관문]"),
+    ("문이 덜컹 닫힌다.", "[덜컹 - 문]"),
+    ("문이 끼익- 하고 열린다.", "[끼익 - 문]"),
+])
+def test_an_onomatopoeia_between_the_door_and_its_verb_is_the_door(text, phrase):
+    """'문 + 의성어 + 열린다' is the door that sounds (not brakes: '[급정거]', the car family)."""
+    c = cues.sfx_cue(text)
+    assert c["phrase"] == phrase and "door" in c["families"]
+    assert "[급정거]" not in c["phrases"] and "car" not in c["families"]
+    # a brake still is one
+    car = cues.sfx_cue("문 앞에 차가 끼익 선다.")
+    assert car["phrase"] == "[끼익]" and "[급정거]" in car["phrases"] and "car" in car["families"]
+    assert "door" in cues.sfx_cue("끼익- 문이 열린다.")["families"]
+
+
 @pytest.mark.parametrize("text", [
     "책상을 툭 친다.",                    # a manner word, not written as a sound
     "텅 빈 거리.",
@@ -417,6 +436,104 @@ def test_scenes_without_dialogue_in_a_row_share_the_gap_in_order():
     assert (a["guess"], b["guess"]) == (12.0, 26.0)                       # in script order, not both at 12 s
 
 
+def _timed(lid, sid, s, e, status="ok"):
+    aligned = s is not None
+    return {"id": lid, "scene_id": sid, "start": s, "end": e, "timing": "asr", "status": status, "aligned": aligned}
+
+
+def test_first_and_last_scenes_without_dialogue_reach_the_edge_of_the_stretch():
+    from cboe.stages.align import _scene_rows
+    d = Doc()
+    s1, s2, s3, s4, s5, s6 = (d.scene(k, f"지어낸 곳 {k}") for k in range(1, 7))
+    d.act(s1, "새벽. 멀리서 문이 쾅 닫힌다.")                  # C0001: the film opens on action
+    d.say(s2, "일어나.")
+    d.say(s2, "응.", speaker="나래")
+    d.act(s3, "자동차 경적이 빵빵 울린다.")                   # C0002, C0003: two scenes without dialogue in a row
+    d.act(s4, "전화벨이 울린다.")
+    d.say(s5, "여보세요.")
+    d.act(s6, "쿵! 대문이 닫힌다.")                           # C0004: and ends on it
+    out = [_timed("L0001", s2, 40.0, 41.0), _timed("L0002", s2, 42.0, 43.0), _timed("L0003", s5, 200.0, 201.0)]
+    rows = _scene_rows(d.doc(), out, None)
+    w = {c["id"]: c for c in cues.build(d.doc(), out, rows, (0.0, 600.0))}
+    assert w["C0001"]["window"] == [0.0, 40.0] and w["C0001"]["window_by"] == ["range", "scene"]
+    assert w["C0004"]["window"] == [201.0, 600.0] and w["C0004"]["window_by"] == ["scene", "range"]
+    assert w["C0001"]["window_estimated"] and w["C0004"]["window_estimated"]
+    assert w["C0002"]["window"] == w["C0003"]["window"] == [43.0, 200.0]
+    # the stretch unknown: no end there
+    assert all(c["window"] is None for c in cues.build(d.doc(), out, rows) if c["id"] in ("C0001", "C0004"))
+    # in time: the first scene from the start of the stretch, the scenes in a row share the gap
+    starts = cues.scene_starts(out, rows, (0.0, 600.0))
+    assert starts == [(0.0, s1), (40.0, s2), (43.0, s3), (121.5, s4), (200.0, s5), (201.0, s6)]
+    assert [cues.scene_at(t, starts) for t in (5.0, 50.0, 150.0, 250.0)] == [s1, s3, s4, s6]
+    # the head cut off (lines before are out of the stretch): the scene may lie outside, no window
+    h = Doc()
+    a, b, c = h.scene(1), h.scene(2, "지어낸 계단"), h.scene(3, "지어낸 교실")
+    h.say(a, "가자.")
+    h.act(b, "쾅! 문이 닫힌다.")
+    h.say(c, "누구야?")
+    out = [_timed("L0001", a, None, None, status="out_of_range"), _timed("L0002", c, 50.0, 51.0)]
+    got = cues.build(h.doc(), out, _scene_rows(h.doc(), out, None), (30.0, 600.0))
+    assert got[0]["window"] is None
+
+
+def _two_doors():
+    """SC001: a line at 10–12 s, then a door slammed; SC002: a door opens before its line at
+    100–102 s. One window [12, 100] for both cues (each reaches into the other scene)."""
+    d = Doc()
+    s1, s2 = d.scene(1), d.scene(2, "지어낸 창고")
+    d.say(s1, "나 간다.")
+    d.act(s1, "가온, 현관문을 쾅 닫고 나간다.")
+    d.act(s2, "철문이 끼익 열린다.")
+    d.say(s2, "누구야?", speaker="나래")
+    out = [_timed("L0001", s1, 10.0, 12.0), _timed("L0002", s2, 100.0, 102.0)]
+    scenes = [{"id": s1, "start": 10.0, "end": 12.0, "status": "found", "lines": ["L0001"]},
+              {"id": s2, "start": 100.0, "end": 102.0, "status": "found", "lines": ["L0002"]}]
+    return d, out, scenes
+
+
+def test_a_wide_window_takes_the_sound_near_the_cues_own_scene():
+    d, out, scenes = _two_doors()
+    slam, creak = cues.build(d.doc(), out, scenes, (0.0, 600.0))
+    assert slam["window"] == creak["window"] == [12.0, 100.0]
+    near = _sound("S0001", 14.0, "Door", "문소리", level_jump_db=12.0)
+    far = _sound("S0002", 96.0, "Door", "문소리", level_jump_db=25.0)        # louder, but by the next scene's line
+    got = cues.match_sounds([slam, creak], [near, far])
+    assert {k: v["id"] for k, v in got.items()} == {"S0001": "C0001", "S0002": "C0002"}
+    # one sound only: it goes to the cue whose scene it is next to, though that cue comes later
+    assert {k: v["id"] for k, v in cues.match_sounds([slam, creak], [far]).items()} == {"S0002": "C0002"}
+    # the reason to include: not for a sound far from the cue's own scene
+    assert cues.is_reason(slam, "kind", 14.0) and not cues.is_reason(slam, "kind", 60.0)
+    assert cues.off_scene(slam, 60.0) and not cues.off_scene(creak, 96.0)
+    # two cues before one line share the window in script order (the louder sound is the later one)
+    d2 = Doc()
+    s = d2.scene(1)
+    d2.act(s, "쾅! 문이 닫힌다.")
+    d2.act(s, "문이 덜컹 열린다.")
+    d2.say(s, "왔어?")
+    a, b = cues.build(d2.doc(), [_timed("L0001", s, 100.0, 102.0)],
+                      [{"id": s, "start": 100.0, "end": 102.0, "status": "found", "lines": ["L0001"]}], (0.0, 600.0))
+    early = _sound("S0003", 20.0, "Door", "문소리", level_jump_db=10.0)
+    late = _sound("S0004", 90.0, "Door", "문소리", level_jump_db=30.0)
+    got = cues.match_sounds([a, b], [early, late])
+    assert {k: v["id"] for k, v in got.items()} == {"S0003": "C0001", "S0004": "C0002"}
+    # a sound nearer the later cue's place stays with the earlier one when the later takes another
+    d3 = Doc()
+    s = d3.scene(1)
+    d3.act(s, "벽시계가 째깍째깍 소리를 낸다.")
+    d3.act(s, "자명종이 요란하게 울린다.")
+    d3.say(s, "벌써 아침이야?")
+    clock, alarm = cues.build(d3.doc(), [_timed("L0001", s, 143.0, 145.0)],
+                              [{"id": s, "start": 143.0, "end": 145.0, "status": "found", "lines": ["L0001"]}],
+                              (0.0, 600.0))
+    tick, ring = _sound("S0007", 77.0, "Tick", "째깍"), _sound("S0008", 83.0, "Alarm clock", "따르릉")
+    got = cues.match_sounds([clock, alarm], [tick, ring])
+    assert {k: v["id"] for k, v in got.items()} == {"S0007": "C0001", "S0008": "C0002"}
+    # a narrow window still takes the likeliest (louder) candidate
+    c = {"id": "C0009", "type": "sfx", "window": [10.0, 20.0], "families": ["door"], "keywords": []}
+    quiet, loud = _sound("S0005", 11.0, "Door", "문소리"), _sound("S0006", 19.0, "Door", "문소리", level_jump_db=20.0)
+    assert list(cues.match_sounds([c], [quiet, loud])) == ["S0006"]
+
+
 def test_wide_windows_take_the_named_kind_and_the_music_near_the_scene():
     d, lines, scenes = _scene_first()
     built = {c["id"]: c for c in cues.build(d.doc(), lines, scenes, (0.0, 100.0))}
@@ -513,6 +630,33 @@ def test_a_cue_is_a_reason_to_include_a_detected_sound(tmp_path):
     rec, reason, _ = recommend.decide_sfx(recommend.with_scene_first([_sound("S0001", 7.0)], [])[0], UNSEEN, None,
                                           None)
     assert rec == "check" and "넣을 근거 부족" in reason
+
+
+def test_a_sound_far_from_the_cues_scene_is_no_reason(tmp_path):
+    d = Doc()
+    s1, s2 = d.scene(1), d.scene(2, "지어낸 마당")
+    d.say(s1, "나 간다.")
+    d.act(s1, "가온, 현관문을 쾅 닫고 나간다.")
+    d.act(s2, "멀리서 개 짖는 소리가 들려온다.")
+    d.say(s2, "누구야?", speaker="나래")
+    dia = [{**_timed("L0001", s1, 10.0, 12.0), "speaker": "가온", "text": "나 간다."},
+           {**_timed("L0002", s2, 90.0, 92.0), "speaker": "나래", "text": "누구야?"}]
+    scenes = [{"id": s1, "start": 10.0, "end": 12.0, "status": "found", "lines": ["L0001"]},
+              {"id": s2, "start": 90.0, "end": 92.0, "status": "found", "lines": ["L0002"]}]
+    _, items = _rec(tmp_path, [_sound("S0001", 14.0, "Door", "문소리")], {"S0001": UNSEEN}, script=d.doc(),
+                    dialogue=dia, scenes=scenes)
+    it = next(x for x in items if x["id"] == "S0001")
+    assert it["cue_id"] == "C0001" and it["cue_reason"] and it["rec"] == "include" and not it.get("cue_far")
+    told = next(e for e in it["evidence"] if e["kind"] == "대본")
+    assert told["window"] == [12.0, 90.0] and told["window_by"] == ["line", "other_scene"]
+    dog = next(x for x in items if x["id"] == "C0002")                    # the cue's own candidate says it too
+    assert dog["origin"] == "script" and dog["window_by"] == ["other_scene", "line"]
+    # the same door 48 s after the line: maybe a sound of the next scene
+    _, items = _rec(tmp_path, [_sound("S0001", 60.0, "Door", "문소리")], {"S0001": UNSEEN}, script=d.doc(),
+                    dialogue=dia, scenes=scenes)
+    it = next(x for x in items if x["id"] == "S0001")
+    assert it["cue_id"] == "C0001" and not it["cue_reason"] and it["cue_far"]
+    assert it["rec"] == "check" and "대본 단서의 장면에서 먼 소리" in it["reason"]
 
 
 def test_a_visible_source_is_still_excluded_first(tmp_path):
