@@ -4,6 +4,8 @@
    writer is filling in and a value still on its way to the server survive that re-render (the
    focus too, but only in a text field being typed in: a switch or a select that stored its value
    leaves the keys to the page); a write the server refuses puts the panel back to what is stored.
+   A decision the writer made that is on no line since the script was read again (state aside) is
+   listed at the top of the 대사 view: only the writer puts it on a line or lets it go.
    The page works in film time. project.media says which file /media/video gives: the source
    (film time = video time) or the 재생용 영상 of the processed part (film time = video time +
    media.t0); while that copy is being made the stage shows stills (/api/frame, film time). */
@@ -138,6 +140,14 @@
   const CELL_KIND = { dialogue: '대사', sfx: '효과음', music: '음악', mixed: '섞임' };
   const SCOPES = [['line', '이 줄'], ['from_here', '이 줄부터 끝까지'], ['before', '이 줄 앞까지'], ['scene', '이 장면'], ['person', '이 인물의 모든 줄']];
   const LANGS = ['영어', '일본어', '중국어', '독일어', '프랑스어', '러시아어', '스페인어'];
+  /** Where a line comes from (state.SOURCES): the menu of the line panel. The word that goes with
+      the name ('[하늘/속마음]') is the server's (style.SOURCE_LABELS); 화면 밖 writes no word. */
+  const SOURCE_KO = { offscreen: '화면 밖 (표시 없음)', inner: '속마음', video: '영상', phone: '전화', radio: '무전', broadcast: '방송', narration: '내레이션' };
+  /** The reason the server ends with when the speaker's line before is still 확인 필요 (state.WAITS). */
+  const WAITS = '앞 줄을 먼저 정해야 함';
+  /** A decision of the writer that is on no line since the script changed (state ``aside``). */
+  const ASIDE_WHY = { text_changed: '대본 글이 바뀜', same_words: '같은 글 줄이 여럿', gone: '대본에서 사라짐' };
+  const ASIDE_FROM = { script: '대본 글로 고름', heard: '들린 글로 고름' };
   const GENERIC = ['남자', '여자'];
   const ENV_LANE = { speech: 'cells', effects: 'sfx', music: 'music' };
   const CHUNK = 200;                 // rows drawn at a time; the rest when the list is scrolled down
@@ -150,7 +160,7 @@
     // views: what is picked in each, its filter, scenes opened or closed by hand, the open editor
     view: 'items', lf: 'all', xf: 'open', pf: 'all', cf: 'all', line: null, extra: null, person: null, cell: null,
     cellAt: null, showMinor: false, sceneOpen: new Map(), limit: CHUNK, ed: null, env: null, envOn: true, envTried: false,
-    showSuspect: false,
+    showSuspect: false, asideOpen: true,
     // 재생용 영상: project.media as last seen, which file the stage has (state|t0), its ?v=, whether
     // the server was asked to make the copy; canPlay: the <video> plays (with stills: its sound only)
     media: null, mediaKey: null, mediaVer: 0, buildAsked: false, canPlay: true,
@@ -216,17 +226,26 @@
       setBusy(false);
     }
   }
-  /** Line fields whose new value is on its way to the server ({line id|field: {v, n}}): the left
-      panel shows that value until the last request for it is answered, so the answer of an
-      earlier write does not take back a click the writer made after it (끊을 자리 clicked fast). */
+  /** Fields whose new value is on its way to the server ({line id|field: {v, n}}; a person's under
+      'person:<name>'): the left panel shows that value until the last request for it is
+      answered, so the answer of an earlier write does not take back a click the writer made
+      after it (끊을 자리 clicked fast, a reveal line picked right after 끝까지 일반 표시). */
   const pend = new Map();
-  const PEND_FIELDS = ['breaks', 'keep', 'sung', 'language'];
+  const PEND_FIELDS = ['breaks', 'keep', 'sung', 'language', 'source'];
+  const PEND_PERSON = ['reveal', 'reveal_line'];
   function pendOf(ln, f) {
     const p = pend.get(`${ln.id}|${f}`);
     return p ? p.v : ln[f];
   }
-  function pendStart(id, fields) {
-    const keys = PEND_FIELDS.filter((f) => f in fields).map((f) => `${id}|${f}`);
+  /** The line's own source decision as the panel shows it: null = the script's, '' = none. */
+  function sourceOf(ln) {
+    const p = pend.get(`${ln.id}|source`);
+    if (p) return p.v;
+    const d = ln.decision || {};
+    return 'source' in d ? d.source : null;
+  }
+  function pendStart(id, fields, names = PEND_FIELDS) {
+    const keys = names.filter((f) => f in fields).map((f) => `${id}|${f}`);
     for (const k of keys) {
       const p = pend.get(k) || { n: 0 };
       p.v = fields[k.slice(id.length + 1)];
@@ -400,10 +419,15 @@
     const vm = viewModel();
     if (vm) {
       const cur = S[vm.key];
+      // 대본에 없는 말: an undecided 받아쓰기 헛소리 의심 is not counted on a chip (but its own),
+      // the same count as the tab and the note above the list
+      const xs = S.view === 'extras' ? suspectOpen() : 0;
       $('#state-chips').innerHTML = vm.filters.map(([key, label]) => {
-        const n = vm.rows.filter((r) => vm.pass(r, key)).length;
+        const out = (r) => xs && key !== 'suspect' && isSuspect(r);
+        const n = vm.rows.filter((r) => vm.pass(r, key) && !out(r)).length;
         const on = cur === key;
-        return `<button type="button" class="chip${on ? ' is-on' : ''}" data-act="filter" data-filter="${key}" data-toggle="1" aria-pressed="${on}">${label}<span class="n">${n}</span></button>`;
+        const title = xs && key !== 'suspect' && vm.rows.some((r) => vm.pass(r, key) && out(r)) ? ` title="받아쓰기 헛소리 의심은 세지 않음 · '헛소리 의심'에서 본다"` : '';
+        return `<button type="button" class="chip${on ? ' is-on' : ''}" data-act="filter" data-filter="${key}" data-toggle="1" aria-pressed="${on}"${title}>${label}<span class="n">${n}</span></button>`;
       }).join('');
       return;
     }
@@ -460,6 +484,7 @@
     if (row && !(opts && opts.keep)) row.scrollIntoView({ block: 'nearest' });
   }
   function renderList(opts = {}) {
+    renderAside();
     if (S.view === 'lines') return renderLines(opts);
     if (S.view === 'extras') return renderExtras(opts);
     if (S.view === 'people') return renderPeople(opts);
@@ -588,7 +613,11 @@
       const r = D.byId.get(it.follows) || D.lines.get(it.follows);
       const what = !r ? it.follows : r.kind ? `${(KIND[r.kind] || {}).label || ''} ${fmtTime(r.onset)} ${cut(phraseText(r), 18)}` : `대사 ${fmtTime(r.start)} ${cut(r.text, 18)}`;
       const act = r && r.kind ? `data-act="goto-item" data-id="${esc(r.id)}"` : `data-act="goto-line" data-id="${esc(it.follows)}"`;
-      bits.push(`<button type="button" class="link" ${act}>${it.kind === 'speaker' ? '이어 말함 · 앞 줄' : '딸림 · 앞 후보'} ${esc(what)}</button>`);
+      // the speaker's line before is still 확인 필요 (the server's reason ends with WAITS): this
+      // line's name waits for it, so the link says so and goes to it
+      const waits = it.kind === 'speaker' && String(it.reason || '').endsWith(WAITS);
+      const label = waits ? `${WAITS} · 앞 줄` : it.kind === 'speaker' ? '이어 말함 · 앞 줄' : '딸림 · 앞 후보';
+      bits.push(`<button type="button" class="link${waits ? ' flag' : ''}" ${act}>${label} ${esc(what)}</button>`);
     }
     let agent = '';
     if (it.agent && it.agent.summary) {
@@ -633,15 +662,23 @@
       ${actions}
     </div>`;
   }
+  /** A script cue's time range reaches past another scene of the script at one end or both
+      (``window_out`` [before, after] from the server; ``window_by`` alone says nothing of it). */
+  function windowOut(wo) {
+    if (!Array.isArray(wo)) return '';
+    const sides = [wo[0] === true && '앞 장면 쪽', wo[1] === true && '뒤 장면 쪽'].filter(Boolean);
+    return sides.length ? '시각 범위가 장면 밖까지 (' + sides.join(' · ') + ')' : '';
+  }
   function evidenceRowsHtml(it, target = 'main') {
     const evs = it.evidence || [];
     if (!evs.length) return '<div class="ev-empty">근거가 없습니다</div>';
     return evs.map((e, i) => {
       const pol = e.polarity === 'include' ? '<span class="pol pol-inc">포함 쪽</span>'
         : e.polarity === 'exclude' ? '<span class="pol pol-exc">제외 쪽</span>' : '<span></span>';
-      return `<button type="button" class="ev-row" data-act="play-ev" data-target="${target}" data-id="${esc(it.id)}" data-i="${i}" aria-label="${esc(`${e.kind} ${fmtTime(e.t)} ${e.text}, 이 구간 재생`)}">
+      const out = windowOut(e.window_out);
+      return `<button type="button" class="ev-row" data-act="play-ev" data-target="${target}" data-id="${esc(it.id)}" data-i="${i}" aria-label="${esc(`${e.kind} ${fmtTime(e.t)} ${e.text}${out ? ` · ${out}` : ''}, 이 구간 재생`)}">
         <span class="ev-play">${ICON.play}</span><span class="ev-kind">${esc(e.kind)}</span><span class="ev-t tnum">${fmtTime(e.t)}</span>
-        <span class="ev-text" title="${esc(e.text)}">${esc(e.text)}</span>${pol}</button>`;
+        <span class="ev-text" title="${esc(e.text)}">${esc(e.text)}${out ? `<small class="ev-out">${esc(out)}</small>` : ''}</span>${pol}</button>`;
     }).join('');
   }
   function renderEvidence() {
@@ -664,8 +701,9 @@
     if (it.origin !== 'script' || it.added || !(it.kind === 'sfx' || it.kind === 'music')) return '';
     const w = it.window || [it.t0, it.t1];
     const t = it.placement && it.placement.action === 'move' ? it.placement.t : num(it.onset);
+    const out = windowOut(it.window_out);
     return `<div class="move-box" data-box="move"><span class="mb-k">대본 단서 · 시각 어림</span>
-      <span class="muted tnum">대본이 말한 범위 ${fmtTime(w[0])}–${fmtTime(w[1])}</span>
+      <span class="muted tnum">대본이 말한 범위 ${fmtTime(w[0])}–${fmtTime(w[1])}</span>${out ? `<span class="ev-out">${esc(out)}</span>` : ''}
       <span class="move-form"><input class="time-input" data-f="t" value="${fmtTime2(t)}" aria-label="옮길 시각 (분:초)" inputmode="decimal" autocomplete="off">
       <button type="button" class="btn btn-sm btn-text" data-act="ed-now" data-f="t" title="지금 재생 위치를 넣는다">지금 위치</button>
       <button type="button" class="btn btn-sm btn-primary" data-act="item-move" data-id="${esc(it.id)}" data-primary="1">여기로 옮기기</button>
@@ -1000,9 +1038,13 @@
     return { state: P && P.video ? 'source' : 'none', t0: 0, progress: null, note: null };    // an older server
   }
   const pctOf = (m) => (m && typeof m.progress === 'number' && Number.isFinite(m.progress) ? `${Math.round(clamp(m.progress, 0, 1) * 100)}%` : '');
+  /** Building with no progress of its own but a note: another worker or server makes this work's
+      copy and this one waits for it (proxy.WAIT_NOTE); the note is shown in place of NN%. */
+  const waitNote = (m) => (m && m.state === 'building' && !pctOf(m) && m.note ? String(m.note) : '');
   /** What the toast says when the writer presses play and only stills can be shown. */
   function stillWhy() {
     const m = S.media || {};
+    if (waitNote(m)) return `${waitNote(m)} · 다 되면 재생할 수 있습니다`;
     if (m.state === 'building') return `재생용 영상을 만드는 중입니다${pctOf(m) ? ` · ${pctOf(m)}` : ''} · 다 되면 재생할 수 있습니다`;
     if (m.state === 'failed') return `재생용 영상을 만들지 못해 정지 화면만 보여 줍니다${m.note ? ` · ${m.note}` : ''}`;
     if (m.state === 'none' || !(S.P && S.P.video)) return '영상 파일이 없습니다';
@@ -1063,8 +1105,8 @@
     }
     if (m.state === 'building' || m.state === 'failed') {
       if (S.mediaKey !== m.state) { S.mediaKey = m.state; unload(video); unload(pvVideo()); goStill(false); }
-      showStageMsg(m.state === 'building'
-        ? `재생용 영상을 만드는 중 ${pctOf(m)}${m.note ? ` · ${m.note}` : ''} · 그동안 정지 화면으로 보여 줍니다`
+      showStageMsg(waitNote(m) ? `${waitNote(m)} · 그동안 정지 화면으로 보여 줍니다`
+        : m.state === 'building' ? `재생용 영상을 만드는 중 ${pctOf(m)}${m.note ? ` · ${m.note}` : ''} · 그동안 정지 화면으로 보여 줍니다`
         : `재생용 영상을 만들지 못했습니다${m.note ? ` · ${m.note}` : ''} · 정지 화면으로 보여 줍니다`, true);
       return;
     }
@@ -1465,6 +1507,8 @@
     const idx = all.findIndex((l) => l.id === lineId);
     if (idx < 0 || which === 'line') return [lineId];
     const me = all[idx];
+    // a line without a name is nobody's: the server changes only this line (400 for another scope)
+    if (!me.name) return [];
     const same = all.map((l, i) => [i, l]).filter(([, l]) => (l.name || null) === (me.name || null));
     const pickIds = (f) => same.filter(f).map(([, l]) => l.id);
     if (which === 'from_here') return pickIds(([i]) => i >= idx);
@@ -1516,6 +1560,8 @@
     if (cur && !chars.includes(cur)) chars.unshift(cur);
     const lid = ln ? ln.id : null;
     const counts = Object.fromEntries(SCOPES.map(([k]) => [k, lid ? scopeLines(lid, k).length : 1]));
+    const unnamed = !!ln && !ln.name;             // 화자 미상: only 이 줄 is left (the server says 400 to the rest)
+    const scopes = unnamed ? SCOPES.filter(([k]) => k === 'line') : SCOPES;
     S.modal = { type: 'speaker', id: it.id, it: it.lineMode ? it : null, chars, who: cur ? String(chars.indexOf(cur)) : 'new', newName: '', show: it.final !== 'exclude', scope: 'line', counts };
     const t = (ln && ln.start != null ? ln.start : num(it.onset)) + 0.3;
     const near = D.items.filter((o) => o.kind === 'speaker');
@@ -1543,8 +1589,8 @@
         <div class="ev-rows framed">${evidenceRowsHtml(it, 'pv')}</div>
         <div class="mdl-row2">
           <div><div class="sec">이름 표시</div><label class="switch"><input type="checkbox" id="f-show" role="switch"${S.modal.show ? ' checked' : ''}><span id="f-show-label">표시</span></label></div>
-          <div><div class="sec">이름을 바꿀 범위<span class="sub">같은 인물의 줄만 · 인물 표의 표시와 따로</span></div><div class="seg seg-scope seg-wrap" role="radiogroup" aria-label="이름을 바꿀 범위">
-            ${SCOPES.map(([k, label]) => `<label title="${esc(k === 'before' ? '이 줄은 그대로 두고 앞의 줄만 바꾼다' : `${label}의 이름을 바꾼다`)}"><input type="radio" name="m-scope" value="${k}"${k === 'line' ? ' checked' : ''}${counts[k] ? '' : ' disabled'}><span>${label} · ${counts[k]}줄</span></label>`).join('')}
+          <div><div class="sec">이름을 바꿀 범위<span class="sub">${unnamed ? '화자 이름이 없는 줄 · 이 줄만 바꾼다' : '같은 인물의 줄만 · 인물 표의 표시와 따로'}</span></div><div class="seg seg-scope seg-wrap" role="radiogroup" aria-label="이름을 바꿀 범위">
+            ${scopes.map(([k, label]) => `<label title="${esc(k === 'before' ? '이 줄은 그대로 두고 앞의 줄만 바꾼다' : `${label}의 이름을 바꾼다`)}"><input type="radio" name="m-scope" value="${k}"${k === 'line' ? ' checked' : ''}${counts[k] ? '' : ' disabled'}><span>${label} · ${counts[k]}줄</span></label>`).join('')}
           </div></div>
         </div>
         <div class="mdl-actions"><button type="button" class="btn btn-primary btn-lg" data-act="m-confirm">확정</button><button type="button" class="btn btn-lg" data-act="close">취소</button>
@@ -1611,6 +1657,11 @@
     const out = [xpRow(n('no_room') ? 'bad' : n('differs_open') ? 'warn' : n('unheard') ? 'info' : 'ok', '대사 줄',
       bits.length ? bits.join(' · ') : '고를 줄 없음',
       [n('differs_open') && go('lines', 'differs', '다른 줄 보기'), n('no_room') && go('lines', 'noroom', '자리 없는 줄')].filter(Boolean).join(''))];
+    const na = asideCount();
+    if (na) {
+      out.push(xpRow('warn', '붙지 못한 작가 결정', `${na}개 · 대본이 바뀌어 어느 줄에도 붙지 못함 · 자막에 쓰지 않음`,
+        '<button type="button" class="btn btn-sm" data-act="xp-aside">보기</button>'));
+    }
     const out2 = [n('absent') && `영화에 없음 ${n('absent')}`, n('out_of_range') && `구간 밖 ${n('out_of_range')}`, n('writer_excluded') && `작가가 뺌 ${n('writer_excluded')}`].filter(Boolean);
     if (out2.length) out.push(xpRow('info', '빠진 줄', `${out2.join(' · ')} · 자막에 넣지 않음`, go('lines', 'out')));
     // the same numbers as the 대본에 없는 말 tab: the ones folded as 받아쓰기 헛소리 are told apart
@@ -2064,6 +2115,85 @@
     renderRows(box, rows, selIdx, '', '이 조건에 맞는 줄이 없습니다');
     finishList(opts, S.line && `lines-row-${S.line}`);
   }
+  /** The fold above the list (대사 view only; it does not scroll away with the lines). */
+  function renderAside() {
+    const el = $('#list-aside');
+    const html = S.view === 'lines' ? asideHtml() : '';
+    if (el._html !== html) { el._html = html; el.innerHTML = html; }       // the same rows: its scroll and an armed 버리기 stay
+    el.hidden = !html;
+  }
+  // 붙지 못한 작가 결정 (state ``aside``): the writer's decisions that are on no line since the
+  // script was read again. Kept out of the subtitles until the writer puts one on a line
+  // (POST api/lines/aside {key, line}) or lets it go ({key, line: null}); nothing picks a line for them.
+  const asideRows = () => (S.st && S.st.aside) || [];
+  function asideCount() {
+    const sm = (S.st && S.st.summary && S.st.summary.lines) || {};
+    return typeof sm.aside === 'number' ? sm.aside : asideRows().length;
+  }
+  /** What a kept-aside decision decided, in Korean (its stored fields; a speaker item's ``final``). */
+  function asideWhat(a) {
+    const d = a.decision || {}, out = [];
+    if (a.kind === 'speaker' && 'final' in d) out.push(d.final === 'include' ? '화자 표시 넣기' : d.final === 'exclude' ? '화자 표시 빼기' : `화자 표시 · ${d.final}`);
+    if ('include' in d) out.push(d.include ? '줄 넣기' : '줄 빼기');
+    if (ASIDE_FROM[d.text_from]) out.push(ASIDE_FROM[d.text_from]);
+    else if (d.text != null || d.text_from) out.push(`글 고침 「${cut(d.text || '', 30)}」`);
+    if ('name' in d) out.push(d.name ? `이름 · ${d.name}` : '이름을 대본대로');
+    if ('show_name' in d) out.push(d.show_name ? '이름 표시' : '이름 생략');
+    if ('language' in d) out.push(d.language ? `언어 · ${bracket(d.language)}` : '언어 · 한국어 (표시 없음)');
+    if ('sung' in d) out.push(d.sung ? '노래 (♪ … ♪)' : '노래 아님');
+    if ('source' in d) out.push(d.source ? `출처 · ${SOURCE_KO[d.source] || d.source}` : '출처 없음');
+    if ('start' in d || 'end' in d) out.push(`시각 · ${fmtTime(d.start)}–${fmtTime(d.end)}`);
+    if ((d.breaks || []).length) out.push(`끊을 자리 · ${d.breaks.join(', ')}번째 어절 뒤`);
+    if ('keep' in d) out.push(d.keep ? '한 칸에 두기' : '한 칸에 두기 풂');
+    const known = new Set(['final', 'include', 'text', 'text_from', 'name', 'show_name', 'language', 'sung', 'source', 'start', 'end', 'breaks', 'keep', 'at', 'fp', 'ctx']);
+    for (const [k, v] of Object.entries(d)) if (!known.has(k)) out.push(`${k} · ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+    return out.length ? out.join(' · ') : '정한 칸 없음';
+  }
+  function asideRowHtml(a) {
+    const key = esc(a.key), spk = a.kind === 'speaker';
+    const at = /^\d{4}-(\d\d-\d\d)T(\d\d:\d\d)/.exec(String(a.at || ''));
+    const cands = (a.candidates || []).map((lid) => {
+      const ln = D.lines.get(lid);
+      const t = ln && ln.start != null ? fmtTime(ln.start) : '--:--.-';
+      return `<div class="as-cand"><button type="button" class="link as-line" data-act="goto-line" data-id="${esc(lid)}" title="그 줄로">
+          <span class="tnum">${t}</span><span class="as-who">${esc(ln ? whoOf(ln) : '')}</span><span class="as-now">${esc(ln ? ln.text : `${lid} · 지금 없는 줄`)}</span></button>
+        <button type="button" class="btn btn-sm btn-primary" data-act="aside-put" data-key="${key}" data-line="${esc(lid)}"${ln ? '' : ' disabled'}>이 줄에 붙이기</button></div>`;
+    }).join('');
+    return `<div class="as-row" data-key="${key}">
+      <div class="as-top">${spk ? '<span class="tag">화자 항목</span>' : ''}<span class="as-who">${esc(a.speaker || '화자 없음')}</span>
+        <span class="as-text" title="${esc(a.text)}">「${esc(cut(a.text, 40))}」</span>
+        <span class="pill st-check">${esc(ASIDE_WHY[a.why] || a.why || '')}</span>${at ? `<span class="muted tnum">${at[1]} ${at[2]}</span>` : ''}</div>
+      <div class="as-dec"><b>정했던 것</b>${esc(asideWhat(a))}</div>
+      ${cands ? `<div class="as-cands"><span class="as-k">후보 줄${spk ? ' · 그 줄의 화자 항목에 붙는다' : ''}</span>${cands}</div>` : '<div class="as-none">맞는 줄이 대본에 없다 · 버리거나 그대로 둔다 (그대로 두면 자막에 쓰지 않음)</div>'}
+      <div class="as-acts"><button type="button" class="btn btn-sm btn-danger" data-act="aside-drop" data-key="${key}" title="이 결정을 버린다 · 되돌릴 수 없다">버리기</button></div></div>`;
+  }
+  /** The fold of kept-aside decisions above the list of the 대사 view (nothing when there is none). */
+  function asideHtml() {
+    const rows = asideRows(), n = asideCount();
+    if (!rows.length && !n) return '';
+    const open = S.asideOpen;
+    return `<div class="aside-box${open ? ' is-open' : ''}" id="aside-box">
+      <button type="button" class="aside-head" data-act="toggle-aside" aria-expanded="${open}"><span class="chev" aria-hidden="true"></span>
+        <b>대본이 바뀌어 붙지 못한 작가 결정 ${n}개</b><span class="as-sub">자막에 쓰지 않음 · 줄에 다시 붙이거나 버린다</span><span class="as-fold">${open ? '접기' : '펼치기'}</span></button>
+      ${open ? `<div class="aside-rows">${rows.map(asideRowHtml).join('')}</div>` : ''}</div>`;
+  }
+  function asidePut(key, line) {
+    const a = asideRows().find((x) => x.key === key);
+    const ln = line && D.lines.get(line);
+    const msg = line ? `작가 결정을 다시 붙임 · ${cut(ln ? ln.text : line, 26)}` : `작가 결정을 버림 · ${cut(a ? a.text : key, 26)}`;
+    return mutate('api/lines/aside', { key, line: line || null }, msg);
+  }
+  /** 버리기 cannot be undone: the first press asks (the button says so for 3 s), the second lets it go. */
+  function armAsideDrop(el, key) {
+    if (el.dataset.armed !== '1') {
+      el.dataset.armed = '1';
+      el.dataset.label = el.textContent;
+      el.textContent = '한 번 더 누르면 버림 · 되돌릴 수 없음';
+      setTimeout(() => { if (document.body.contains(el)) { el.dataset.armed = ''; el.textContent = el.dataset.label; } }, 3000);
+      return;
+    }
+    asidePut(key, null);
+  }
   /** Script and heard text with the words that differ marked (the line's diff gives the script word
       range; the heard words are found in order). */
   function diffHtml(text, diff, side) {
@@ -2177,10 +2307,24 @@
   function markHtml(ln) {
     const dec = ln.decision || {};
     const own = !D.added.has(ln.id) && ('language' in dec || 'sung' in dec);
-    return `<div class="sec">말 표시<span class="sub">외국어는 [언어] 표시 · 노래는 ♪ 가사 ♪</span></div>
+    return `<div class="sec">말 표시<span class="sub">외국어는 [언어] 표시 · 노래는 ♪ 가사 ♪ · 출처는 이름 뒤에 [이름/출처]</span></div>
       <div class="ed-row"><label>언어 <input class="input input-sm" list="lang-list" data-change="ln-lang" value="${esc(pendOf(ln, 'language') || '')}" placeholder="한국어" autocomplete="off"></label>
         <label class="switch sm"><input type="checkbox" data-change="ln-sung"${pendOf(ln, 'sung') ? ' checked' : ''}><span>노래</span></label>
-        ${own ? '<button type="button" class="btn btn-sm btn-text" data-act="ln-mark-reset">대본대로</button>' : ''}</div>`;
+        ${own ? '<button type="button" class="btn btn-sm btn-text" data-act="ln-mark-reset">대본대로</button>' : ''}</div>
+      ${D.added.has(ln.id) ? '' : sourceHtml(ln)}`;
+  }
+  /** Where the line comes from (state.SOURCES): the script's, none, or the writer's pick. The
+      option values: '' = the script's (sends null), 'none' = no source (sends ''), else the code. */
+  function sourceHtml(ln) {
+    const v = sourceOf(ln);
+    const cur = v == null ? '' : v === '' ? 'none' : v;
+    const own = !('source' in (ln.decision || {}));
+    const script = own ? ` · ${ln.source ? SOURCE_KO[ln.source] || ln.source : '없음'}` : '';
+    const opts = [['', `대본대로${script}`], ['none', '없음'], ...Object.entries(SOURCE_KO)];
+    if (cur && !opts.some(([k]) => k === cur)) opts.push([cur, cur]);
+    return `<div class="ed-row"><label>출처 <select class="input input-sm" data-change="ln-source" aria-label="대사의 출처">${opts.map(([k, label]) =>
+      `<option value="${esc(k)}"${k === cur ? ' selected' : ''}>${esc(label)}</option>`).join('')}</select></label>
+      <span class="field-hint">화면 밖은 표시 없이 · 그 밖은 이름과 함께 [하늘/속마음]</span></div>`;
   }
   function overlapHtml(ln) {
     const xs = D.overlaps.get(ln.id) || [];
@@ -2399,13 +2543,14 @@
       opt(mode === 'name', 'data-act="pp-mode" data-mode="name"', '이름 그대로'),
       opt(!mode, 'data-act="pp-mode" data-mode=""', '정하지 않음'),
     ];
-    const reveal = dec.reveal || 'auto';
+    const held = (f) => { const q = pend.get(`person:${p.name}|${f}`); return q ? q.v : dec[f]; };
+    const reveal = held('reveal') || 'auto', revealLine = held('reveal_line');
     const from = p.from_line && D.lines.get(p.from_line);
     const revealHtml = mode !== 'generic' ? '' : `<div class="sec">이름으로 바뀌는 줄<span class="sub">그 줄부터 ${esc(bracket(before))} 대신 이름을 쓴다</span></div>
       <div class="mchips">
         ${opt(reveal === 'auto', 'data-act="pp-reveal" data-reveal="auto"', `저절로 · 이름이 불린 다음 줄${from && reveal === 'auto' ? ` · ${fmtTime(from.start)}` : ''}`)}
         ${opt(reveal === 'never', 'data-act="pp-reveal" data-reveal="never"', '끝까지 일반 표시')}
-        <label class="pp-line${reveal === 'line' ? ' is-on' : ''}">이 줄부터 <select class="input input-sm" data-change="pp-reveal-line"><option value="">고르기</option>${shown.map((l) => `<option value="${esc(l.id)}"${dec.reveal_line === l.id ? ' selected' : ''}>${fmtTime(l.start)} ${esc(cut(l.text, 22))}</option>`).join('')}</select></label>
+        <label class="pp-line${reveal === 'line' ? ' is-on' : ''}">이 줄부터 <select class="input input-sm" data-change="pp-reveal-line"><option value="">고르기</option>${shown.map((l) => `<option value="${esc(l.id)}"${revealLine === l.id ? ' selected' : ''}>${fmtTime(l.start)} ${esc(cut(l.text, 22))}</option>`).join('')}</select></label>
       </div>`;
     const lineBtn = (l, small) => `<button type="button" class="nb-line" data-act="goto-line" data-id="${esc(l.id)}"><span class="t tnum">${fmtTime(l.start)}</span><span class="badge k-line">대사</span>
       <span class="tx">${l.show_name && l.label ? `<span class="nm">${esc(l.label)}</span> ` : ''}${esc(l.text)}${small ? `<small>${esc(small)}</small>` : ''}</span></button>`;
@@ -2430,7 +2575,12 @@
     const what = 'mode' in fields
       ? (fields.mode === 'generic' ? `이름이 밝혀지기 전 ${bracket(fields.before)}` : fields.mode === 'name' ? '이름 그대로' : '정하지 않음으로')
       : fields.reveal === 'never' ? '끝까지 일반 표시' : fields.reveal === 'line' ? '고른 줄부터 이름' : '이름이 불린 다음 줄부터 이름';
-    return mutate('api/people', { names: [p.name], ...fields }, `${p.name} · ${what}`);
+    // the reveal and its line are kept on the panel until this write is answered (an earlier
+    // write's answer would draw the select back to the stored line meanwhile)
+    const keys = pendStart(`person:${p.name}`, fields, PEND_PERSON);
+    const out = mutate('api/people', { names: [p.name], ...fields }, `${p.name} · ${what}`).then((st) => { pendEnd(keys); return st; });
+    if (keys.length) renderDetail();                // the chips and the select show the pick at once
+    return out;
   }
 
   // ------------------------------------------------------------ 칸 (cells, 9-x3)
@@ -2705,6 +2855,15 @@
       case 'more': showMore(); break;
       case 'toggle-minor': S.showMinor = !S.showMinor; renderList({ keep: true }); break;
       case 'toggle-suspect': S.showSuspect = !S.showSuspect; renderList({ keep: true }); break;
+      case 'toggle-aside': S.asideOpen = !S.asideOpen; renderList({ keep: true }); break;
+      case 'aside-put': asidePut(el.dataset.key, el.dataset.line); break;
+      case 'aside-drop': armAsideDrop(el, el.dataset.key); break;
+      case 'xp-aside':                       // 내보내기 전 검사 → the fold at the top of the 대사 view
+        closeModal();
+        S.asideOpen = true;
+        setView('lines');
+        renderList({ keep: true });
+        break;
       case 'goto-line': if (S.modal) closeModal(); pick('lines', id); break;
       case 'goto-item': if (S.modal) closeModal(); pick('items', id); break;
       case 'goto-extra': pick('extras', id); break;
@@ -2860,6 +3019,9 @@
       const v = t.value.trim().replace(/^\[\s*|\s*\]$/g, '');
       t._sent = t.value;               // sent: drawing the panel again shows what the server keeps
       if (v !== (pendOf(ln, 'language') || '')) lineUpdate(ln, { language: v }, v ? `${bracket(v)} 표시` : '한국어 (언어 표시 없음)');
+    } else if (act === 'ln-source' && ln) {
+      const v = t.value === '' ? null : t.value === 'none' ? '' : t.value;
+      lineUpdate(ln, { source: v }, v == null ? '출처를 대본대로' : v === '' ? '출처 없음' : `출처 · ${SOURCE_KO[v] || v}`);
     } else if (act === 'pp-reveal-line' && t.value) peopleSet({ reveal: 'line', reveal_line: t.value });
   });
   // Mouse clicks must not leave focus on toolbar buttons, so Space/Enter keep working as shortcuts.

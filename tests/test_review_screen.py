@@ -4,8 +4,12 @@ timeline (/api/envelope, 감사 9-x3). The levels here are made up.
 
 The page itself (static/app.js) in a headless Edge driven over CDP by a small Node script: the
 재생용 영상 (film time <-> video time, building -> ready, a source whose picture does not open),
-writes answered while the writer goes on (끊을 자리 clicked fast, typing), a write that fails,
-받아쓰기 헛소리 folded, the width of the page. Every name, line and video here is made up."""
+writes answered while the writer goes on (끊을 자리 clicked fast, typing, a source or a reveal line
+picked), a write that fails, 받아쓰기 헛소리 folded and counted as the tab counts, the width of the
+page, the decisions kept aside since the script changed (put back, let go; a 화자 항목 row the
+server does not send yet is added to its answers in the page), a line's source, a speaker line
+that waits for the line before, a line without a name, a script cue's range past its scene, a
+재생용 영상 made elsewhere. Every name, line and video here is made up."""
 from __future__ import annotations
 
 import json
@@ -21,7 +25,9 @@ import numpy as np
 import pytest
 from fastapi.testclient import TestClient
 
+from cboe.proxy import WAIT_NOTE
 from cboe.server.app import ENV_FLOOR_DB, ENV_MAX_BUCKETS, create_app, level_buckets
+from cboe.state import Project
 from cboe.util import write_json
 
 
@@ -106,7 +112,8 @@ browser_only = pytest.mark.skipif(not (EDGE and NODE and HAVE_FFMPEG),
 # sleep, latency (slow network), fail (answer POSTs with an error, or drop them), type, idle
 # (no write in flight), click / key (the writer's own mouse click on an element's middle and key
 # press, through CDP Input: they focus and toggle as a person's do), posts (POST urls seen),
-# exceptions (uncaught page errors).
+# exceptions (uncaught page errors), reload (load the page again; ``before``: a script run in it
+# before the page's own, e.g. one that changes what fetch answers), send (any CDP call).
 DRIVER = r"""
 import { pathToFileURL } from 'node:url';
 const [port, url, scen, W = '1280', H = '800'] = process.argv.slice(2);
@@ -150,8 +157,15 @@ const ev = async (expr) => {
 };
 const until = async (expr, ms = 8000) => { const end = Date.now() + ms; for (;;) { const v = await ev(expr); if (v) return v; if (Date.now() > end) return null; await sleep(100); } };
 const busy = () => ev(`document.getElementById('app').classList.contains('is-busy')`);
+const ready = async () => { await until(`!!(document.querySelector('#tabs .tab') || (document.getElementById('banner') && !document.getElementById('banner').hidden))`, 30000); await p.idle(); };
 const p = {
-  ev, until, sleep, posts, exceptions,
+  ev, until, sleep, posts, exceptions, send,
+  reload: async (before) => {
+    if (before) await send('Page.addScriptToEvaluateOnNewDocument', { source: before });
+    await send('Page.reload', { ignoreCache: true });
+    await sleep(200);
+    await ready();
+  },
   latency: (ms) => send('Network.emulateNetworkConditions', { offline: false, latency: ms, downloadThroughput: -1, uploadThroughput: -1 }),
   fail: async (mode) => { if (mode && !failMode) await send('Fetch.enable', { patterns: [{ urlPattern: '*/api/*', requestStage: 'Request' }] }); if (!mode) await send('Fetch.disable'); failMode = mode; },
   type: (text) => send('Input.insertText', { text }),
@@ -171,8 +185,7 @@ const p = {
 let result;
 try {
   await send('Page.navigate', { url });
-  await until(`!!(document.querySelector('#tabs .tab') || (document.getElementById('banner') && !document.getElementById('banner').hidden))`, 30000);
-  await p.idle();
+  await ready();
   result = await (await import(pathToFileURL(scen).href)).default(p);
 } catch (e) { result = { error: String((e && e.stack) || e) }; }
 try { await send('Target.closeTarget', { targetId: t.id }); } catch (_) { /* gone */ }
@@ -338,31 +351,45 @@ PAGE_EXTRAS = [_extra("X0001", "저기요 잠깐만요", 6.5, 7.4),
                _extra("X0004", "구독 좋아요 알림 설정", 11.75, 11.95, suspect="credit", suspect_by={"speech": 0.03, "music": 0.7})]
 
 
-def page_folder(tmp_path, video, t0=5.0, t1=12.0, title="화면 시험"):
+def _speaker_item(ln, **more):
+    it = {"id": "P" + ln["id"][1:], "kind": "speaker", "t0": ln["start"], "t1": ln["end"], "onset": ln["start"],
+          "category": "speaker", "label": {"class": "speaker", "ko": ln["speaker"]},
+          "speaker": {"line_id": ln["id"], "name": ln["speaker"], "face": "not_visible", "n_faces": 0, "by": None,
+                      "source": None, "estimated": False},
+          "phrases": [], "phrase": ln["text"], "short": ln["text"], "flags": [], "rec": "include",
+          "reason": "말하는 얼굴 안 보임", "evidence": []}
+    it.update(more)
+    return it
+
+
+def _write_script(w, lines):
+    """dialogue.json and script.json of these lines (the script read again)."""
+    write_json(w / "dialogue.json", {"mode": "scenes", "extras": PAGE_EXTRAS, "lines": lines})
+    write_json(w / "script.json", {"version": 2, "characters": ["하늘", "바다"],
+                                   "people": [{"id": "P01", "name": "하늘", "cues": ["하늘"]}, {"id": "P02", "name": "바다", "cues": ["바다"]}],
+                                   "lines": [{"id": ln["id"], "speaker": ln["speaker"], "text": ln["text"]} for ln in lines]})
+
+
+def page_folder(tmp_path, video, t0=5.0, t1=12.0, title="화면 시험", lines=None, speakers=None, sounds=()):
     """A made-up work folder for the page: three script lines, four speeches in no script line (two
-    shaped like 받아쓰기 헛소리), a speaker candidate per line and one sound."""
+    shaped like 받아쓰기 헛소리), a speaker candidate per line and one sound. ``lines``: other
+    script lines; ``speakers``: other speaker candidates; ``sounds``: more sound candidates."""
+    lines = PAGE_LINES if lines is None else lines
     w = tmp_path / "work"
     w.mkdir()
     write_json(w / "project.json", {"title": title, "video": str(video), "t0": t0, "t1": t1, "fps": 25.0,
                                     "duration": 12.0, "width": 640, "height": 360})
-    write_json(w / "dialogue.json", {"mode": "scenes", "extras": PAGE_EXTRAS, "lines": PAGE_LINES})
-    items = [{"id": "P" + ln["id"][1:], "kind": "speaker", "t0": ln["start"], "t1": ln["end"], "onset": ln["start"],
-              "category": "speaker", "label": {"class": "speaker", "ko": ln["speaker"]},
-              "speaker": {"line_id": ln["id"], "name": ln["speaker"], "face": "not_visible", "n_faces": 0, "by": None,
-                          "source": None, "estimated": False},
-              "phrases": [], "phrase": ln["text"], "short": ln["text"], "flags": [], "rec": "include",
-              "reason": "말하는 얼굴 안 보임", "evidence": []} for ln in PAGE_LINES]
+    items = [_speaker_item(ln) for ln in lines if ln["speaker"]] if speakers is None else list(speakers)
     items.append({"id": "S0001", "kind": "sfx", "onset": 9.0, "t0": 9.0, "t1": 10.0, "phrase": "[문 닫히는 소리]",
                   "short": "[문 닫히는 소리]", "phrases": [{"text": "[문 닫히는 소리]", "short": "[문 닫히는 소리]"}],
                   "rec": "include", "reason": "", "flags": [], "category": "event",
                   "label": {"class": "Door", "ko": "문", "confident": True},
                   "evidence": [{"kind": "소리", "t": 9.0, "t1": 9.6, "text": "문 소리", "polarity": "include", "source": "sed"}]})
+    items.extend(sounds)
     write_json(w / "items.json", {"items": items})
     write_json(w / "cuts.json", {"cuts": []})
     write_json(w / "asr.json", {"words": []})
-    write_json(w / "script.json", {"version": 2, "characters": ["하늘", "바다"],
-                                   "people": [{"id": "P01", "name": "하늘", "cues": ["하늘"]}, {"id": "P02", "name": "바다", "cues": ["바다"]}],
-                                   "lines": [{"id": ln["id"], "speaker": ln["speaker"], "text": ln["text"]} for ln in PAGE_LINES]})
+    _write_script(w, lines)
     write_json(w / "scenes.json", {"scenes": [{"id": "SC001", "start": 5.4, "end": 11.7, "status": "found"}]})
     return w
 
@@ -718,3 +745,383 @@ def test_the_page_is_no_wider_than_the_window(tmp_path, browser, clips, width):
         }""", size=(width, 760))["result"]
     for v in r:
         assert v["sw"] <= v["W"] and v["srt"] <= v["W"], v
+
+
+# ------------------------------------------------- 붙지 못한 작가 결정 (state aside)
+ASIDE_TYPO = "fp:line@바다:오늘 저녁 일곱 시에 학교 앞 공원에서 만나자#0"
+ASIDE_GONE = "fp:line@바다:그럼 내일 봐#0"
+# rows the server of today does not send: a 화자 항목 decision (kind speaker) and a key it does not know
+ASIDE_SPK = {"key": "fp:speaker@line@하늘:알았어 늦지 않게 갈게#0", "kind": "speaker", "speaker": "하늘",
+             "text": "알았어 늦지 않게 갈게", "decision": {"final": "exclude"}, "at": "2026-11-10T09:30:00",
+             "candidates": ["L0001", "L0003"], "why": "same_words"}
+ASIDE_BAD = {"key": "fp:line@바다:지어낸 다른 말#0", "speaker": "바다", "text": "지어낸 다른 말", "decision": {"sung": True},
+             "at": "2026-11-10T09:31:00", "candidates": ["L0001"], "why": "same_words"}
+# run in the page before its own script: every state it is answered gets the rows of window.__more
+# (those not gone); a put-back of a 화자 row is answered here with the server's state (it would
+# say 404 today); every POST api/lines/aside body is kept in window.__puts
+ASIDE_HOOK = r"""(() => {
+  const real = window.fetch.bind(window);
+  window.__more = @MORE@;
+  window.__puts = [];
+  const add = (data) => {
+    const extra = window.__more.filter((a) => !a.gone);
+    data.aside = [...(data.aside || []), ...extra];
+    if (data.summary && data.summary.lines) data.summary.lines.aside = (data.summary.lines.aside || 0) + extra.length;
+    return new Response(JSON.stringify(data), { status: 200, headers: { 'Content-Type': 'application/json' } });
+  };
+  window.fetch = async (url, init = {}) => {
+    const u = String(url);
+    if (u.endsWith('api/lines/aside') && init.method === 'POST') {
+      const body = JSON.parse(init.body);
+      window.__puts.push(body);
+      const mine = window.__more.find((a) => a.key === body.key && a.kind === 'speaker');
+      if (mine) { mine.gone = true; return add(await (await real('api/state')).json()); }
+    }
+    const r = await real(url, init);
+    if (!r.ok || u.includes('api/media') || u.includes('api/envelope')) return r;
+    const data = await r.clone().json().catch(() => null);
+    return data && Array.isArray(data.aside) ? add(data) : r;
+  };
+})();"""
+
+
+def aside_folder(tmp_path, video):
+    """Two decisions of the writer, then the script read again: the words of L0002 fixed (its
+    decision waits for the writer: text_changed, candidate L0002) and L0004 cut (gone)."""
+    lines = PAGE_LINES + [_line("L0004", "바다", "그럼 내일 봐", 12.2, 13.0)]
+    w = page_folder(tmp_path, video, t0=0.0, t1=14.0, lines=lines, speakers=[_speaker_item(ln) for ln in PAGE_LINES])
+    p = Project(w)
+    p.set_line("L0002", include=False, name="구름", language="영어")
+    p.set_line("L0004", text="그럼 내일 또 봐", breaks=[2], source="phone")
+    _write_script(w, [PAGE_LINES[0], _line("L0002", "바다", "오늘 저녁 여덟 시에 학교 앞 공원에서 만나자", 8.0, 10.4), PAGE_LINES[2]])
+    return w
+
+
+@browser_only
+def test_page_shows_the_decisions_kept_aside_and_puts_them_back(tmp_path, browser, clips):
+    # the decisions on no line since the script changed: a fold at the top of the 대사 view (old
+    # page: nothing at all) with who and what, what was decided, why, the candidate lines; 이 줄에
+    # 붙이기, 버리기 (asks first), a row of the export check that opens the fold, a 404 in Korean
+    work = aside_folder(tmp_path, clips["mp4"])
+    hook = ASIDE_HOOK.replace("@MORE@", json.dumps([ASIDE_SPK, ASIDE_BAD], ensure_ascii=False))
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          await p.reload(@HOOK@);
+          const row = (k) => `#aside-box .as-row[data-key="${k}"]`;
+          const box = () => p.ev(`(() => { const b = document.getElementById('aside-box'); if (!b) return null;
+            return { head: b.querySelector('.aside-head').textContent.replace(/\\s+/g, ' ').trim(), open: b.classList.contains('is-open'),
+              rows: [...b.querySelectorAll('.as-row')].map((r) => ({ key: r.dataset.key, text: r.textContent.replace(/\\s+/g, ' ').trim(),
+                cands: [...r.querySelectorAll('[data-act="aside-put"]')].map((x) => x.dataset.line) })) }; })()`);
+          const toast = () => p.ev(`[...document.querySelectorAll('#toasts .toast')].map((t) => t.textContent).pop() || ''`);
+          const sent = () => p.posts.filter((u) => u.startsWith('api/lines/aside')).length;
+          await p.ev(`document.querySelector('#tabs [data-view="lines"]').click()`);
+          await p.sleep(200);
+          const first = await box();
+          await p.ev(`document.querySelector('${row('@K1@')} [data-act="goto-line"]').click()`);
+          await p.sleep(200);
+          const went = { sel: await p.ev(`(document.querySelector('#rows .row.is-sel') || {}).id || null`),
+                         panel: await p.ev(`document.querySelector('#evidence .ev-subject').textContent`) };
+          await p.ev(`document.querySelector('#aside-box .aside-head').click()`);
+          await p.sleep(100);
+          const folded = await box();
+          await p.ev(`document.querySelector('#tabs [data-view="items"]').click()`);
+          await p.ev(`document.querySelector('[data-act="open-export"][data-fmt="srt"]').click()`);
+          await p.until(`!!document.querySelector('#modal-box .xp-row')`, 8000);
+          const xp = await p.ev(`[...document.querySelectorAll('#modal-box .xp-row')].map((r) => r.textContent.replace(/\\s+/g, ' ').trim()).filter((t) => t.includes('붙지 못한'))`);
+          await p.ev(`document.querySelector('#modal-box [data-act="xp-aside"]').click()`);
+          await p.sleep(200);
+          const back = { view: await p.ev(`document.querySelector('#tabs .tab.is-on').dataset.view`), modal: await p.ev(`!document.getElementById('modal').hidden`), box: await box() };
+          await p.ev(`document.querySelector('${row('@KB@')} [data-act="aside-put"]').click()`);
+          await p.idle();
+          const bad = { toast: await toast(), box: await box() };
+          await p.ev(`window.__more.find((a) => a.key === '@KB@').gone = true`);
+          await p.ev(`document.querySelector('${row('@K1@')} [data-act="aside-put"][data-line="L0002"]').click()`);
+          await p.idle();
+          const put = await box();
+          await p.ev(`document.querySelector('${row('@KS@')} [data-act="aside-put"][data-line="L0003"]').click()`);
+          await p.idle();
+          const spk = await box();
+          const before = sent();
+          await p.ev(`document.querySelector('${row('@K2@')} [data-act="aside-drop"]').click()`);
+          await p.sleep(150);
+          const asked = { label: await p.ev(`document.querySelector('${row('@K2@')} [data-act="aside-drop"]').textContent`), sent: sent() - before };
+          await p.ev(`document.querySelector('${row('@K2@')} [data-act="aside-drop"]').click()`);
+          await p.idle();
+          const st = await p.ev(`fetch('api/state').then((r) => r.json())`);
+          return { first, went, folded, xp, back, bad, put, spk, asked, end: await box(), puts: await p.ev(`window.__puts`),
+                   l2: st.lines.find((l) => l.id === 'L0002'), aside: st.aside.map((a) => a.key), n: st.summary.lines.aside };
+        }""".replace("@HOOK@", json.dumps(hook)).replace("@K1@", ASIDE_TYPO).replace("@K2@", ASIDE_GONE)
+                     .replace("@KS@", ASIDE_SPK["key"]).replace("@KB@", ASIDE_BAD["key"]))["result"]
+    f = r["first"]
+    assert f and f["open"] and "대본이 바뀌어 붙지 못한 작가 결정 4개" in f["head"], f
+    rows = {x["key"]: x for x in f["rows"]}
+    assert list(rows) == [ASIDE_TYPO, ASIDE_GONE, ASIDE_SPK["key"], ASIDE_BAD["key"]], list(rows)
+    typo, gone, spk = rows[ASIDE_TYPO], rows[ASIDE_GONE], rows[ASIDE_SPK["key"]]
+    for want in ("바다", "오늘 저녁 일곱 시에", "대본 글이 바뀜", "줄 빼기", "이름 · 구름", "언어 · [영어]", "오늘 저녁 여덟 시에"):
+        assert want in typo["text"], (want, typo["text"])
+    assert typo["cands"] == ["L0002"]
+    for want in ("대본에서 사라짐", "글 고침 「그럼 내일 또 봐」", "출처 · 전화", "끊을 자리 · 2번째 어절 뒤", "맞는 줄이 대본에 없다"):
+        assert want in gone["text"], (want, gone["text"])
+    assert gone["cands"] == []
+    assert "화자 항목" in spk["text"] and "화자 표시 빼기" in spk["text"] and "같은 글 줄이 여럿" in spk["text"], spk
+    assert spk["cands"] == ["L0001", "L0003"]
+    assert r["went"]["sel"] == "lines-row-L0002" and "여덟 시에" in r["went"]["panel"], r["went"]
+    assert not r["folded"]["open"] and r["folded"]["rows"] == [] and "펼치기" in r["folded"]["head"], r["folded"]
+    assert len(r["xp"]) == 1 and "4개" in r["xp"][0], r["xp"]
+    b = r["back"]
+    assert b["view"] == "lines" and not b["modal"] and b["box"]["open"] and len(b["box"]["rows"]) == 4, b
+    assert r["bad"]["toast"].startswith("없는 결정입니다") and len(r["bad"]["box"]["rows"]) == 4, r["bad"]
+    assert [x["key"] for x in r["put"]["rows"]] == [ASIDE_GONE, ASIDE_SPK["key"]], r["put"]
+    assert [x["key"] for x in r["spk"]["rows"]] == [ASIDE_GONE], r["spk"]
+    assert "한 번 더 누르면 버림" in r["asked"]["label"] and r["asked"]["sent"] == 0, r["asked"]
+    assert r["end"] is None and r["aside"] == [] and r["n"] == 0, r
+    assert r["puts"] == [{"key": ASIDE_BAD["key"], "line": "L0001"}, {"key": ASIDE_TYPO, "line": "L0002"},
+                         {"key": ASIDE_SPK["key"], "line": "L0003"}, {"key": ASIDE_GONE, "line": None}], r["puts"]
+    l2 = r["l2"]                                                  # the decision is on L0002 now
+    assert not l2.get("include") and l2.get("name") == "구름" and l2.get("language") == "영어", l2
+
+
+# ----------------------------------------------------------------------- 줄 출처
+SOURCE_SEL = "document.querySelector('#evidence [data-change=\"ln-source\"]')"
+
+
+@browser_only
+def test_line_source_is_picked_kept_while_sent_and_put_back_when_refused(tmp_path, browser, clips):
+    # the line panel picks where a line comes from (the script's, none, a source): stored as the
+    # line's source, the label follows ([하늘/속마음]); kept while on its way when an earlier write
+    # is answered, back to what is stored when refused (old page: no way to pick it)
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          const sel = `@SEL@`;
+          const pick = (v) => p.ev(`(() => { const s = ${sel}; s.value = '${v}'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+          const line = () => p.ev(`fetch('api/state').then((r) => r.json()).then((s) => { const l = s.lines.find((x) => x.id === 'L0001'); return { dec: l.decision || {}, label: l.label || null }; })`);
+          await p.ev(`document.querySelector('#tabs [data-view="lines"]').click()`);
+          await p.sleep(150);
+          await p.ev(`document.getElementById('lines-row-L0001').click()`);
+          await p.sleep(300);
+          const opts = await p.ev(`${sel} ? [...${sel}.options].map((o) => [o.value, o.textContent]) : null`);
+          await pick('inner');
+          await p.idle();
+          const inner = { line: await line(), shown: await p.ev(`${sel}.value`) };
+          await pick('none');
+          await p.idle();
+          const none = { line: await line(), shown: await p.ev(`${sel}.value`) };
+          await p.latency(900);
+          await p.ev(`document.querySelector('#evidence [data-change="ln-sung"]').click()`);
+          await p.sleep(60);
+          await pick('phone');
+          const seen = [];
+          for (let i = 0; i < 24; i++) { seen.push(await p.ev(`${sel}.value`)); await p.sleep(100); }
+          await p.idle();
+          await p.latency(0);
+          const phone = { line: await line(), shown: await p.ev(`${sel}.value`) };
+          await p.fail({ status: 500, body: JSON.stringify({ detail: '시험용 서버 오류' }) });
+          await pick('radio');
+          await p.idle();
+          await p.fail(null);
+          const refused = { shown: await p.ev(`${sel}.value`), line: await line() };
+          await pick('');
+          await p.idle();
+          return { opts, inner, none, seen, phone, refused, script: { line: await line(), shown: await p.ev(`${sel}.value`) } };
+        }""".replace("@SEL@", SOURCE_SEL))["result"]
+    assert r["opts"] and [k for k, _ in r["opts"]] == ["", "none", "offscreen", "inner", "video", "phone", "radio", "broadcast", "narration"], r["opts"]
+    assert [lab for _, lab in r["opts"]][1:] == ["없음", "화면 밖 (표시 없음)", "속마음", "영상", "전화", "무전", "방송", "내레이션"]
+    assert r["opts"][0][1].startswith("대본대로")
+    assert r["inner"] == {"line": {"dec": {"source": "inner"}, "label": "[하늘/속마음]"}, "shown": "inner"}, r["inner"]
+    assert r["none"] == {"line": {"dec": {"source": ""}, "label": "[하늘]"}, "shown": "none"}, r["none"]
+    assert r["seen"] and set(r["seen"]) == {"phone"}, r["seen"]                 # never back to 'none' meanwhile
+    assert r["phone"]["shown"] == "phone" and r["phone"]["line"]["dec"] == {"source": "phone", "sung": True}, r["phone"]
+    assert r["refused"]["shown"] == "phone" and r["refused"]["line"]["dec"].get("source") == "phone", r["refused"]
+    assert r["script"]["shown"] == "" and "source" not in r["script"]["line"]["dec"], r["script"]
+
+
+# ------------------------------------------------- 앞 줄을 먼저 정해야 함 · 이름 없는 줄
+WAIT_LINES = [_line("L0001", "하늘", "누구 계세요?", 5.4, 6.2), _line("L0002", "하늘", "거기 아무도 없어요?", 6.6, 7.6),
+              _line("L0003", "바다", "오늘 저녁 일곱 시에 학교 앞 공원에서 만나자", 8.0, 10.4)]
+
+
+@browser_only
+def test_a_speaker_line_waiting_for_the_line_before_says_so_and_goes_to_it(tmp_path, browser, clips):
+    # 하늘's second line goes on right after a line still 확인 필요: the link says it waits for it
+    # (old page: "이어 말함 · 앞 줄" as if the name were already out) and goes to that line; once
+    # it is decided the link says 이어 말함 again
+    speakers = [_speaker_item(WAIT_LINES[0], rec="check", reason="말하는 얼굴 판정 애매", speaker=dict(
+                    _speaker_item(WAIT_LINES[0])["speaker"], face="unclear")),
+                _speaker_item(WAIT_LINES[1], follows="P0001", reason="말하는 얼굴 안 보임 · 앞 줄을 먼저 정해야 함"),
+                _speaker_item(WAIT_LINES[2])]
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0, lines=WAIT_LINES, speakers=speakers)
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          const link = () => p.ev(`(() => { const a = document.querySelector('#evidence .ev-note [data-act="goto-item"]'); return a ? { text: a.textContent.replace(/\\s+/g, ' ').trim(), id: a.dataset.id } : null; })()`);
+          await p.ev(`document.getElementById('row-P0002').click()`);
+          await p.sleep(200);
+          const waits = await link();
+          await p.ev(`document.querySelector('#evidence .ev-note [data-act="goto-item"]').click()`);
+          await p.sleep(200);
+          const went = await p.ev(`(document.querySelector('#rows .row.is-sel') || {}).id || null`);
+          await p.ev(`document.querySelector('#evidence [data-act="decide"][data-decision="include"]').click()`);
+          await p.idle();
+          await p.ev(`document.getElementById('row-P0002').click()`);
+          await p.sleep(200);
+          return { waits, went, after: await link() };
+        }""")["result"]
+    w = r["waits"]
+    assert w and w["id"] == "P0001" and w["text"].startswith("앞 줄을 먼저 정해야 함 · 앞 줄") and "이어 말함" not in w["text"], w
+    assert r["went"] == "row-P0001", r
+    assert r["after"] and r["after"]["text"].startswith("이어 말함 · 앞 줄") and r["after"]["id"] == "P0001", r["after"]
+
+
+@browser_only
+def test_a_line_without_a_name_offers_this_line_only(tmp_path, browser, clips):
+    # 화자 미상: every unnamed line would be 'the same person', so the server takes 이 줄 only (400
+    # for the rest); the page shows only that one (old page: five scopes with line counts)
+    lines = PAGE_LINES + [_line("L0004", None, "거기 누구 없어요", 11.72, 11.98)]
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0, lines=lines)
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          const scopes = () => p.ev(`[...document.querySelectorAll('#modal-box input[name="m-scope"]')].map((i) => i.value)`);
+          await p.ev(`document.querySelector('#tabs [data-view="lines"]').click()`);
+          await p.sleep(150);
+          await p.ev(`document.getElementById('lines-row-L0001').click()`);
+          await p.sleep(200);
+          await p.ev(`document.querySelector('#evidence [data-act="ln-speaker"]').click()`);
+          await p.sleep(300);
+          const named = await scopes();
+          await p.ev(`document.querySelector('#modal-box [data-act="close"]').click()`);
+          await p.sleep(150);
+          await p.ev(`document.getElementById('lines-row-L0004').click()`);
+          await p.sleep(200);
+          await p.ev(`document.querySelector('#evidence [data-act="ln-speaker"]').click()`);
+          await p.sleep(300);
+          const unnamed = { scopes: await scopes(), sub: await p.ev(`[...document.querySelectorAll('#modal-box .sec')].map((s) => s.textContent).find((t) => t.includes('범위')) || ''`) };
+          await p.ev(`(() => { const i = document.getElementById('f-newname'); i.focus(); })()`);
+          await p.type('구름');
+          await p.ev(`document.querySelector('#modal-box [data-act="m-confirm"]').click()`);
+          await p.idle();
+          const st = await p.ev(`fetch('api/state').then((r) => r.json())`);
+          return { named, unnamed, modal: await p.ev(`!document.getElementById('modal').hidden`),
+                   toasts: await p.ev(`[...document.querySelectorAll('#toasts .toast')].map((t) => t.className + ' ' + t.textContent)`),
+                   l4: st.lines.find((l) => l.id === 'L0004').name || null, l1: st.lines.find((l) => l.id === 'L0001').name };
+        }""")["result"]
+    assert r["named"] == ["line", "from_here", "before", "scene", "person"], r["named"]
+    assert r["unnamed"]["scopes"] == ["line"] and "이 줄만" in r["unnamed"]["sub"], r["unnamed"]
+    assert not r["modal"] and not any("toast-error" in t for t in r["toasts"]), r["toasts"]
+    assert r["l4"] == "구름" and r["l1"] == "하늘", r
+
+
+# ---------------------------------------------- 같은 화면의 수 · 장면 밖 · 기다리는 재생용 영상 · 인물
+@browser_only
+def test_extras_chips_count_as_the_tab_and_the_note_do(tmp_path, browser, clips):
+    # 4 speeches open, 2 of them 받아쓰기 헛소리 의심: the chip 정하지 않음 says 2 as the tab and the
+    # note do (old page: 4); the 헛소리 의심 chip keeps its 2
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          const look = () => p.ev(`({ chips: Object.fromEntries([...document.querySelectorAll('#state-chips .chip')].map((c) => [c.dataset.filter, Number(c.querySelector('.n').textContent)])),
+            tab: (document.querySelector('#tabs [data-view="extras"] .n') || {}).textContent || '0', note: document.getElementById('view-note').textContent,
+            rows: document.querySelectorAll('#rows .row[data-id]').length })`);
+          await p.ev(`document.querySelector('#tabs [data-view="extras"]').click()`);
+          await p.sleep(200);
+          const first = await look();
+          await p.ev(`document.getElementById('extras-row-X0001').click()`);
+          await p.sleep(150);
+          await p.ev(`document.querySelector('#evidence [data-act="x-ignore"]').click()`);
+          await p.idle();
+          return { first, after: await look() };
+        }""")["result"]
+    f = r["first"]
+    assert f["chips"]["open"] == 2 and f["tab"] == "2" and "정하지 않음 2 / 4개" in f["note"] and f["rows"] == 2, f
+    assert f["chips"]["suspect"] == 2 and f["chips"]["all"] == 2, f
+    a = r["after"]
+    assert a["chips"]["open"] == 1 and a["tab"] == "1" and "정하지 않음 1 / 4개" in a["note"], a
+    assert a["chips"]["ignored"] == 1, a
+
+
+@browser_only
+def test_a_script_cue_whose_range_reaches_past_its_scene_says_so(tmp_path, browser, clips):
+    # window_out [before, after]: the 대본 evidence row (and the range of a candidate the script
+    # gives) says which side reaches past another scene; window_by 'range' with window_out false
+    # says nothing (old page: nothing anywhere); cue_far's reason is shown as the server gives it
+    far = "넣을 근거 부족 · 대본 단서의 장면에서 먼 소리"
+    script_ev = lambda t, wo, by: {"kind": "대본", "t": t, "text": "대본 지문: \"문이 쾅 닫힌다\"", "polarity": "include", "source": "script",
+                                   "window": [3.0, 9.0], "window_by": by, "window_out": wo}
+    sounds = [{"id": "S0002", "kind": "sfx", "onset": 3.5, "t0": 3.5, "t1": 4.0, "phrase": "[쾅]", "short": "[쾅]", "phrases": [{"text": "[쾅]", "short": "[쾅]"}],
+               "rec": "check", "reason": far, "flags": ["script"], "category": "event", "cue_id": "C0001", "cue_far": True,
+               "label": {"class": "Slam", "ko": "쾅", "confident": True},
+               "evidence": [script_ev(3.5, [True, False], ["other_scene", "line"]),
+                            {"kind": "소리", "t": 3.5, "t1": 4.0, "text": "쾅 소리", "polarity": "include", "source": "sed"}]},
+              {"id": "C0002", "kind": "sfx", "origin": "script", "cue_id": "C0002", "estimated": True, "onset": 8.4, "t0": 8.4, "t1": 9.4,
+               "phrase": "[초인종 소리]", "short": "[초인종]", "phrases": [{"text": "[초인종 소리]", "short": "[초인종]"}], "rec": "check",
+               "reason": "대본 단서 · 소리를 찾지 못함", "flags": ["script", "timing_estimated"], "category": "event",
+               "label": {"class": "", "ko": "초인종", "confident": False}, "window": [8.0, 11.0],
+               "window_by": ["line", "range"], "window_out": [False, True], "evidence": [script_ev(8.4, [False, True], ["line", "range"])]},
+              {"id": "S0003", "kind": "sfx", "onset": 6.0, "t0": 6.0, "t1": 6.5, "phrase": "[똑똑]", "short": "[똑똑]", "phrases": [{"text": "[똑똑]", "short": "[똑똑]"}],
+               "rec": "include", "reason": "대본 지문에 적힌 소리", "flags": ["script"], "category": "event", "cue_id": "C0003",
+               "label": {"class": "Knock", "ko": "똑똑", "confident": True},
+               "evidence": [script_ev(6.0, [False, False], ["range", "line"])]}]
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0, sounds=sounds)
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          const look = async (id) => {
+            await p.ev(`document.getElementById('row-${id}').click()`);
+            await p.sleep(200);
+            return p.ev(`({ out: [...document.querySelectorAll('#evidence .ev-row')].map((e) => (e.querySelector('.ev-out') || {}).textContent || ''),
+              box: (document.querySelector('#evidence .move-box .ev-out') || {}).textContent || '', note: (document.querySelector('#evidence .ev-note') || {}).textContent || '',
+              sub: (document.querySelector('#row-${id} .r-sub') || {}).textContent || '' })`);
+          };
+          return { s2: await look('S0002'), c2: await look('C0002'), s3: await look('S0003') };
+        }""")["result"]
+    assert r["s2"]["out"] == ["시각 범위가 장면 밖까지 (앞 장면 쪽)", ""], r["s2"]
+    assert far in r["s2"]["note"] and far in r["s2"]["sub"], r["s2"]
+    assert r["c2"]["out"] == ["시각 범위가 장면 밖까지 (뒤 장면 쪽)"] and r["c2"]["box"] == "시각 범위가 장면 밖까지 (뒤 장면 쪽)", r["c2"]
+    assert r["s3"]["out"] == [""] and not r["s3"]["box"], r["s3"]
+
+
+@browser_only
+def test_page_says_it_waits_for_the_copy_made_elsewhere(tmp_path, browser, clips):
+    # building with no progress of its own and the note of a wait (another worker makes this
+    # work's copy): the bar and the Space toast give the note, not an empty "만드는 중  %"
+    work = page_folder(tmp_path, clips["mkv"])
+    media = Media("building", t0=5.0, progress=None, note=WAIT_NOTE)
+    with Served(create_app(work, media=media)) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          const before = await p.ev(`@STAGE@`);
+          await p.ev(`document.activeElement && document.activeElement.blur()`);
+          await p.ev(`document.dispatchEvent(new KeyboardEvent('keydown', { code: 'Space', key: ' ', bubbles: true }))`);
+          await p.sleep(200);
+          return { before, after: await p.ev(`@STAGE@`) };
+        }""".replace("@STAGE@", STAGE))["result"]
+    s = r["before"]
+    assert s["still"] and not s["src"] and s["msg"].startswith(WAIT_NOTE) and "%" not in s["msg"] and "만드는 중  " not in s["msg"], s
+    assert any(t.startswith(WAIT_NOTE) for t in r["after"]["toasts"]), r["after"]["toasts"]
+
+
+@browser_only
+def test_the_reveal_line_picked_stays_while_an_earlier_write_is_answered(tmp_path, browser, clips):
+    # 하늘 [남자]: 끝까지 일반 표시, then right after it 이 줄부터 L0001 in the select; the answer to
+    # the first write comes while the pick is on its way: the select keeps L0001 (old page: back
+    # to 고르기 until its own answer came)
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          const sel = `document.querySelector('#evidence [data-change="pp-reveal-line"]')`;
+          await p.ev(`document.querySelector('#tabs [data-view="people"]').click()`);
+          await p.sleep(200);
+          await p.ev(`document.querySelector('#rows .row[data-id="하늘"]').click()`);
+          await p.sleep(200);
+          await p.ev(`document.querySelector('#evidence [data-act="pp-mode"][data-mode="generic"]').click()`);
+          await p.idle();
+          await p.latency(900);
+          await p.ev(`document.querySelector('#evidence [data-act="pp-reveal"][data-reveal="never"]').click()`);
+          await p.sleep(60);
+          await p.ev(`(() => { const s = ${sel}; s.value = 'L0001'; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+          const seen = [];
+          for (let i = 0; i < 26; i++) { seen.push(await p.ev(`${sel}.value + (document.querySelector('#evidence .pp-line.is-on') ? '+' : '')`)); await p.sleep(100); }
+          await p.idle();
+          await p.latency(0);
+          const dec = await p.ev(`fetch('api/state').then((r) => r.json()).then((s) => (s.people.find((q) => q.name === '하늘') || {}).decision || {})`);
+          return { seen, dec, end: await p.ev(`${sel}.value`) };
+        }""")["result"]
+    assert r["seen"] and set(r["seen"]) == {"L0001+"}, r["seen"]
+    assert r["dec"].get("reveal") == "line" and r["dec"].get("reveal_line") == "L0001" and r["end"] == "L0001", r

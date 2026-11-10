@@ -263,6 +263,8 @@ kbd {
 .ev-kind { font-weight: 800; color: var(--primary-700); font-size: 14px; }
 .ev-t { color: var(--muted); font-size: 12.5px; }
 .ev-text { font-weight: 700; font-size: 14.5px; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ev-out { font-size: 11.5px; font-weight: 650; color: var(--chk-fg); }
+.ev-text .ev-out { display: block; white-space: normal; }
 .pol { font-size: 11.5px; font-weight: 700; padding: 2px 8px; border-radius: 999px; white-space: nowrap; }
 .pol-inc { color: var(--inc-fg); background: rgba(226, 244, 230, .9); }
 .pol-exc { color: var(--exc-fg); background: #E9EAF2; }
@@ -611,6 +613,35 @@ kbd {
 }
 .more-row:hover, .fold-row:hover { background: var(--primary-50); }
 .fold-row { color: var(--muted); }
+/* 붙지 못한 작가 결정: the fold above the list of the 대사 view (does not scroll with the lines) */
+.list-aside { flex: 0 1 auto; max-height: 45%; min-height: 0; min-width: 0; display: flex; flex-direction: column; }
+.list-aside[hidden] { display: none; }
+.aside-box { display: flex; flex-direction: column; min-height: 0; border-top: 1px solid var(--chk-line); background: #FFFBEE; }
+.aside-head {
+  width: 100%; display: grid; grid-template-columns: 14px auto minmax(0, 1fr) auto; align-items: center; gap: 10px;
+  padding: 9px 18px; border: 0; background: transparent; text-align: left; cursor: pointer; font-size: 13px; color: var(--chk-fg);
+}
+.aside-head:hover { background: var(--chk-bg); }
+.aside-head .chev { width: 8px; height: 8px; border-right: 2px solid var(--chk-fg); border-bottom: 2px solid var(--chk-fg); transform: rotate(-45deg); transition: transform .15s; }
+.aside-box.is-open .aside-head .chev { transform: rotate(45deg); }
+.as-sub { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.as-fold { font-weight: 700; font-size: 12px; }
+.aside-head { flex: none; }
+.aside-rows { display: flex; flex-direction: column; gap: 8px; padding: 0 14px 12px; min-height: 0; overflow-y: auto; }
+.as-row { flex: none; }
+.as-row { display: flex; flex-direction: column; gap: 6px; padding: 9px 12px; border-radius: 10px; background: var(--card); border: 1px solid var(--chk-line); font-size: 13px; }
+.as-top { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; }
+.as-who { font-weight: 750; color: var(--spk-fg); white-space: nowrap; }
+.as-text { font-weight: 700; color: var(--ink); min-width: 0; overflow-wrap: anywhere; }
+.as-dec { color: var(--ink-2); overflow-wrap: anywhere; }
+.as-dec b, .as-k { color: var(--muted); font-weight: 750; font-size: 12px; margin-right: 8px; }
+.as-cands { display: flex; flex-direction: column; gap: 4px; }
+.as-cand { display: flex; align-items: center; gap: 8px; padding: 4px 6px 4px 8px; border-radius: 8px; background: var(--well); }
+.as-line { flex: 1; min-width: 0; display: flex; gap: 8px; align-items: baseline; text-align: left; text-decoration: none; color: var(--ink); }
+.as-line:hover .as-now { text-decoration: underline; }
+.as-now { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 650; }
+.as-none { color: var(--muted); font-size: 12.5px; }
+.as-acts { display: flex; justify-content: flex-end; }
 
 /* line states */
 .ls-ok { background: var(--inc-bg); color: var(--inc-fg); }
