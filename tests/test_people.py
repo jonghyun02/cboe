@@ -196,12 +196,23 @@ def test_a_common_word_said_with_a_copula_or_a_comparison_tells_no_name(text, na
     assert people.revealed_at([ln("L1", "구름", text), ln("L2", name, "응")], name) is None
 
 
-def test_such_a_line_tells_the_name_once_another_line_calls_it():
+def test_such_a_line_tells_no_name_even_when_a_later_line_calls_it():
+    # the name is told from the sure call or the self-introduction on (the generic label lasts longer)
     lines = [ln("L1", "구름", "하늘이나 불러"), ln("L2", "바다", "뭐?"), ln("L3", "바다", "하늘아 이리 와")]
-    assert people.revealed_at(lines, "하늘")["line"] == "L1"
+    assert people.revealed_at(lines, "하늘")["line"] == "L3"
     assert people.revealed_at(lines[:2], "하늘") is None
     intro = [ln("L1", "구름", "하늘이라는 애 알아?"), ln("L2", "하늘", "저는 하늘입니다")]
-    assert people.revealed_at(intro, "하늘")["line"] == "L1"
+    assert people.revealed_at(intro, "하늘") == {"line": "L2", "index": 1, "by": "하늘", "how": "self"}
+
+
+def test_a_common_word_before_the_real_call_does_not_pull_the_reveal_forward():
+    # L1: the sky ('하늘이나 보자'); 하늘 speaks in L2 and L3; L4 calls 하늘 by name
+    lines = [ln("L1", "바다", "하늘이나 보자"), ln("L2", "하늘", "응 그래"), ln("L3", "하늘", "저기 봐"),
+             ln("L4", "구름", "하늘아 이리 와")]
+    assert people.revealed_at(lines, "하늘") == {"line": "L4", "index": 3, "by": "구름", "how": "called"}
+    out = people.display(lines, {"하늘": {"mode": "generic", "before": "여자"}})
+    assert [out["labels"].get(x) for x in ("L2", "L3")] == ["여자", "여자"]     # not the name before L4
+    assert out["people"]["하늘"]["told"]["line"] == "L4"
 
 
 @pytest.mark.parametrize("text, name", [("하나라도 남겨 둬", "하나"), ("날씨가 좋다", "날"), ("솜씨는 좋네", "솜")])

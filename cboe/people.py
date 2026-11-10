@@ -11,8 +11,9 @@ a vocative, an honorific, a particle or a copula ('가온아', '가온 씨', '�
 '가온이라는', '가온이었어', '가온보다'); a name inside a longer word ('운전기사' for '기사') does not
 count — or in which the person says it of themselves ('가온입니다', '제 이름은 가온'). A name said
 only with a copula or a comparison ('가온이라는', '가온이었어', '가온보다', '가온이나') follows a common
-word just as well ('사랑이라는', '영화보다'): such a line tells the name only when another line calls
-it in a sure form (as it is, a vocative, an honorific, a particle) or the person tells it. A name of
+word just as well ('사랑이라는', '영화보다'): such a line never tells the name — it is told by the
+first line that calls it in a sure form (as it is, a vocative, an honorific, a particle) or in
+which the person tells it, even when a line of the weak form comes before. A name of
 one letter is in too many words ('수' in '할 수 있어'): it counts only with a vocative or an
 honorific ('수야', '수 씨'; not '씨' written onto it with a particle: '날씨가') or as a plain
 self-introduction ('수입니다'). Only the lines given are read: the caller leaves out lines that
@@ -56,8 +57,8 @@ PARTICLES = ("이한테", "이에게", "이랑은", "이라도", "이처럼", "�
              "는", "을", "를", "도", "랑", "의", "와", "과", "요", "만", "고")
 # the name as a word in a sentence: '가온이라는 애', '가온이래', '가온이었어', '가온보다', '가온에게서',
 # '가온이나' (the forms after a final consonant start with 이). These forms follow common words just
-# as well ('사랑이라는 게', '영화보다', '하늘이나 보자', '보람이었어'): a name said only so tells it
-# when it is also called in a surer form (``revealed_at``)
+# as well ('사랑이라는 게', '영화보다', '하늘이나 보자', '보람이었어'): a name said only so tells
+# nothing (``revealed_at`` goes by the surer forms; ``mentions`` with ``weak`` still finds them)
 COPULA = (r"(?:이)?(?:었|였)[가-힣]{0,3}", r"(?:이)?라(?:는|고|서|면|니)?", r"(?:이)?란",
           r"(?:이)?래(?:요)?", r"이에요", r"예요", r"이세요", r"세요")
 MORE = ("이한테서", "이에게서", "한테서", "에게서", "이보다", "보다", "이나", "나")
@@ -143,21 +144,20 @@ def revealed_at(lines, name, key: str = "person"):
     """The first of ``lines`` (in the order given) that tells ``name``:
     ``{"line": id, "index": i, "by": speaker, "how": "called" | "self"}``, or None.
     ``line[key]`` is who speaks it (a name, or 'A/B' for two). A line that says the name only
-    with a copula or a comparison ('하늘이나 보자', '보람이었어') tells it only when another line
-    calls the name in a sure form or the person tells it (then from that first line on)."""
+    with a copula or a comparison ('하늘이나 보자', '보람이었어') tells nothing, even when a later
+    line calls the name in a sure form or the person tells it: such a form follows a common word
+    just as well ('하늘이나 보자' of the sky), so the name is told from that later line on (the
+    generic label lasts longer — the safe side of II.8)."""
     if not name or not keys(name):
         return None
-    first_weak = None
     for i, ln in enumerate(lines):
         who = parts(ln.get(key))
         text = ln.get("text")
         if name in who:
             if introduces(text, name):
-                return first_weak or {"line": ln.get("id"), "index": i, "by": ln.get(key), "how": "self"}
+                return {"line": ln.get("id"), "index": i, "by": ln.get(key), "how": "self"}
         elif mentions(text, name, weak=False):
-            return first_weak or {"line": ln.get("id"), "index": i, "by": ln.get(key), "how": "called"}
-        elif first_weak is None and mentions(text, name):
-            first_weak = {"line": ln.get("id"), "index": i, "by": ln.get(key), "how": "called"}
+            return {"line": ln.get("id"), "index": i, "by": ln.get(key), "how": "called"}
     return None
 
 
