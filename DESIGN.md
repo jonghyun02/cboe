@@ -7,7 +7,7 @@
 
 ## 0. 범위와 원칙
 
-- 입력: 영상 1개 + 촬영 대본(README '받는 대본 형식'). 대본 없이도 돈다(받아쓰기 줄을 대사로 씀, 화자 이름 없음).
+- 입력: 영상 1개 + 촬영 대본(USAGE.md '받는 대본 형식'). 대본 없이도 돈다(받아쓰기 줄을 대사로 씀, 화자 이름 없음).
 - 후보(`kind`) 세 가지: 효과음 `sfx`, 음악 `music`, 화자 이름 표시 `speaker`. id 머리글자는 S / M / P, 대본 단서로 만든 후보는 단서 id(`C0001`)를 그대로 쓴다.
 - 추천(`rec`) 세 가지: 포함 추천 `include`, 제외 추천 `exclude`, 확인 필요 `check`. 배치가 안 되면 배치 확인 필요(`no_room`).
 - 지키는 것:
@@ -92,14 +92,14 @@
   export/<제목>.srt .vtt .ttml
   run_log.json  run_history.json  llm_log.jsonl  .run.lock     실행 기록, LLM 호출 기록, 실행 잠금
   gui_run.log  gui_job.json                                    GUI 로 돌린 분석의 로그와 결과
-  review.mp4  review.mp4.json                                  재생용 영상 (README '재생용 영상')
+  review.mp4  review.mp4.json                                  재생용 영상 (USAGE.md '재생용 영상')
 ```
 
 단계마다 결과 파일이 있으면 건너뛴다(`--force <단계>`로 다시). 예외는 §1의 `script`(파일을 견줌)·`cues`·`agent`.
 
 ## 3. 데이터 형식
 
-예시의 이름·대사는 지어낸 것이다(README '받는 대본 형식'의 대본 토막).
+예시의 이름·대사는 지어낸 것이다(USAGE.md '받는 대본 형식'의 대본 토막).
 
 ### 3.1 대본 문서 (`script.json`, `script.read()`, version 2)
 ```json
@@ -493,9 +493,9 @@
 | `POST /api/export` · `GET /api/export/{fmt}` | `format` | 내보내기와 그 파일의 검사 결과, 내려받기 |
 | `GET /api/frame?t=&w=` | | 정지 화면 JPEG(원본에서, 구간 안으로 묶음) |
 | `GET /api/envelope?step=` | | `env.npz`를 `step`초마다 가장 큰 값으로 줄인 트랙별 세기(정수 dB, 칸 수 `ENV_MAX_BUCKETS` 20000 이하, 바닥 `ENV_FLOOR_DB` -90). 파일이 없으면 404 |
-| `GET /media/video` · `GET /api/media` · `POST /api/media/build` | | 영상과 재생용 영상(README '재생용 영상') |
+| `GET /media/video` · `GET /api/media` · `POST /api/media/build` | | 영상과 재생용 영상(USAGE.md '재생용 영상') |
 
-화면은 보기 다섯 개(후보 · 대사 · 대본에 없는 말 · 인물 · 칸)와 타임라인이다(README '검수 화면'). 수치·표기는 상태의 `style`에서만 받는다.
+화면은 보기 다섯 개(후보 · 대사 · 대본에 없는 말 · 인물 · 칸)와 타임라인이다(USAGE.md '검수 화면'). 수치·표기는 상태의 `style`에서만 받는다.
 200행씩 그리고(`CHUNK`) 내려가면 더 그린다.
 
 ### 7.1 구현하며 정한 것 (2026-10-19, 지금도 맞는 것)
