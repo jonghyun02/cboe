@@ -502,3 +502,42 @@ def test_partial_evidence_file_is_not_finished(client, ws_root):
     (w / "screen.json").write_text(_json.dumps({"items": {}, "llm": True, "complete": True}), encoding="utf-8")
     s = next(p for p in client.get("/api/studio").json()["projects"] if p["id"] == "sample")
     assert "screen" in s["stages_done"]
+
+
+def test_work_list_counts_like_the_review_screen(tmp_path):
+    """A line the writer took out takes its speaker item out of the work list's counts too
+    (the review screen leaves out ``line_excluded``)."""
+    from cboe.state import Project
+    from cboe.util import write_json
+    w = tmp_path / "ws" / "w1"
+    w.mkdir(parents=True)
+
+    def line(lid, s):
+        return {"id": lid, "speaker": "하늘", "text": "지어낸 말", "raw": "지어낸 말", "start": s, "end": s + 1.0,
+                "words": [{"w": "지어낸", "s": s, "e": s + 0.4}, {"w": "말", "s": s + 0.5, "e": s + 1.0}],
+                "aligned": True, "timing": "asr", "status": "ok", "scene_id": "SC001"}
+
+    def speaker(ln):
+        return {"id": "P" + ln["id"][1:], "kind": "speaker", "t0": ln["start"], "t1": ln["end"], "onset": ln["start"],
+                "category": "speaker", "label": {"class": "speaker", "ko": "하늘"},
+                "speaker": {"line_id": ln["id"], "name": "하늘", "face": "not_visible", "n_faces": 0, "by": None,
+                            "source": None, "estimated": False},
+                "phrases": [], "phrase": ln["text"], "short": ln["text"], "flags": [], "rec": "include",
+                "reason": "말하는 얼굴 안 보임", "evidence": []}
+
+    lines = [line("L0001", 10.0), line("L0002", 20.0)]
+    bang = {"id": "S0001", "kind": "sfx", "onset": 30.0, "t0": 30.0, "t1": 31.0, "phrase": "[쿵]", "short": "[쿵]",
+            "phrases": [{"text": "[쿵]", "short": "[쿵]"}], "rec": "include", "reason": "", "evidence": [], "flags": [],
+            "label": {"class": "Thump, thud", "ko": "쿵", "confident": True}, "category": "event"}
+    write_json(w / "project.json", {"title": "t", "t0": 0.0, "t1": 60.0, "fps": 24.0, "duration": 60.0})
+    write_json(w / "dialogue.json", {"mode": "scenes", "extras": [], "lines": lines})
+    write_json(w / "items.json", {"items": [speaker(ln) for ln in lines] + [bang]})
+    write_json(w / "cuts.json", {"cuts": []})
+    write_json(w / "script.json", {"version": 2, "characters": ["하늘"], "people": [],
+                                   "lines": [{"id": ln["id"], "speaker": "하늘", "text": ln["text"]} for ln in lines]})
+    p = Project(w)
+    p.set_line("L0001", include=False)
+    eff = p.effective_items()
+    assert [it["id"] for it in eff if it.get("line_excluded")] == ["P0001"]
+    s = Workspace(tmp_path / "ws").summary("w1")
+    assert s["total"] == 2 and s["counts"] == {"speaker": 1, "sfx": 1}

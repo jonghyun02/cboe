@@ -1,18 +1,22 @@
 # -*- coding: utf-8 -*-
 """CBoE command line.
 
-    python -m cboe init <work> --video V [--script S] [--start 0] [--end 290] [--title T] [--children]
+    python -m cboe init <work> --video V [--script S] [--start 0] [--end 290] [--title T]
+                               [--children | --profile adult|children]
     python -m cboe run <work> [--stages a,b] [--force a,b|all] [--no-llm] [--agent-limit N]
-                              [--llm-scope all|useful] [--asr-detect-language]
-    python -m cboe serve <work> [--port 8765]
+                              [--llm-model M] [--jobs N] [--llm-scope all|useful] [--asr-detect-language]
+    python -m cboe serve <work> [--port 8765] [--no-browser]
     python -m cboe export <work> [--format srt|vtt|ttml]
-    python -m cboe check <file.srt|.vtt|.ttml|draft.json> [--fps F] [--cuts cuts.json] [--children]
+    python -m cboe check <file.srt|.vtt|.ttml|draft.json> [--fps F] [--cuts cuts.json] [--children] [--json] [--all]
     python -m cboe doctor
+    python -m cboe gui [--workspace W] [--browser] [--port N] [--no-open]
 
 ``init --children`` marks the work folder as a children's programme (project.json "profile":
-"children", 11 characters a second instead of 14). ``check`` runs the independent guide check
-(cboe.check) on a finished file: clause by clause, obligations and recommendations apart; the exit
-code is 1 when an obligation is broken.
+"children", 11 characters a second instead of 14). ``run --stages`` / ``--force`` take the names of
+``pipeline.STAGES``; the placement is no stage of its own: it runs at the end of every run that
+has candidates and dialogue. A wrong name ends with one line, before anything is cleared.
+``check`` runs the independent guide check (cboe.check) on a finished file: clause by clause,
+obligations and recommendations apart; the exit code is 1 when an obligation is broken.
 """
 from __future__ import annotations
 
@@ -36,10 +40,14 @@ def main(argv=None):
     a.add_argument("--title")
     a.add_argument("--children", action="store_true", help="어린이 프로그램 (읽기 속도 초당 11자)")
     a.add_argument("--profile", choices=["adult", "children"], help="프로그램 종류 (적지 않으면 그대로, 처음엔 adult)")
+    from .pipeline import STAGES
     r = sub.add_parser("run")
     r.add_argument("work")
-    r.add_argument("--stages", default="")
-    r.add_argument("--force", default="")
+    r.add_argument("--stages", default="",
+                   help="돌릴 단계, 쉼표로 (적지 않으면 전부): " + ", ".join(STAGES) +
+                   ". 끼워 넣기(placement)는 실행 끝에 늘 다시 한다")
+    r.add_argument("--force", default="", help="결과를 지우고 다시 할 단계, 쉼표로 (뒤 단계도 다시): " +
+                   ", ".join(STAGES) + " 또는 all")
     r.add_argument("--no-llm", action="store_true", help="화면·대사 근거와 에이전트를 LLM 없이 규칙으로만")
     r.add_argument("--agent-limit", type=int, default=40, help="에이전트로 다시 볼 후보 수 한도")
     r.add_argument("--llm-model", default="sonnet")
@@ -92,8 +100,14 @@ def main(argv=None):
         from . import pipeline
         cfg = {"llm": not args.no_llm, "agent_limit": args.agent_limit, "llm_model": args.llm_model,
                "jobs": args.jobs, "llm_scope": args.llm_scope, "asr_detect_language": args.asr_detect_language}
-        stages = [x for x in args.stages.split(",") if x] or None
-        force = [x for x in args.force.split(",") if x]
+        stages = [x.strip() for x in args.stages.split(",") if x.strip()] or None
+        force = [x.strip() for x in args.force.split(",") if x.strip()]
+        wrong = [x for x in stages or [] if x not in STAGES] + [x for x in force if x not in STAGES and x != "all"]
+        if wrong:
+            hint = " · 끼워 넣기(placement)는 단계가 아니라 실행 끝에 늘 다시 한다" if "placement" in wrong else ""
+            print(f"cboe run: 없는 단계 {', '.join(wrong)} — 고를 수 있는 단계: {', '.join(STAGES)}"
+                  f"{' (--force 는 all 도)' if force else ''}{hint}", file=sys.stderr)
+            return 2
         rep = pipeline.run(args.work, stages, force, cfg)
         print(json.dumps(rep, ensure_ascii=False, indent=1))
     elif args.cmd == "serve":

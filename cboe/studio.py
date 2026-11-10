@@ -157,7 +157,8 @@ class Workspace:
         decided = total = 0
         if items.exists():
             try:
-                eff = p.effective_items()
+                # as the review screen counts them: not the speaker items of lines that are out
+                eff = [it for it in p.effective_items() if not it.get("line_excluded")]
                 counts = dict(collections.Counter(it["kind"] for it in eff))
                 recs = dict(collections.Counter(it["final"] for it in eff))
                 decided = sum(1 for it in eff if it.get("decided"))

@@ -251,6 +251,24 @@ def test_run_passes_the_llm_scope_and_language_detection(monkeypatch, tmp_path, 
     capsys.readouterr()
 
 
+def test_run_names_the_stages_and_refuses_a_wrong_one_in_one_line(monkeypatch, tmp_path, capsys):
+    from cboe import pipeline
+    from cboe.__main__ import main
+    seen = []
+    monkeypatch.setattr(pipeline, "run", lambda work, stages, force, cfg: seen.append((stages, force)) or {})
+    with pytest.raises(SystemExit):
+        main(["run", "--help"])
+    shown = capsys.readouterr().out
+    assert all(s in shown for s in pipeline.STAGES) and "placement" in shown
+    assert main(["run", str(tmp_path), "--stages", "placement"]) == 2 and seen == []
+    err = capsys.readouterr().err
+    assert "없는 단계 placement" in err and "실행 끝에" in err and "Traceback" not in err
+    assert main(["run", str(tmp_path), "--force", "sed,nope"]) == 2 and seen == []
+    assert main(["run", str(tmp_path), "--stages", "cues, recommend", "--force", "all"]) == 0
+    assert seen == [(["cues", "recommend"], ["all"])]
+    capsys.readouterr()
+
+
 # ------------------------------------------------------------ phrases of classes without a description
 class _Onto:
     PARENTS = {"Wind noise (microphone)": ["Microphone", "Wind"], "Microphone": ["Sound equipment"],
