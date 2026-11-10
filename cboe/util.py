@@ -113,6 +113,18 @@ def free_gpu() -> None:
         pass
 
 
+def local_first(load, *args, **kw):
+    """``load(*args, local_files_only=True, **kw)`` — a Hugging Face loader (transformers
+    ``from_pretrained``, ``huggingface_hub.snapshot_download``, faster-whisper ``WhisperModel``)
+    that opens the model already on this computer without asking huggingface.co; only when it is
+    not there (OSError: not in the cache) ``load(*args, **kw)``, which may download it."""
+    try:
+        return load(*args, local_files_only=True, **kw)
+    except OSError as exc:
+        log.info("model %s not on this computer (%s): fetching it", args[0] if args else "", type(exc).__name__)
+        return load(*args, **kw)
+
+
 @contextlib.contextmanager
 def timed(what: str):
     t = time.time()

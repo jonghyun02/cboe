@@ -25,6 +25,56 @@ def test_asr_backend_follows_device(monkeypatch):
     assert asr.load_model("xpu") == "fw"
 
 
+class _Stop(Exception):
+    pass
+
+
+def _loader(calls, name, cached=True, result=None):
+    """A fake Hugging Face loader: records its calls; without the files in the cache it raises
+    OSError when it may not download (what transformers / huggingface_hub do)."""
+    def load(*a, **k):
+        calls.append((name, a[:1], dict(k)))
+        if k.get("local_files_only") and not cached:
+            raise OSError("not in the cache")
+        if result is None:
+            raise _Stop
+        return result
+    return load
+
+
+def test_model_stages_open_the_cached_model_without_asking_huggingface(monkeypatch):
+    import sys
+    import types
+
+    import numpy as np
+
+    from cboe.stages import music
+    calls = []
+    assert util.local_first(_loader(calls, "x", result="m"), "repo/x", revision="r") == "m"
+    assert calls == [("x", ("repo/x",), {"local_files_only": True, "revision": "r"})]
+    calls.clear()
+    assert util.local_first(_loader(calls, "x", cached=False, result="m"), "repo/x") == "m"
+    assert [k for _, _, k in calls] == [{"local_files_only": True}, {}]          # not there: then it may fetch
+    # music (AST), faster-whisper and the OpenVINO Whisper: the first call asks for local files only
+    calls.clear()
+    fake_tf = types.SimpleNamespace(ASTFeatureExtractor=types.SimpleNamespace(from_pretrained=_loader(calls, "ast_fe")),
+                                    ASTForAudioClassification=types.SimpleNamespace(
+                                        from_pretrained=_loader(calls, "ast")))
+    monkeypatch.setitem(sys.modules, "transformers", fake_tf)
+    with pytest.raises(_Stop):
+        music._ast_windows(np.zeros(16000, dtype=np.float32), 16000, [0.0])
+    monkeypatch.setitem(sys.modules, "faster_whisper", types.SimpleNamespace(WhisperModel=_loader(calls, "fw")))
+    with pytest.raises(_Stop):
+        asr.FasterWhisper("cpu")
+    import huggingface_hub
+    monkeypatch.setitem(sys.modules, "openvino_genai", types.SimpleNamespace())
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", _loader(calls, "ov"))
+    with pytest.raises(_Stop):
+        asr.OVWhisper("gpu")
+    assert [(n, k.get("local_files_only")) for n, _, k in calls] == [("ast_fe", True), ("fw", True), ("ov", True)]
+    assert calls[2][2]["revision"] == asr.paths.WHISPER_OV_REVISION
+
+
 def _w(word, s, e):
     return {"word": " " + word, "start": s, "end": e, "n": asr._nchars(word)}
 

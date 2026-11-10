@@ -37,7 +37,7 @@ import numpy as np
 import soundfile as sf
 
 from .. import paths
-from ..util import device, free_gpu, gpu_lock, log, read_json, timed, write_json
+from ..util import device, free_gpu, gpu_lock, local_first, log, read_json, timed, write_json
 
 SR = 16000
 VAD = {"threshold": 0.35, "min_speech_duration_ms": 100, "min_silence_duration_ms": 300, "speech_pad_ms": 150}
@@ -167,8 +167,8 @@ class FasterWhisper:
             _cuda_dlls()
         from faster_whisper import WhisperModel
         self.name = paths.WHISPER_MODEL
-        self.model = WhisperModel(self.name, device="cuda" if cuda else "cpu",
-                                  compute_type="float16" if cuda else "int8")
+        self.model = local_first(WhisperModel, self.name, device="cuda" if cuda else "cpu",   # cached: no huggingface.co
+                                 compute_type="float16" if cuda else "int8")
 
     def words(self, audio: np.ndarray, language: str, hotwords: str | None):
         """(word, start, end, probability) with times relative to ``audio``."""
@@ -200,8 +200,8 @@ class OVWhisper:
         import openvino_genai as og
         from huggingface_hub import snapshot_download
         self.name = paths.WHISPER_OV_MODEL
-        model_dir = self.name if Path(self.name).is_dir() else snapshot_download(
-            self.name, revision=paths.WHISPER_OV_REVISION)       # the tested revision (setup.cmd fetches it)
+        model_dir = self.name if Path(self.name).is_dir() else local_first(
+            snapshot_download, self.name, revision=paths.WHISPER_OV_REVISION)   # the tested revision (setup.cmd fetches it)
         cache = Path.home() / ".cboe" / "ov_cache"         # compiled kernels: 26 s first load, 8 s after
         cache.mkdir(parents=True, exist_ok=True)
         self.pipe = og.ASRPipeline(model_dir, "CPU" if dev == "cpu" else "GPU", word_timestamps=True,

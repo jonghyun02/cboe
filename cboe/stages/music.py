@@ -31,7 +31,7 @@ import numpy as np
 import soundfile as sf
 
 from .. import paths, phrases
-from ..util import device, free_gpu, gpu_lock, log, timed, write_json
+from ..util import device, free_gpu, gpu_lock, local_first, log, timed, write_json
 from . import sed
 
 T_ON, T_OFF = 0.30, 0.15
@@ -212,9 +212,9 @@ def _segments(m: np.ndarray, fps: float) -> list[list[float]]:
 def _ast_windows(x: np.ndarray, sr: int, starts: list[float]) -> tuple[np.ndarray, list[str]]:
     import torch
     from transformers import ASTFeatureExtractor, ASTForAudioClassification
-    fe = ASTFeatureExtractor.from_pretrained(paths.AST_MODEL)
+    fe = local_first(ASTFeatureExtractor.from_pretrained, paths.AST_MODEL)   # the cached model, no huggingface.co
     dev = device()
-    model = ASTForAudioClassification.from_pretrained(paths.AST_MODEL).to(dev).eval()
+    model = local_first(ASTForAudioClassification.from_pretrained, paths.AST_MODEL).to(dev).eval()
     labels = [model.config.id2label[i] for i in range(model.config.num_labels)]
     n = int(WIN_S * sr)
     out = []
