@@ -451,7 +451,7 @@ def test_writer_decisions_and_placement_again(decided):
         (7.0, "응, 파란 대문 집이라고 했어"),                          # the period at the end is dropped (I.13)
         (10.0, "[쾅]"),
         (12.0, "[여자] 거기 누구세요? / 이 시간에 무슨 일이에요?"),        # 보람 before L0006 tells the name
-        (16.208, "[한숨 소리] 늦어서 죄송해요"),                         # her sigh at 16.2 s (frame 389) on the line
+        (16.208, "[한숨] 늦어서 죄송해요"),                              # her sigh at 16.2 s (frame 389), in the script's own words
         (30.0, "[별무리의 '여름 정거장']"),                             # the phrase the writer chose
         (32.0, "[도윤] 그해 여름 우리는 / 매일 이 다방에 모였다"),
         (37.0, "보람아, 이리 와서 같이 앉자"),
@@ -488,7 +488,8 @@ def test_writer_decisions_and_placement_again(decided):
     chk = p.export_check(comp=comp, draft=draft)
     assert (chk["check"], chk["check_speaker"]) == (["M0003"], ["P0014"])     # left at 확인 필요
     assert chk["lines"] == {"differs_open": [], "unheard": ["L0014"], "absent": ["L0010", "L0011"],
-                            "out_of_range": [], "writer_excluded": ["L0009"], "no_room": []}
+                            "out_of_range": [], "writer_excluded": ["L0009"], "no_room": [],
+                            "unsettled": [], "aside": []}       # every name label settled, no decision left aside
     assert chk["extras_open"] == [] and chk["guide"]["summary"]["must"] == 0
     # names shown that no line has told yet (II.8): 가온 · 나래 · 도윤 are never called
     assert [(e["person"], e["line"]) for e in chk["names_early"]] == [("가온", "L0008"), ("나래", "A0001"),
@@ -500,7 +501,7 @@ DIALOGUE_BACK = [   # (speaker, text, sung, language) of each dialogue line read
     (None, "여기가 정말 그 집이 맞는 거지?", False, None),
     (None, "응, 파란 대문 집이라고 했어", False, None),
     ("여자", "거기 누구세요? 이 시간에 무슨 일이에요?", False, None),
-    (None, "늦어서 죄송해요", False, None),            # '[한숨 소리]' in front is a sound, not a speaker
+    (None, "늦어서 죄송해요", False, None),            # '[한숨]' in front is a sound, not a speaker
     ("도윤", "그해 여름 우리는 매일 이 다방에 모였다", False, None),
     (None, "보람아, 이리 와서 같이 앉자", False, None),
     (None, "여름 정거장에 비가 내리면", True, None),
@@ -559,8 +560,9 @@ def test_review_server_shows_the_same_state(decided):
     assert {k: sm["lines"]["status"][k] for k in ("ok", "differs", "unheard")} == {"ok": 12, "differs": 1, "unheard": 1}
     assert sm["lines"]["included"] == 14            # 16 - 2 absent - 1 taken out + the extra made a line
     assert (sm["lines"]["added"], sm["lines"]["estimated"], sm["lines"]["text_changed"]) == (1, 2, 1)
-    assert sm["extras"] == {"open": 0, "line": 1, "ignored": 0, "total": 1}
-    assert sm["people"] == {"total": 4, "early": 3, "decided": 1}
+    assert sm["extras"] == {"open": 0, "line": 1, "ignored": 0, "total": 1,
+                            "suspect": 0, "by_suspect": {"credit": 0, "greeting": 0, "repeat": 0}}
+    assert sm["people"] == {"total": 4, "early": 3, "decided": 1, "reveal_only": 0}
     assert [c["lines"] for c in st["draft"]["cells"]] == [c["lines"] for c in draft["cells"]]
     assert st["export_check"]["check"] == ["M0003"] and st["error"] is None
     rows = by_id(st["lines"])
