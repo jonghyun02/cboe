@@ -280,6 +280,25 @@ def test_scene_in_another_language_is_placed_on_voice(tmp_path, doc):
     assert all(r["status"] == "ok" and r["start"] is not None for r in d["lines"] if r["scene_id"] == "SC005")
 
 
+def test_scene_with_one_line_heard_is_kept(tmp_path, doc):
+    """review B1: a long scene too little heard to be found (one short line heard, the rest not)
+    kept no line — the heard one became an extra. A line mostly heard keeps the scene (unknown)."""
+    us = scenes.units(doc["lines"])
+    pick = next((u, i) for u in us if len(u["grams"]) >= align.LONG_SCENE_GRAMS and u["scene_id"] not in ("SC001", "SC030")
+                for i in u["idx"] if 4 <= len(align.norm_chars(doc["lines"][i]["text"])) <= 5)
+    u, heard_i = pick
+    words, vad, truth, t_end = speak(film_of(doc))
+    quiet = [doc["lines"][i]["id"] for i in u["idx"] if i != heard_i]
+    words = [w for w in words if not any(truth[i][0] - 0.01 <= w["s"] <= truth[i][1] for i in quiet)]
+    d, sc, _ = run(tmp_path, doc, words, vad, t_end)
+    by = {ln["id"]: ln for ln in d["lines"]}
+    h = by[doc["lines"][heard_i]["id"]]
+    assert h["status"] == "ok" and abs(h["start"] - truth[h["id"]][0]) <= 0.3
+    assert all(by[i]["status"] == "unheard" and by[i]["start"] is not None for i in quiet)
+    assert next(s for s in sc if s["id"] == u["scene_id"])["status"] == "unknown"
+    assert d["extras"] == []
+
+
 def test_unheard_lines_stay_near_their_scene(tmp_path, doc):
     """review B1: scenes 9 and 10 are cut and other speech is in their place; the first two lines
     of scene 11 are not heard. With no voice scores (an ASR of the whole film only) they were
