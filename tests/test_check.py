@@ -108,7 +108,7 @@ BAD = [  # (clause, lines, code that must be reported, level) — printed as wro
     ("II.9", "[질색하는 소리] 난 아니라고 봐", "sound_ending", "should"),
     ("II.9", "[웃음소리가 메아리친다", "bracket", "must"),              # as printed: the ] is missing
     ("II.10", "[영희와 철수] 설마!", "joint_id", "should"),
-    ("II.10", "아, [음 소거 효과음]", "bleep_label", "should"),
+    ("II.10", "아, [음 소거 효과음]", "bleep_label", "must"),             # "use '****'": a prescribed form
     ("II.6", "[외국어로 말한다]", "foreign_generic", "must"),            # "should never be used"
 ]
 
@@ -176,12 +176,15 @@ def test_limits_and_their_clauses():
                    ("C3", "reading_speed"): ("II.3", "must", "초당 14자 초과"),
                    ("C4", "min_duration"): ("GR 1", "must", "5/6초 미만"),
                    ("C5", "min_duration"): ("GR 1", "must", "5/6초 미만"),
-                   ("C5", "flash"): ("GR 1", "must", "몇 프레임짜리 칸"),
                    ("C6", "max_duration"): ("GR 1", "must", "7초 초과")}
-    assert not res["ok"] and res["summary"]["must"] == 7 and res["summary"]["cells_must"] == 6
+    # a cell of a few frames breaks GR 1 once: the same violation says it is a flash
+    short = {v["cell"]: v for v in res["violations"] if v["code"] == "min_duration"}
+    assert short["C5"]["flash"] is True and short["C5"]["text"] == "4프레임 · 몇 프레임짜리 칸"
+    assert "flash" not in short["C4"] and "text" not in short["C4"]
+    assert not res["ok"] and res["summary"]["must"] == 6 and res["summary"]["cells_must"] == 6
     assert res["summary"]["by_code"]["min_duration"] == 2
     assert [r["code"] for r in res["rules"]] == ["line_length", "line_count", "reading_speed", "min_duration",
-                                                 "flash", "max_duration"]
+                                                 "max_duration"]
     assert res["rules"][3] == {"code": "min_duration", "clause": "GR 1", "level": "must", "title": "5/6초 미만",
                                "count": 2, "cells": ["C4", "C5"]}
 
@@ -265,7 +268,14 @@ def test_order_and_cells_that_cannot_be_written():
     ("- (빌) 뭐?", ["label_parens"]),
     ("(웃음)", ["label_parens"]),
     ("[빌] 뭐?", []),
-    ("뭐라고 (웃으며) 했어", []),                           # only a label in front of the line counts
+    ("뭐라고 (웃으며) 했어", ["label_parens"]),             # II.9 [ ] for sounds, anywhere in the line
+    ("[지수] 나도야! (재채기)", ["label_parens"]),
+    ("그 사람 (25) 왔어", []),                              # a number in parentheses is no label
+    ("[영어/피터] 안녕", ["language_last"]),                # II.8 "place the language label at the end"
+    ("[피터/전화/영어] 안녕", []),
+    ("[영희/혼잣말로] 가자", []),
+    ("아니…. 그래", ["dots"]),                              # a period after … inside the line
+    ("아니.… 그래", ["dots"]),
     ("♬ 슬픈 음악", ["note_glyph"]),
     ("[슬픈 음악]", []),
     ("[쿵] 뭐야]", ["bracket"]),
@@ -299,12 +309,12 @@ def test_every_violation_names_clause_level_cell_and_line():
     res = check.run([cell(["(빌) 가자.", "어서 가자..."], 10.0, 14.0, "C0007")], fps=FPS)
     assert [(v["code"], v["clause"], v["level"], v["cell"], v["index"], v.get("line")) for v in res["violations"]] == [
         ("line_end_punct", "I.13", "must", "C0007", 0, 0), ("dots", "I.4", "must", "C0007", 0, 1),
-        ("label_parens", "II.8", "must", "C0007", 0, 0)]
+        ("label_parens", "II.8·II.9", "must", "C0007", 0, 0)]
     assert res["violations"][0]["text"] == "(빌) 가자." and res["violations"][0]["start"] == 10.0
     levels = {level for _code, _clause, level, _title in check.RULES}
     assert levels == {"must", "should"}
     assert {code for code, _c, level, _t in check.RULES if level == "should"} == {
-        "short_gap_cut", "sound_ending", "joint_id", "bleep_label", "cut_in_before", "cut_in_after",
+        "short_gap_cut", "sound_ending", "joint_id", "cut_in_before", "cut_in_after",
         "cut_out_before", "cut_out_close", "cut_out_after"}
 
 
@@ -379,6 +389,90 @@ def test_vtt_without_hours_and_with_tags():
     assert [(c["id"], c["lines"]) for c in cells] == [("#1", ["첫 줄", "둘째 <줄>"]), ("#2", ["셋"])]
 
 
+def test_srt_and_vtt_markup_is_not_text_and_italics_are_reported():
+    srt = ("1\n00:00:01,000 --> 00:00:03,000\n<i>기울인 줄</i>\n\n"
+           "2\n00:00:05,000 --> 00:00:07,000\n{\\an8}<font color=\"#ffffff\">위에 뜨는 줄</font>\n\n"
+           "3\n00:00:09,000 --> 00:00:11,000\n<b>굵게</b> 쓴 줄\n")
+    cells = check.parse_subtitles(srt)
+    assert [c["lines"] for c in cells] == [["기울인 줄"], ["위에 뜨는 줄"], ["굵게 쓴 줄"]]   # tags are not counted
+    assert [c.get("italic", False) for c in cells] == [True, False, False] and cells[1]["pos"] == "top"
+    res = check.run(cells, fps=FPS)
+    assert [(v["cell"], v["code"], v["clause"], v["level"]) for v in res["violations"]] == [
+        ("#1", "italics", "I.10", "must")]                                 # I.10 "Do not use italics."
+    vtt = "WEBVTT\n\n00:01.000 --> 00:03.000\n<i>기울인 줄</i>\n\n00:05.000 --> 00:07.000\n<v 빌>보통 줄</v>\n"
+    cells = check.parse_subtitles(vtt, vtt=True)
+    assert [(c["lines"], c.get("italic", False)) for c in cells] == [(["기울인 줄"], True), (["보통 줄"], False)]
+
+
+TICKS_TTML = ('<?xml version="1.0"?><tt xmlns="http://www.w3.org/ns/ttml" '
+              'xmlns:ttp="http://www.w3.org/ns/ttml#parameter" xmlns:tts="http://www.w3.org/ns/ttml#styling" '
+              'ttp:tickRate="10000000"><head><styling><style xml:id="it" tts:fontStyle="italic"/></styling></head>'
+              '<body><div>'
+              '<p begin="10000000t" end="30000000t">하나</p>'
+              '<p begin="00:00:05.000" end="00:00:07.000"><span>가나<span>다라</span>마바</span>사아</p>'
+              '<p begin="00:00:09.000" end="00:00:11.000"><span>첫 줄<br/>둘째</span> 줄</p>'
+              '<p begin="12s" dur="1.5s">\n      띄어\n      쓴   줄\n    </p>'
+              '<p begin="15s" end="17s"><span style="it">기울인</span> 줄</p>'
+              '</div></body></tt>')
+
+
+def test_ttml_of_other_tools_is_read_in_document_order():
+    cells, meta = check.parse_ttml(TICKS_TTML)
+    assert meta["fps"] is None
+    assert [(c["start"], c["end"]) for c in cells] == [(1.0, 3.0), (5.0, 7.0), (9.0, 11.0), (12.0, 13.5),
+                                                        (15.0, 17.0)]      # ticks at ttp:tickRate, dur
+    assert [c["lines"] for c in cells] == [["하나"], ["가나다라마바사아"],      # nested spans in order
+                                           ["첫 줄", "둘째 줄"],            # a <br/> inside a span ends the line
+                                           ["띄어 쓴 줄"], ["기울인 줄"]]    # white space as TTML shows it
+    assert [c.get("italic", False) for c in cells] == [False] * 4 + [True]
+    # without ttp:tickRate a tick is a frame (TTML 1: frame rate x sub-frame rate), or one second
+    doc = ('<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttp="http://www.w3.org/ns/ttml#parameter" '
+           'ttp:frameRate="25"><body><div><p begin="50t" end="100t">가</p></div></body></tt>')
+    assert [(c["start"], c["end"]) for c in check.parse_ttml(doc)[0]] == [(2.0, 4.0)]
+    doc = '<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="2t" end="4t">가</p></div></body></tt>'
+    assert [(c["start"], c["end"]) for c in check.parse_ttml(doc)[0]] == [(2.0, 4.0)]
+    # an older DFXP namespace
+    doc = ('<tt xmlns="http://www.w3.org/2006/10/ttaf1" xmlns:ttp="http://www.w3.org/2006/10/ttaf1#parameter" '
+           'ttp:frameRate="24"><body><div><p begin="48f" end="96f">가<br/>나</p></div></body></tt>')
+    cells, meta = check.parse_ttml(doc)
+    assert meta["fps"] == 24 and [(c["start"], c["end"], c["lines"]) for c in cells] == [(2.0, 4.0, ["가", "나"])]
+
+
+def test_what_holds_no_cells_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="TTML 문서를 읽을 수 없습니다"):
+        check.parse_ttml('<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="1s" end="2s">가 & 나</p>')
+    with pytest.raises(ValueError, match="TTML 문서가 아닙니다"):
+        check.parse_ttml("<html><body/></html>")
+    for bad in ([1, 2], {"cells": {"a": 1}}, {"cells": ["가"]}, "not cells"):
+        with pytest.raises(ValueError):
+            check.load(bad if not isinstance(bad, str) else [bad])
+    (tmp_path / "n.json").write_text("5", encoding="utf-8")
+    with pytest.raises(ValueError):
+        check.load(tmp_path / "n.json")
+    # a text in place of the list of lines is one text, not one line a character
+    cells, _meta = check.load({"cells": [{"start": 1, "end": 3, "lines": "가나\n다라"}]})
+    assert check._text_lines(cells[0]) == ["가나", "다라"]
+    assert export._text_lines(cells[0]) == ["가나", "다라"]
+
+
+@pytest.mark.parametrize("name, body", [
+    ("bad.ttml", '<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="1s" end="2s">가 & 나</p></div></body></tt>'),
+    ("page.ttml", "<html><body/></html>"),
+    ("list.json", "[1, 2]"),
+    ("scalar.json", '"cells"'),
+    ("broken.json", "{"),
+])
+def test_command_line_says_2_for_what_it_cannot_read(tmp_path, capsys, name, body):
+    from cboe.__main__ import main
+    (tmp_path / name).write_text(body, encoding="utf-8")
+    assert main(["check", str(tmp_path / name)]) == 2                    # not 1: no obligation was checked
+    out, err = capsys.readouterr()
+    assert "검사할 수 없습니다" in err and "Traceback" not in err and out == ""
+    assert main(["check", str(tmp_path / name), "--json"]) == 2
+    res = json.loads(capsys.readouterr().out)
+    assert res["ok"] is False and res["error"]
+
+
 def test_cuts_file_forms(tmp_path):
     (tmp_path / "cuts.json").write_text(json.dumps({"fps": 24, "cuts": [1.5, 2.25]}), encoding="utf-8")
     (tmp_path / "list.json").write_text("[3, 4.5]", encoding="utf-8")
@@ -400,7 +494,7 @@ def test_command_line(tmp_path, capsys):
     assert main(["check", str(bad), "--fps", "24"]) == 1               # an obligation is broken
     out = capsys.readouterr().out
     assert "의무 2건 (1칸) · 권고 0건 (0칸)" in out
-    assert "[의무] I.13 줄 끝 마침표·쉼표: 1건" in out and "[의무] II.8 ( ) 로 감싼 표시 ([ ] 로): 1건" in out
+    assert "[의무] I.13 줄 끝 마침표·쉼표: 1건" in out and "[의무] II.8·II.9 ( ) 로 감싼 표시 ([ ] 로): 1건" in out
     out.encode("cp949")                                                # a Korean Windows console can print it
     assert "#3 00:00:20.000  (빌) 그래." in out
     assert main(["check", str(bad)]) == 1 and "fps 를 몰라 24로 가정" in capsys.readouterr().out
@@ -502,7 +596,9 @@ def test_placement_and_checker_agree_on_random_scenes():
                 if any(not x.startswith(("간격", "빈틈")) for x in c["check"]["violations"])}
         assert {cell for cell, c in found if c in limits} == mine, scene     # the same cells are over a limit
         marked = {c["id"] for c in d["cells"] if "flash" in c["flags"]}
-        assert {cell for cell, c in found if c == "flash"} == marked, scene  # and no short cell is unmarked
+        flashed = {v["cell"] for v in res["violations"] if v.get("flash")}
+        assert flashed == marked, scene                                      # and no short cell is unmarked
+        assert all(v["code"] == "min_duration" for v in res["violations"] if v.get("flash"))
         flash += len(marked)
     assert flash                                                             # (the scenes do produce some)
 

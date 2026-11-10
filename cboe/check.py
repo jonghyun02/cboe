@@ -14,7 +14,8 @@ whether that clause is an obligation (``must``) or a recommendation (``should``)
     {"ok": no must-level violation, "profile", "fps", "fps_assumed": no frame rate was given (24 is used),
      "cut_checks": whether shot changes were given, "cells": n,
      "violations": [{"cell", "index", "start", "code", "clause", "level": "must" | "should",
-                     "message", "line"?: index of the line, "text"?: the line, "next"?, "gap"?, "after"?}],
+                     "message", "line"?: index of the line, "text"?: the line or what was found,
+                     "next"?, "gap"?, "after"?, "flash"?: a "min_duration" cell of a few frames}],
      "rules": [{"code", "clause", "level", "title", "count", "cells": [ids]}],      # only rules that were broken
      "summary": {"cells", "must", "should", "cells_must", "cells_should", "by_code": {code: n}}}
 
@@ -22,9 +23,13 @@ Clauses (``RULES``): II.n / I.n = Korean Timed Text Style Guide, TG n = Subtitle
 GR n = General Requirements; "형식" = a cell that cannot be written at all.
 
 ``must`` = an unconditional instruction whose breach the file itself proves: the guide says must /
-never / shall, gives a number, prescribes a form ("Use …", "please use the single smart character")
-or prints the form as an (X) example. ``should`` = a preference or an allowance (try / prefer / may /
-if possible / usually), and every shot-change rule: those are weighed against each other ("Apply
+never / shall / do not, gives a number, or prescribes a form ("Use …", "please use the single smart
+character", "If an entire phrase or sentence is bleeped, use '****'"); its (X) examples are must
+too. ``should`` = a preference or an allowance (try / prefer / may / if possible / usually / be
+mindful of), even where an (X) example illustrates it: II.10 prints "[영희와 철수] 설마! (X)" under
+"Be mindful of readability ... if possible" (가능하면 가독성을 생각하라), so "joint_id" is should.
+A cell of a few frames is one breach of GR 1, reported as "min_duration" with ``"flash": True``.
+Every shot-change rule is should too: those are weighed against each other ("Apply
 good judgement as many timing decisions may feel subjective" = 타이밍 판단은 주관적일 수 있으니 잘
 판단하라) and some depend on what a file does not hold. TG 4 "When dialogue starts before a shot
 change, the in-time must be at least half a second before the shot change" (대사가 전환 전에 시작하면
@@ -60,8 +65,7 @@ RULES = (
     ("line_length", "II.2", MUST, "한 줄 {max_units:g}자 초과"),
     ("line_count", "II.4", MUST, "{max_lines}줄 초과"),
     ("reading_speed", "II.3", MUST, "초당 {cps:g}자 초과"),
-    ("min_duration", "GR 1", MUST, "{min_dur}초 미만"),
-    ("flash", "GR 1", MUST, "몇 프레임짜리 칸"),
+    ("min_duration", "GR 1", MUST, "{min_dur}초 미만"),          # "flash": True when only a few frames
     ("max_duration", "GR 1", MUST, "{max_dur:g}초 초과"),
     ("overlap", "TG 5", MUST, "겹침"),
     ("frame_gap", "TG 5", MUST, "간격 {gap_frames}프레임 미만"),
@@ -70,15 +74,17 @@ RULES = (
     ("line_end_punct", "I.13", MUST, "줄 끝 마침표·쉼표"),
     ("sentence_period", "I.13", MUST, "문장 사이 마침표 (쉼표로)"),
     ("dots", "I.4", MUST, "점 여러 개 (… 한 글자로)"),
-    ("label_parens", "II.8", MUST, "( ) 로 감싼 표시 ([ ] 로)"),
+    ("label_parens", "II.8·II.9", MUST, "( ) 로 감싼 표시 ([ ] 로)"),
     ("bracket", "II.8·II.9", MUST, "[ ] 짝이 안 맞음"),
+    ("language_last", "II.8", MUST, "언어 표시가 화자 표시 맨 뒤가 아님"),
     ("note_glyph", "II.7", MUST, "♬ 같은 지침 밖 음표 (음악은 [ ], 가사는 ♪)"),
     ("lyric_notes", "II.7", MUST, "가사 음표 꼴 (처음과 끝에 ♪, 음표 옆 빈칸)"),
     ("hyphen", "II.5", MUST, "하이픈 줄 꼴 ('- ', 두 줄 모두)"),
     ("foreign_generic", "II.6", MUST, "[외국어] 표시 (어느 말인지 적는다)"),
+    ("italics", "I.10", MUST, "기울임 글꼴 (쓰지 않는다)"),
+    ("bleep_label", "II.10", MUST, "소리 끔을 표시로 적음 (* 로)"),
     ("sound_ending", "II.9", SHOULD, "'소리'·'들린다'로 끝나는 효과음"),
     ("joint_id", "II.10", SHOULD, "'[A와 B]' 꼴 화자 표시 ([A, B] 나 [함께])"),
-    ("bleep_label", "II.10", SHOULD, "소리 끔을 표시로 적음 (* 로)"),
     ("cut_in_before", "TG 4", SHOULD, "전환 {half:g}초 안 앞에서 시작해 전환을 넘음"),
     ("cut_in_after", "TG 2", SHOULD, "전환 뒤 {half:g}초 안에 시작"),
     ("cut_out_before", "TG 2", SHOULD, "전환 {half:g}초 안 앞에서 끝남"),
@@ -94,7 +100,16 @@ _HYPHEN = re.compile(r"^-\s*")
 _LABEL = re.compile(r"\[([^\[\]]*)\]")
 _LEAD_LABELS = re.compile(r"^(?:\[[^\[\]]*\]\s*)+")
 _PAREN_LABEL = re.compile(r"^(?:-\s*)?\([^()]{1,30}\)")
-_DOTS = re.compile(r"\.{2,}")
+_PAREN = re.compile(r"\(([^()]{1,30})\)")             # '(재채기)' anywhere in a line; '(25)' is no label
+# '..', '...', '.…' and, inside a line, '….': one … (I.4); '….' at the end is a line-end period (I.13)
+_DOTS = re.compile(r"\.[.…]|…\.(?!\s*$)")
+# language names, to see where a label puts its language (II.8); a name that is not here is not seen
+_LANGUAGES = frozenset((
+    "영어 일본어 중국어 독일어 프랑스어 러시아어 스페인어 이탈리아어 포르투갈어 아랍어 베트남어 태국어 몽골어 "
+    "힌디어 인도네시아어 말레이어 터키어 튀르키예어 그리스어 라틴어 광둥어 네덜란드어 히브리어 "
+    "우크라이나어 타갈로그어 필리핀어 페르시아어 폴란드어 스웨덴어 노르웨이어 덴마크어 핀란드어 체코어 헝가리어 "
+    "루마니아어 세르비아어 크로아티아어 불가리아어 우르두어 벵골어 타밀어 캄보디아어 크메르어 라오어 미얀마어 "
+    "네팔어 스와힐리어 수어 한국어 한국말 일본말 중국말").split()) | {"표준 중국어"}
 _SENTENCE_PERIOD = re.compile(r"[^\s.…,?!\dA-Za-z．。，、][.．。]\s+[^\s\[♪]")
 _NO_SPACE_HYPHEN = re.compile(r"^-(?=[^\s\d-])")
 _JOINT = re.compile(r"^(?:-\s*)?\[[^\[\]/]*\S[와과]\s+\S[^\[\]]*\]\s*\S")
@@ -102,6 +117,9 @@ _COMMAS, _PERIODS = ",，、", ".．。"
 _OTHER_NOTES = "♬♫♩"
 _TIME = re.compile(r"(?:(\d+):)?(\d{1,2}):(\d{1,2})[,.](\d{1,3})\s*-->\s*(?:(\d+):)?(\d{1,2}):(\d{1,2})[,.](\d{1,3})")
 _VTT_TAG = re.compile(r"</?[A-Za-z][^<>]*>|<\d+:\d[\d:.]*>")
+_SRT_TAG = re.compile(r"</?(?:i|b|u|font)(?:\s[^<>]*)?>|\{\\an?\d\}", re.I)
+_ITALIC = re.compile(r"<i[\s.>]", re.I)
+_AN_TOP = re.compile(r"\{\\an?[789]\}")
 
 
 def _num(x):
@@ -119,7 +137,10 @@ def _secs(h, m, s, ms) -> float:
 
 
 def parse_subtitles(text: str, vtt: bool = False) -> list[dict]:
-    """Cells of an SRT or VTT text in file order: ``[{"id": "#n", "start", "end", "lines"}]``."""
+    """Cells of an SRT or VTT text in file order: ``[{"id": "#n", "start", "end", "lines"}]``.
+    Markup is not text: VTT tags, the SRT tags ``<i> <b> <u> <font>`` and ``{\\anN}`` are taken
+    out (``{\\an7}``-``{\\an9}`` put the cell on top). A cell that had ``<i>`` carries
+    ``"italic": True`` (I.10)."""
     cells = []
     for block in re.split(r"\n[ \t]*\n", text.replace("\r\n", "\n").replace("\r", "\n").strip()):
         rows = block.split("\n")
@@ -128,20 +149,31 @@ def parse_subtitles(text: str, vtt: bool = False) -> list[dict]:
             continue
         g = _TIME.search(rows[k]).groups()
         lines = [r for r in rows[k + 1:]]
+        slanted = any(_ITALIC.search(r) for r in lines)
+        top = any(_AN_TOP.search(r) for r in lines)
         if vtt:
             lines = [html.unescape(_VTT_TAG.sub("", r)) for r in lines]
-        cells.append({"id": f"#{len(cells) + 1}", "start": _secs(*g[:4]), "end": _secs(*g[4:]),
-                      "lines": [r.strip() for r in lines if r.strip()]})
+        else:
+            lines = [_SRT_TAG.sub("", r) for r in lines]
+        c = {"id": f"#{len(cells) + 1}", "start": _secs(*g[:4]), "end": _secs(*g[4:]),
+             "lines": [r.strip() for r in lines if r.strip()]}
+        if slanted:
+            c["italic"] = True
+        if top:
+            c["pos"] = "top"
+        cells.append(c)
     return cells
 
 
-def _ttml_time(value: str, fps: float):
+def _ttml_time(value: str, fps: float, ticks: float = 1.0):
+    """Seconds of a TTML time expression: offset time (``240f``, ``1.5s``, ``1500ms``, ``2m``,
+    ``1h``, ``10000000t`` at ``ticks`` a second) or clock time (``00:00:10.000``, ``00:00:10:05``)."""
     v = (value or "").strip()
-    m = re.fullmatch(r"(\d+(?:\.\d+)?)(f|s|ms|h|m)", v)
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)(ms|f|t|s|m|h)", v)
     if m:
         n = float(m.group(1))
-        return {"f": n / fps, "s": n, "ms": n / 1000, "m": n * 60, "h": n * 3600}[m.group(2)]
-    m = re.fullmatch(r"(\d+):(\d\d):(\d\d)(?:\.(\d+)|:(\d+))?", v)
+        return {"f": n / fps, "t": n / ticks, "s": n, "ms": n / 1000, "m": n * 60, "h": n * 3600}[m.group(2)]
+    m = re.fullmatch(r"(\d+):(\d\d):(\d\d)(?:\.(\d+)|:(\d+)(?:\.\d+)?)?", v)
     if not m:
         return None
     t = int(m.group(1)) * 3600 + int(m.group(2)) * 60 + int(m.group(3))
@@ -152,53 +184,114 @@ def _ttml_time(value: str, fps: float):
     return t
 
 
+def _ratio(value, default: float) -> float:
+    """A ``"num den"`` multiplier (``ttp:frameRateMultiplier``) as a number."""
+    parts = str(value or "").split()
+    try:
+        num, den = (float(x) for x in parts) if len(parts) == 2 else (default, 1.0)
+    except ValueError:
+        return default
+    return num / den if den else default
+
+
 def parse_ttml(text: str) -> tuple[list[dict], dict]:
-    """Cells and ``{"fps"}`` of a TTML document (the kind ``export.to_ttml`` writes)."""
+    """Cells and ``{"fps"}`` of a TTML (or DFXP) document, from this tool or another one.
+
+    Each ``<p>`` is a cell; its text is gathered in document order through nested ``<span>``s,
+    a ``<br/>`` ends a line wherever it is, and runs of white space are one space (TTML's default
+    ``xml:space``). A cell styled ``tts:fontStyle="italic"`` (on the ``<p>``, a ``<span>`` or a
+    style they name) carries ``"italic": True``. Raises ValueError for a document that is not
+    well-formed XML or whose root is not ``<tt>``."""
     import xml.etree.ElementTree as ET
-    root = ET.fromstring(text.encode("utf-8"))
-    ttp = "{http://www.w3.org/ns/ttml#parameter}"
-    tt = "{http://www.w3.org/ns/ttml}"
+    try:
+        root = ET.fromstring(text.encode("utf-8"))
+    except ET.ParseError as exc:
+        raise ValueError(f"TTML 문서를 읽을 수 없습니다 ({exc})") from None
+    ns, _sep, local = root.tag[1:].partition("}") if root.tag.startswith("{") else ("", "", root.tag)
+    if local != "tt":
+        raise ValueError(f"TTML 문서가 아닙니다 (맨 바깥 요소가 <{local}>)")
+    tt = "{" + ns + "}" if ns else ""
+    ttp = "{" + ns + "#parameter}" if ns else ""
+    tts = "{" + ns + "#styling}" if ns else ""
+    xml_id = "{http://www.w3.org/XML/1998/namespace}id"
     rate = _num(root.get(ttp + "frameRate"))
-    mult = (root.get(ttp + "frameRateMultiplier") or "1 1").split()
-    fps = rate * float(mult[0]) / float(mult[1]) if rate and len(mult) == 2 and float(mult[1]) else rate
+    fps = rate * _ratio(root.get(ttp + "frameRateMultiplier"), 1.0) if rate else None
+    sub = _num(root.get(ttp + "subFrameRate")) or 1.0
+    # TTML 1 ttp:tickRate: "If not specified, then if a frame rate is specified, the tick rate must
+    # be considered to be the effective frame rate multiplied by the effective sub-frame rate;
+    # otherwise ... one (1) tick per second" (없으면 실효 fps x 서브프레임 수, fps 도 없으면 1초에 1틱)
+    ticks = _num(root.get(ttp + "tickRate")) or (fps * sub if fps else 1.0)
+    italic_styles = {s.get(xml_id) for s in root.iter(tt + "style") if s.get(tts + "fontStyle") == "italic"}
+
+    def italic(el) -> bool:
+        return el.get(tts + "fontStyle") == "italic" or bool(set((el.get("style") or "").split()) & italic_styles)
+
+    def gather(el, lines: list[list[str]]) -> bool:
+        """Text of the children of ``el`` into ``lines`` (the last one is open); whether any is italic."""
+        slanted = False
+        for child in el:
+            name = child.tag.rpartition("}")[2]
+            if name == "br":
+                lines.append([])
+            elif (child.tag.startswith(tt) if tt else True) and name not in ("metadata", "set", "animate"):
+                slanted |= italic(child)                       # a <span>: its text, then its children
+                lines[-1].append(child.text or "")
+                slanted |= gather(child, lines)
+            lines[-1].append(child.tail or "")                 # text after the child belongs to this element
+        return slanted
+
     cells = []
+    use = fps or style.DEFAULT_FPS
     for p in root.iter(tt + "p"):
-        lines, cur = [], [p.text or ""]
-        for el in p.iter():
-            if el is p:
-                continue
-            if el.tag == tt + "br":
-                lines.append("".join(cur))
-                cur = []
-            else:
-                cur.append(el.text or "")
-            cur.append(el.tail or "")
-        lines.append("".join(cur))
-        cells.append({"id": p.get("{http://www.w3.org/XML/1998/namespace}id") or f"#{len(cells) + 1}",
-                      "start": _ttml_time(p.get("begin"), fps or style.DEFAULT_FPS),
-                      "end": _ttml_time(p.get("end"), fps or style.DEFAULT_FPS),
-                      "lines": [x.strip() for x in lines if x.strip()],
-                      "pos": "top" if p.get("region") == "top" else "bottom"})
+        lines = [[p.text or ""]]
+        slanted = gather(p, lines) | italic(p)
+        begin, end = _ttml_time(p.get("begin"), use, ticks), _ttml_time(p.get("end"), use, ticks)
+        if end is None and begin is not None and p.get("dur"):
+            d = _ttml_time(p.get("dur"), use, ticks)
+            end = None if d is None else begin + d
+        c = {"id": p.get(xml_id) or f"#{len(cells) + 1}", "start": begin, "end": end,
+             "lines": [t for t in (" ".join("".join(x).split()) for x in lines) if t],
+             "pos": "top" if p.get("region") == "top" else "bottom"}
+        if slanted:
+            c["italic"] = True
+        cells.append(c)
     return cells, {"fps": fps}
+
+
+def _cell_list(cells) -> list[dict]:
+    """``cells`` as a list of cell dicts; ValueError when it is something else (a JSON ``[1, 2]``)."""
+    if cells is None:
+        return []
+    if isinstance(cells, (str, bytes, dict)) or not hasattr(cells, "__iter__"):
+        raise ValueError("칸 목록이 아닙니다 (칸은 {start, end, lines} 의 목록)")
+    out = list(cells)
+    bad = next((k for k, c in enumerate(out) if not isinstance(c, dict)), None)
+    if bad is not None:
+        raise ValueError(f"{bad + 1}번째 칸이 칸이 아닙니다: {str(out[bad])[:40]!r}")
+    return out
 
 
 def load(source) -> tuple[list[dict], dict]:
     """``(cells, meta)`` of a list of cells, a draft dict or a file (.srt .vtt .ttml .json).
-    ``meta`` holds what the source says about itself: ``fps``, ``profile``."""
+    ``meta`` holds what the source says about itself: ``fps``, ``profile``. Raises ValueError for
+    what holds no cells: a list of other values, XML that is not TTML, a file of another type."""
     if isinstance(source, dict):
-        return list(source.get("cells") or []), {"fps": source.get("fps"), "profile": source.get("profile")}
+        return _cell_list(source.get("cells")), {"fps": source.get("fps"), "profile": source.get("profile")}
     if isinstance(source, (str, Path)):
         path = Path(source)
         ext = path.suffix.lower()
         text = path.read_text(encoding="utf-8-sig")
         if ext == ".json":
-            return load(json.loads(text))
+            data = json.loads(text)
+            if not isinstance(data, (dict, list)):
+                raise ValueError("draft.json 은 칸 목록이나 {\"cells\": [...]} 이어야 합니다")
+            return load(data)
         if ext in (".srt", ".vtt"):
             return parse_subtitles(text, vtt=ext == ".vtt"), {}
         if ext in (".ttml", ".xml", ".dfxp"):
             return parse_ttml(text)
         raise ValueError(f"검사할 수 없는 파일 형식입니다: {path.name} (srt · vtt · ttml · draft.json)")
-    return list(source or []), {}
+    return _cell_list(source), {}
 
 
 def load_cuts(source) -> list[float]:
@@ -221,7 +314,10 @@ def load_cuts(source) -> list[float]:
 # --------------------------------------------------------------------------- text rules
 
 def _text_lines(c: dict) -> list[str]:
-    return [str(x).strip() for x in (c.get("lines") or []) if str(x).strip()]
+    lines = c.get("lines") or []
+    if isinstance(lines, str):                        # one text instead of a list of lines
+        lines = lines.split("\n")
+    return [str(x).strip() for x in lines if str(x).strip()]
 
 
 def _dual(lines: list[str]) -> bool:
@@ -271,7 +367,7 @@ def _text_rules(lines: list[str]):
             yield "sentence_period", k, line
         if _DOTS.search(line):
             yield "dots", k, line
-        if _PAREN_LABEL.match(line):
+        if _PAREN_LABEL.match(line) or any(any(ch.isalpha() for ch in m.group(1)) for m in _PAREN.finditer(line)):
             yield "label_parens", k, line
         if any(ch in line for ch in _OTHER_NOTES):
             yield "note_glyph", k, line
@@ -296,6 +392,9 @@ def _text_rules(lines: list[str]):
                 yield "foreign_generic", k, f"[{label}]"
             if "음 소거" in body:
                 yield "bleep_label", k, f"[{label}]"
+            parts = [x.strip() for x in body.split(style.LABEL_SEP)]
+            if len(parts) > 1 and any(x in _LANGUAGES for x in parts[:-1]):
+                yield "language_last", k, f"[{label}]"
     if any(style.NOTE in x for x in lines):
         for k, text in (list(enumerate(lines)) if dual else [(None, "\n".join(lines))]):
             if style.NOTE in text and not _lyric_ok(text):
@@ -355,14 +454,15 @@ def run(source, fps=None, cuts=None, profile=None) -> dict:
             add("line_count", k)
         if dur <= 0 or sum(chars) * f / dur > st.cps + 1e-6:
             add("reading_speed", k)
-        if dur < min_f:
-            add("min_duration", k)
-        if dur < flash_f:
-            add("flash", k)
+        if dur < min_f:                               # one breach of GR 1, however short the cell is
+            few = dur < flash_f
+            add("min_duration", k, text=f"{dur}프레임 · 몇 프레임짜리 칸" if few else None, flash=few or None)
         if dur > max_f:
             add("max_duration", k)
         for code, n, text in _text_rules(texts[k]):
             add(code, k, line=n, text=text)
+        if c.get("italic"):
+            add("italics", k)
 
     timed = [k for k in range(len(cells)) if start[k] is not None and end[k] is not None]
     for a, b in zip(timed, timed[1:]):                # file order
@@ -478,8 +578,10 @@ def main(path, fps=None, cuts=None, profile=None, as_json: bool = False, show_al
     import sys
     try:
         res = run(path, fps=fps, cuts=cuts, profile=profile)
-    except (OSError, ValueError) as exc:
+    except (OSError, ValueError, SyntaxError, TypeError, AttributeError) as exc:    # SyntaxError: XML ParseError
         print(f"검사할 수 없습니다 · {exc}", file=sys.stderr)
+        if as_json:
+            print(json.dumps({"ok": False, "error": str(exc)}, ensure_ascii=False))
         return 2
     text = json.dumps(res, ensure_ascii=False, indent=1) if as_json else report(res, Path(path).name,
                                                                               None if show_all else 8)

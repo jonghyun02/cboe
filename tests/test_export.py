@@ -58,7 +58,7 @@ def test_write_returns_the_guide_check_with_the_drafts_frame_rate(tmp_path):
     chk = export.write(bad, tmp_path / "c.srt", "srt", fps=FPS)["check"]
     assert not chk["ok"]
     assert {(v["cell"], v["clause"], v["code"]) for v in chk["violations"]} == {
-        ("C0001", "II.8", "label_parens"), ("C0001", "I.13", "line_end_punct"), ("C0002", "II.7", "note_glyph")}
+        ("C0001", "II.8·II.9", "label_parens"), ("C0001", "I.13", "line_end_punct"), ("C0002", "II.7", "note_glyph")}
     assert (tmp_path / "c.srt").is_file()             # reported, not refused: the writer decides
     kids = export.write([cell("C0001", 1.0, 2.0, ["가나다라마바사아자차카타파"])], tmp_path / "d.srt", fps=FPS,
                         profile="children")["check"]
