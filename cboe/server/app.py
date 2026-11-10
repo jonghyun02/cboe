@@ -93,6 +93,7 @@ class LineUpdate(BaseModel):
     breaks: list[int] | None = None
     keep: bool | None = None
     show_name: bool | None = None          # only for a line without a speaker item
+    source: str | None = None              # state.SOURCES (inner, phone …) or "" for none; null: the script's
 
 
 class LinesBulk(BaseModel):
@@ -312,7 +313,7 @@ def export_warnings(chk: dict) -> list[str]:
 
 ROW_KEYS = ("id", "idx", "seq", "origin", "speaker", "name", "label_name", "text", "text_from", "status", "timing",
             "start", "end", "guess", "scene_id", "language", "source", "note", "hints", "match", "voice",
-            "speaker_item", "excluded", "extra", "breaks", "decision", "cells", "no_room")
+            "speaker_item", "excluded", "extra", "breaks", "decision", "cells", "no_room", "source_label")
 ROW_FLAGS = ("include", "estimated", "pinned", "decided", "show_name", "name_early", "generic", "sung", "keep")
 DIALOGUE_KEYS = ("id", "speaker", "text", "start", "end", "voice", "status", "timing")
 
@@ -335,9 +336,14 @@ def line_row(ln: dict) -> dict:
         if ln.get("diff"):
             row["diff"] = ln["diff"]
     if ln.get("label_name") or ln.get("language"):
-        row["label"] = style.line_labels({"name": ln.get("label_name"), "language": ln.get("language")},
-                                         show_name=True)[0].strip()
+        row["label"] = style.line_labels({"name": ln.get("label_name"), "language": ln.get("language"),
+                                          "label_extra": _source_extra(ln)}, show_name=True)[0].strip()
     return row
+
+
+def _source_extra(ln: dict) -> list[str]:
+    """The source word placement shows with the name ('[하늘/속마음]'; ``Project.placement_inputs``)."""
+    return [ln["source_label"]] if ln.get("source_label") and ln.get("label_name") else []
 
 
 def show_item(it: dict, lines: dict) -> dict:
@@ -349,6 +355,7 @@ def show_item(it: dict, lines: dict) -> dict:
         line = lines.get(sp.get("line_id")) or {}
         # the label placement writes: '[남자1]' before the name is told (cboe.people), else the name
         ln = dict(line, name=line.get("label_name") or sp.get("name"))
+        ln["label_extra"] = _source_extra(dict(ln, label_name=ln["name"]))
         head, _cont = style.line_labels(ln, show_name=True)
         bare, _ = style.line_labels(dict(ln, name=None), show_name=True)
         sp["label"] = head.strip()

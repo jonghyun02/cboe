@@ -13,8 +13,10 @@ time a choice changes, ``Project.recompute()`` merges both, runs placement
                          the older 'speaker@{line id}:{text}' is read and written anew on the next write)
     placement {item id: {action "move", t, fp}}                        배치 고치기 (as before)
     lines     {line id: {fp, ctx, at, include, text, text_from, name, language, sung,
-                         start, end, breaks, keep, show_name}}         대사 줄 결정
-                         (show_name: only a line without a speaker item, e.g. one brought back)
+                         start, end, breaks, keep, show_name, source}} 대사 줄 결정
+                         (show_name: only a line without a speaker item, e.g. one brought back;
+                          source: where the line comes from, SOURCES or "" for none — the label
+                          shows it with the name, [하늘/속마음])
     added     {"A0001": {kind "line"|"sfx"|"music", start, end, text (line) | phrase (sound),
                          name, language, sung, show_name, extra, extra_fp, at}}   작가가 넣은 것
     extras    {extra id: {fp, action "ignore", at}}                    무시하기로 한 '대본에 없는 말'
@@ -77,7 +79,9 @@ EXCLUDED_KO = {"absent": "영화에 없음", "out_of_range": "처리 구간 밖"
 ORIGIN_KO = {"script": "대본", "heard": "들린 말", "writer": "작가"}
 TEXT_FROM = ("script", "heard", "writer")
 LINE_FIELDS = ("include", "text", "text_from", "name", "language", "sung", "start", "end", "breaks", "keep",
-               "show_name")
+               "show_name", "source")
+# where a line comes from (script.json ``source``; style.SOURCE_LABELS has the label words)
+SOURCES = ("offscreen", "inner", "video", "phone", "radio", "broadcast", "narration")
 ADDED_KINDS = ("line", "sfx", "music")
 MAX_TEXT = 1000                               # letters of a line the writer writes (a long speech is ~300)
 MAX_PHRASE = 200                              # letters of a sound or note the writer writes
@@ -652,6 +656,15 @@ class Project:
                     cur[k] = _norm(v)                      # language "": spoken in Korean (no label)
                     if k == "name" and not cur[k]:
                         cur.pop(k)
+        if "source" in f:
+            v = f.pop("source")
+            if v is None:
+                cur.pop("source", None)                    # back to the script's
+            else:
+                v = _norm(v).lower()
+                if v and v not in SOURCES:
+                    raise ReviewError(f"대사의 출처는 {', '.join(SOURCES)} 가운데 하나 (빈 글: 출처 없음) 입니다")
+                cur["source"] = v
         if "start" in f or "end" in f:
             s, e = f.pop("start", cur.get("start")), f.pop("end", cur.get("end"))
             if s is None and e is None:
@@ -1080,6 +1093,8 @@ class Project:
             out["language"] = d["language"] or None
         if "sung" in d:
             out["sung"] = bool(d["sung"])
+        if "source" in d:
+            out["source"] = d["source"] or None
         out["decision"] = {k: d[k] for k in LINE_FIELDS if k in d}
         return out
 
@@ -1127,6 +1142,7 @@ class Project:
         ``decided`` ``name`` (who speaks: the person) ``label_name`` (what the label shows)
         ``name_early`` ``show_name`` ``speaker_item`` ``breaks`` ``keep`` ``decision``."""
         from . import people as people_mod
+        from . import style
         from .stages import recommend
         review = review if review is not None else self.review()
         dj = read_json(self.path("dialogue.json"), {}) or {}
@@ -1166,6 +1182,8 @@ class Project:
         lines += added_lines
         _film_order(lines)
         _scene_of_added(lines)
+        for ln in lines:                                   # '속마음', '전화' …: shown with the name (II.8)
+            ln["source_label"] = style.source_label(ln.get("source")) or None
         by_line = {ln["id"]: ln for ln in lines}
         eff = self._merge_items(review, items, by_line, lindex, item_dec) + added_items
         # in, but no cell in that placement — or in an earlier round of the same settle (draft "unplaced")
@@ -1244,6 +1262,11 @@ class Project:
             pl = dict(ln)
             pl["name"] = ln.get("label_name")
             pl["person"] = ln.get("name")
+            # II.8 [영희/속마음]: where the line comes from goes with the name, never alone (a line
+            # whose name is not shown goes on from the line before, of the same source)
+            pl.pop("label_extra", None)
+            if ln.get("show_name") and ln.get("source_label"):
+                pl["label_extra"] = [ln["source_label"]]
             if not ln["estimated"]:                         # the writer fixed the time: not a guess any more
                 if pl.get("status") in ("unheard",) + NO_TIME:
                     pl["status"] = "ok"

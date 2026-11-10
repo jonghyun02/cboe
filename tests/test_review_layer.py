@@ -983,3 +983,41 @@ def test_a_line_left_without_a_name_whose_face_was_seen_still_identifies(tmp_pat
     p.set_decision("P0001", decision="exclude")
     it = by_id(p.effective_items())["P0002"]
     assert (it["final"], it["follows"]) == ("exclude", "P0001")
+
+
+# =================================================================== 4차: 대사의 출처를 화자 표시에 (II.8)
+def test_where_a_line_comes_from_goes_with_the_name(tmp_path):
+    ls = [line("L0001", "하늘", "이건 마음속 이야기야", 10.0, 11.5, source="inner"),
+          line("L0002", "구름", "여보세요 거기 누구죠", 14.0, 15.5, source="phone", language="영어"),
+          line("L0003", "구름", "제 말 들려요", 16.0, 17.0, source="phone"),               # goes on: no name, no source
+          line("L0004", "구름", "이제 직접 말할게요", 18.0, 19.0),                          # the source changes: named again
+          line("L0005", "바다", "그 다음 이야기는 길어서 두 칸으로 나뉘어야 하는 아주 긴 줄이다 정말 길다", 30.0, 36.0,
+               source="narration", language="영어"),
+          line("L0006", "가람", "거기 서", 40.0, 41.0, scene="SC003", source="radio")]
+    items = [speaker_item(x) for x in ls]
+    items[2].update(rec="exclude", reason="같은 화자가 이어 말함 · 앞 줄에 이름 표시", follows="P0002")
+    p = make(tmp_path, lines=ls, items=items, extras=[])
+    p.set_people(["가람"], mode="generic", before="남자")
+    d = p.recompute()
+    first = {r: c["lines"] for c in d["cells"] for r in c["refs"]}
+    heads = {lid: next(c for c in d["cells"] if lid in c["refs"])["lines"][0] for lid in first}
+    assert heads["L0001"].startswith("[하늘/속마음] ") and heads["L0002"].startswith("[구름/전화/영어] ")
+    assert heads["L0003"] == "제 말 들려요" and heads["L0004"].startswith("[구름] ")
+    assert heads["L0005"].startswith("[바다/내레이션/영어] ") and heads["L0006"].startswith("[남자/무전] ")
+    later = [c["lines"][0] for c in d["cells"] if "L0005" in c["refs"]][1:]
+    assert later and all(x.startswith("[영어] ") for x in later)                 # a later piece: the language only
+    with TestClient(create_app(p.work)) as c:
+        st = c.get("/api/state").json()
+        rows = by_id(st["lines"])
+        assert (rows["L0001"]["label"], rows["L0002"]["label"], rows["L0006"]["label"]) == \
+            ("[하늘/속마음]", "[구름/전화/영어]", "[남자/무전]")
+        sp = by_id(st["items"])["P0002"]["speaker"]
+        assert (sp["label"], sp["label_tail"]) == ("[구름/전화/영어]", "/전화/영어")
+        # the writer corrects where a line comes from
+        st = c.post("/api/lines/L0001", json={"source": "video"}).json()
+        assert by_id(st["lines"])["L0001"]["label"] == "[하늘/영상]"
+        st = c.post("/api/lines/L0001", json={"source": ""}).json()               # none
+        assert by_id(st["lines"])["L0001"]["label"] == "[하늘]"
+        assert c.post("/api/lines/L0001", json={"source": "telepathy"}).status_code == 400
+        st = c.post("/api/lines/L0001", json={"source": None}).json()             # back to the script's
+        assert by_id(st["lines"])["L0001"]["label"] == "[하늘/속마음]"
