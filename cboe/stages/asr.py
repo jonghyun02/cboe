@@ -50,7 +50,8 @@ HOTWORDS_MAX = 30
 # echoes (a name and a numbered role label alternating six words long, and a two-word name
 # over a groan) and no real line was a chunk of names. Not validated beyond that; a real line
 # that is nothing but names loses its words here and gets its time from the voice activity
-# instead. A single name stays.
+# instead. A single name stays, and so does a chunk that repeats one word (a name called out
+# twice, '할머니, 할머니!': no different hint word in it).
 ECHO_MIN_WORDS, ECHO_MIN_RUN = 2, 4
 LANG_MIN_PROB = 0.5           # a detected chunk language under this is not trusted (not validated)
 
@@ -103,9 +104,11 @@ def hint_echo(words: list[str], hotwords: str | list[str] | None) -> list[bool]:
     ``hotwords`` is the hint: the list of names (a name may have several words), or the string
     given to the model (then every word is taken as a name of its own). A word counts as a hint
     word when it is a word of a name, with or without a number after it (hint '친구1', output
-    '친구2 친구3'). Marked: the whole chunk when it has at least ECHO_MIN_WORDS words and all are
-    hint words; inside a longer chunk a run of at least ECHO_MIN_RUN hint words that names two
-    or more different characters."""
+    '친구2 친구3'). Marked: the whole chunk when it has at least ECHO_MIN_WORDS words, all are
+    hint words and at least two of them differ (two names, or the words of one name of several
+    words); inside a longer chunk a run of at least ECHO_MIN_RUN hint words that names two or
+    more different characters. A chunk that only repeats one word — a call such as '엄마! 엄마!'
+    — is kept."""
     names = hotwords.split() if isinstance(hotwords, str) else list(hotwords or [])
     owner: dict[str, int] = {}
     for i, name in enumerate(names):
@@ -125,7 +128,9 @@ def hint_echo(words: list[str], hotwords: str | list[str] | None) -> list[bool]:
         while j < len(words) and wk[j] in owner:
             j += 1
         if k == 0 and j == len(words):
-            echo = j - k >= ECHO_MIN_WORDS
+            # two different hint words (two names, or the words of a name of several words); one
+            # word, however often, is someone calling out ('엄마! 엄마!')
+            echo = j - k >= ECHO_MIN_WORDS and len(set(wk[k:j])) >= 2
         else:
             echo = j - k >= ECHO_MIN_RUN and len({owner[x] for x in wk[k:j]}) >= 2
         if echo:

@@ -1083,6 +1083,18 @@ def test_hint_echo_marks_a_chunk_that_only_repeats_the_names():
     assert asr.hint_echo(["어", "박", "선생님", "박", "선생님"], "가온 박 선생님") == [False, True, True, True, True]
 
 
+def test_hint_echo_keeps_a_chunk_that_calls_one_name_again():
+    """A chunk of one word said again ('엄마! 엄마!' after a pause of its own) is someone calling
+    out, not the hint read back: kept. Two different hint words still are the hint."""
+    hint = ["가온", "엄마", "박 선생님", "할머니"]
+    assert asr.hint_echo(["엄마!", "엄마!"], hint) == [False, False]
+    assert asr.hint_echo(["할머니,", "할머니!", "할머니"], hint) == [False] * 3
+    assert asr.hint_echo(["가온", "가온!"], "가온 나래") == [False, False]
+    assert asr.hint_echo(["엄마", "가온"], hint) == [True, True]                  # two names
+    assert asr.hint_echo(["박", "선생님"], hint) == [True, True]                  # the words of one name of two words
+    assert asr.hint_echo(["박", "선생님", "박", "선생님"], hint) == [True] * 4
+
+
 class _FakeWhisper:
     """model.words() of a made-up transcript per chunk; detect_language from a table."""
     name = "fake"
