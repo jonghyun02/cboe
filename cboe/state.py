@@ -913,8 +913,9 @@ class Project:
 
     def compose(self, review: dict | None = None, draft: dict | None = None) -> dict:
         """Everything merged (module doc): ``{"items", "lines", "extras", "added", "people",
-        "scenes"}``. ``draft``: the placement result of this composition — with it, items whose
-        root went to ``no_room`` are 확인 필요 again and lines carry their cells.
+        "scenes", "unplaced"}``. ``draft``: the placement result of this composition — with it,
+        items whose root went to ``no_room`` are 확인 필요 again, lines carry their cells, and a line
+        that got no cell (``unplaced``) names nobody: the line after it is no continuation of it.
 
         A line: the dialogue.json keys plus ``idx`` (script order; None for an added line),
         ``seq`` (film order), ``origin`` script | heard | writer, ``status`` (ok when missing),
@@ -963,7 +964,8 @@ class Project:
         _scene_of_added(lines)
         by_line = {ln["id"]: ln for ln in lines}
         eff = self._merge_items(review, items, by_line) + added_items
-        _speaker_runs(lines, eff, recommend.decide_speaker)
+        unplaced = _no_room_lines(draft) & set(by_line)       # in, but no cell in that placement
+        _speaker_runs(lines, eff, recommend.decide_speaker, unplaced)
         # labels: generic before the name is told, numbers per scene (cboe.people)
         shown = [ln for ln in lines if ln["include"]]
         pdec = {k: v for k, v in (review.get("people") or {}).items() if isinstance(v, dict)}
@@ -972,7 +974,8 @@ class Project:
                 hit, _ = _pick_line(dd["reveal_fp"], dd.get("reveal_ctx"), lindex)
                 pdec[name] = dict(dd, reveal_line=hit)          # None: that line cannot be told any more
         disp = people_mod.display([{"id": ln["id"], "person": ln["name"], "scene_id": ln.get("scene_id"),
-                                    "show": ln["show_name"], "text": ln["text"]} for ln in shown], pdec)
+                                    "show": ln["show_name"] and ln["id"] not in unplaced, "text": ln["text"]}
+                                   for ln in shown], pdec)
         early_lines = {p["early"]["line"] for p in disp["people"].values() if p["early"]}
         for ln in lines:
             ln["label_name"] = disp["labels"].get(ln["id"], ln["name"]) if ln["include"] else ln["name"]
@@ -1003,7 +1006,7 @@ class Project:
                              early=info.get("early"), mode=info.get("mode"), before=info.get("before"),
                              decision=pdec.get(p["name"])))
         comp = {"items": eff, "lines": lines, "extras": ex_rows, "added": added_rows, "people": prow,
-                "scenes": scenes, "review": review}
+                "scenes": scenes, "review": review, "unplaced": sorted(unplaced)}
         return self.finish(comp, draft) if draft is not None else comp
 
     def finish(self, comp: dict, draft: dict) -> dict:
@@ -1061,17 +1064,42 @@ class Project:
                 sounds.append(s)
         return lines, sounds
 
-    def recompute(self, comp: dict | None = None) -> dict:
+    def _place(self, comp: dict) -> dict:
         from . import placement, style
+        lines, sounds = self.placement_inputs(comp=comp)
+        meta = self.meta
+        # the limits of this work folder's profile (project.json "profile": adult | children)
+        return placement.place(lines, sounds, self.cuts(), float(meta.get("fps") or 25.0),
+                               window=(meta.get("t0", 0.0), meta.get("t1")),
+                               settings=style.for_project(meta).settings())
+
+    def settle(self, comp: dict | None = None) -> tuple[dict, dict]:
+        """(composition, draft): placement of ``comp`` (default: composed now), saved as
+        ``draft.json``, and the composition finished with it. When a line gets no cell (no_room),
+        the lines after it are worked out again with that known (``compose(draft=…)``: a line
+        without a cell names nobody, so the next one of the same person shows the name) and,
+        when a label changes, placed again — at most three placements."""
         with self._lock:
-            lines, sounds = self.placement_inputs(comp=comp)
-            meta = self.meta
-            # the limits of this work folder's profile (project.json "profile": adult | children)
-            draft = placement.place(lines, sounds, self.cuts(), float(meta.get("fps") or 25.0),
-                                    window=(meta.get("t0", 0.0), meta.get("t1")),
-                                    settings=style.for_project(meta).settings())
+            review = comp["review"] if comp is not None else self.review()
+            comp = comp if comp is not None else self.compose(review)
+            for k in range(3):
+                draft = self._place(comp)
+                if _no_room_lines(draft) == set(comp.get("unplaced") or ()):
+                    comp = self.finish(comp, draft)
+                    break
+                again = self.compose(review, draft)         # finished with this draft
+                if _label_inputs(again) == _label_inputs(comp):
+                    comp = again                            # the same labels: this draft is its placement
+                    break
+                if k == 2:                                  # does not settle: keep what was placed
+                    comp = self.finish(comp, draft)
+                    break
+                comp = again
             write_json(self.path("draft.json"), draft)
-            return draft
+            return comp, draft
+
+    def recompute(self, comp: dict | None = None) -> dict:
+        return self.settle(comp)[1]
 
     def draft(self) -> dict:
         d = read_json(self.path("draft.json"))
@@ -1146,6 +1174,17 @@ class Project:
 
 
 # --------------------------------------------------------------------- what is worked out again
+def _no_room_lines(draft) -> set:
+    """Ids of the dialogue lines a placement gave no cell (``no_room`` entries of a line)."""
+    return {e["line"] for e in (draft or {}).get("no_room") or [] if isinstance(e, dict) and e.get("line")}
+
+
+def _label_inputs(comp: dict) -> list:
+    """What of a composition the speaker runs and labels decide for placement: per line that is in,
+    the label and whether the name is shown."""
+    return [(ln["id"], ln.get("label_name"), ln.get("show_name")) for ln in comp["lines"] if ln["include"]]
+
+
 def _film_order(lines: list[dict]) -> None:
     """Sort ``lines`` into film order and number them (``seq``): by start; a script line without a
     time right after the script line before it; an added line after a script line of the same start."""
@@ -1173,10 +1212,12 @@ def _scene_of_added(lines: list[dict]) -> None:
             scene = ln["scene_id"]
 
 
-def _speaker_runs(lines: list[dict], eff: list[dict], decide) -> None:
+def _speaker_runs(lines: list[dict], eff: list[dict], decide, unplaced=()) -> None:
     """``show_name`` of every line, and '같은 화자가 이어 말함' worked out again (module doc, 감사 3-07).
     ``decide`` is ``recommend.decide_speaker``. A line the writer added, or one the writer brought
-    back, has no speaker item: its name is shown unless the writer said not to (``show_name``)."""
+    back, has no speaker item: its name is shown unless the writer said not to (``show_name``).
+    ``unplaced``: lines that are in but got no cell (placement ``no_room``) — nobody was named
+    there, so the line after it does not go on from it."""
     by_id = {it["id"]: it for it in eff}
     last = None
     for ln in lines:
@@ -1217,8 +1258,10 @@ def _speaker_runs(lines: list[dict], eff: list[dict], decide) -> None:
             ln["show_name"] = it["final"] == "include" and bool(person)
             ident = bool(person) and it["final"] in ("include", "exclude")
             root = last["root"] if cont and it["final"] == "exclude" and it.get("follows") else it["id"]
+        if ln["id"] in unplaced:
+            ident, root = False, ln["id"]
         last = {"person": person, "scene": ln.get("scene_id"), "source": ln.get("source"), "ident": ident,
-                "shown": ln["show_name"], "root": root}
+                "shown": ln["show_name"] and ln["id"] not in unplaced, "root": root}
 
 
 def _followers(eff: list[dict], draft: dict | None) -> None:

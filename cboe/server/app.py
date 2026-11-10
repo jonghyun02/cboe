@@ -442,9 +442,8 @@ class ReviewService:
     def recompute(self) -> dict:
         self._comp = None
         try:
-            comp = self.project.compose()
-            self._draft = self.project.recompute(comp)
-            self._comp = self.project.finish(comp, self._draft)    # used once by the state that follows
+            # the composition the draft was placed from, used once by the state that follows
+            self._comp, self._draft = self.project.settle()
             self.error = None
         except Exception as exc:                       # placement is still evolving; keep the page usable
             log.exception("placement failed")

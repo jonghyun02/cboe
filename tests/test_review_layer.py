@@ -476,6 +476,34 @@ def test_continuing_lines_follow_the_writers_change_on_the_line_before(tmp_path)
     assert by_id(p.effective_items())["P0002"]["rec"] == "include"
 
 
+def test_a_line_that_gets_no_cell_names_nobody_for_the_line_after_it(tmp_path):
+    # L0002 (a guessed time squeezed after L0001) gets no cell: 하늘 was never named there, so
+    # 하늘's next line shows the name instead of going on from it
+    ls = [line("L0001", "바다", "어서 와", 10.0, 11.0),
+          line("L0002", "하늘", "잠깐만요 지금 바로 갈게요", 11.05, 11.25, status="unheard", timing="voice"),
+          line("L0003", "하늘", "거의 다 왔어", 11.3, 12.3)]
+    p = make(tmp_path, lines=ls, items=[speaker_item(x) for x in ls], extras=[])
+    d = p.recompute()
+    assert [e["line"] for e in d["no_room"] if e.get("line")] == ["L0002"]
+    assert [c["lines"] for c in d["cells"]] == [["[바다] 어서 와"], ["[하늘] 거의 다 왔어"]]
+    it = by_id(p.effective_items(draft=d))["P0003"]
+    assert it["final"] == "include" and "follows" not in it and not it["reason"].startswith("같은 화자가 이어 말함")
+    comp = p.compose(draft=d)
+    lines = by_id(comp["lines"])
+    assert lines["L0003"]["show_name"] and lines["L0002"]["no_room"] and comp["unplaced"] == ["L0002"]
+    assert read_json(p.path("draft.json"))["cells"] == d["cells"]
+    with TestClient(create_app(p.work)) as c:                                      # the server shows the same
+        st = c.get("/api/state").json()
+        assert [x["lines"] for x in st["draft"]["cells"]] == [["[바다] 어서 와"], ["[하늘] 거의 다 왔어"]]
+        assert next(x for x in st["items"] if x["id"] == "P0003")["final"] == "include"
+    # with room for L0002 the run is back: L0003 goes on from the name shown on L0002
+    roomy = [ls[0], dict(ls[1], start=11.5, end=12.5, words=words(ls[1]["text"], 11.5, 12.5)),
+             line("L0003", "하늘", "거의 다 왔어", 13.0, 14.0)]
+    p2 = make(tmp_path / "b", lines=roomy, items=[speaker_item(x) for x in roomy], extras=[])
+    d2 = p2.recompute()
+    assert d2["no_room"] == [] and by_id(p2.effective_items(draft=d2))["P0003"]["final"] == "exclude"
+
+
 def test_already_told_only_when_the_root_goes_out(tmp_path):
     p = make(tmp_path)
     it = by_id(p.effective_items())
