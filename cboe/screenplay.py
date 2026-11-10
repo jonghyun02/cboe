@@ -187,6 +187,7 @@ def pdf_lines(path) -> list[dict]:
     try:
         from pdfminer.pdfdocument import PDFPasswordIncorrect
         from pdfminer.pdfparser import PDFSyntaxError
+        from pdfminer.psexceptions import PSException
     except ImportError:
         raise ValueError("PDF 대본을 읽으려면 pdfminer.six 가 필요합니다 (setup.cmd 를 다시 실행하세요)") from None
     rows, heights, n_chars, n_bad = [], {}, 0, 0
@@ -198,8 +199,10 @@ def pdf_lines(path) -> list[dict]:
             rows.extend(page_rows(chars, no, height))
     except PDFPasswordIncorrect:
         raise ValueError("암호가 걸린 PDF 는 읽지 못합니다") from None
-    except PDFSyntaxError as exc:
-        raise ValueError(f"PDF 파일을 읽지 못했습니다 · {exc}") from None
+    except PDFSyntaxError:
+        raise ValueError("PDF 파일을 읽지 못했습니다 (PDF 가 아니거나 깨진 파일입니다)") from None
+    except PSException:                                  # a file cut short, a broken stream
+        raise ValueError("PDF 파일을 읽지 못했습니다 (깨졌거나 끝이 잘린 파일입니다)") from None
     if not n_chars:
         raise ValueError("글자가 없는 PDF 입니다 (종이를 찍은 PDF 는 읽지 못합니다)")
     if n_bad > 0.2 * n_chars:
@@ -896,10 +899,12 @@ VOCAL_RE = re.compile(
     r"한숨|웃음|깔깔|낄낄|킥킥|킬킬|키득|큭큭|폭소|실소|피식|울음|엉엉|흑흑|훌쩍|흐느|오열|통곡|울부짖|기침|콜록|쿨럭|켁켁|"
     r"재채기|에취|딸꾹|트림|비명|신음|끙끙|탄식|탄성|환호|하품|숨소리|숨을\s*(?:몰아|내쉬|들이|고르|헐떡)|헉헉|헐떡|가쁜\s*숨|"
     r"심호흡|콧방귀|쯧쯧|혀를\s*차|"
-    r"침을\s*삼키|꿀꺽|휘파람|코를\s*골|코골이|킁킁|"
+    r"침을\s*삼키|꿀꺽|휘파람|코를\s*골|코골이|킁킁|함성|한\s+숨|(?:거친|깊은|얕은|긴|큰)\s*숨|(?:^|\s)숨$|"
+    # sound words of the voice written as they sound (하하, 으악, 후~)
+    r"(?:^|\s)(?:하하+|허허+|흐흐+|히히+|호호+|으악|아악|으아+악?|끄응|끙|후+~+|후우+~*|휴+~*|휴우+~*)(?=$|[\s~!.…?])|"
     r"(?:^|\s)(?:웃(?:다|는|고|으|어|었|자|더)|운다|우는|울(?:다|고|며|면|어|었|자|더))")
 # a smile on the face makes no sound (씨익·빙그레: 소리 없이 웃는 모양)
-SILENT_SMILE_RE = re.compile(r"쓴\s*웃음|웃음을?\s*(?:짓|띠|머금)|미소|씨익|씩\s*웃|빙그레|빙긋|방긋|싱긋|생긋|벙긋")
+SILENT_SMILE_RE = re.compile(r"쓴\s*웃음|웃음을?\s*(?:짓|띠|머금)|웃음기|미소|씨익|씩\s*웃|빙그레|빙긋|방긋|싱긋|생긋|벙긋")
 # said while making that sound (웃으며, 웃다가 심각, 한숨 쉬며, 웃는 얼굴로): the manner of the words
 MANNER_END = re.compile(r"(?:며|면서|면서도|다가|듯|듯이|채|채로|로)$")
 VOICE_MANNER_RE = re.compile(r"(?:목소리|말투|어조|억양|톤)(?:로|으로)?$|(?:소리|투)로$")      # 웃음 섞인 목소리
@@ -914,7 +919,8 @@ DELIVERY_RE = re.compile(
     r"소리\s*지르|소리를\s*지르|소리\s*높여|목청|버럭|외치|외친|고함|절규|악을\s*쓰|호통|윽박|목소리|말투|어조|억양|"
     r"톤으로|사투리|방언|발음|혀\s*짧|더듬|울먹|떨리는|다급|급하게|빠르게|천천히|또박또박|속사포|힘겹게|힘없이|힘주어|"
     r"단호|퉁명|쏘아|비꼬|비웃|빈정|비아냥|능청|너스레|애원|읍소|타이르|달래|다그치|흉내|성대모사|랩|읊|낭독|낭송|선창|구호|"
-    r"취한|취해|잠꼬대|잠결|반말|존댓말")
+    r"취한|취해|잠꼬대|잠결|반말|존댓말|강조|(?:^|\s)(?:더\s*)?크게(?=$|\s*(?:말|외|소리|부르|읽|대답|묻))|"
+    r"(?:서울|경상도|경상|전라도|전라|충청도|충청|강원도|제주도|제주|평안도|함경도|부산|대구|광주|북한|이북|연변|표준)\s*(?:말|말투)")
 TO_RE = re.compile(r"(?:에게|한테|께|더러)$|[을를]\s*향해$")
 _TOKEN_SPLIT = re.compile(r"\s*[,，、·]\s*")
 
@@ -1042,8 +1048,13 @@ def parse_cue(cue: str) -> dict:
                 if tok:
                     apply(tok)
         core = PAREN_RE.sub(" ", raw)
-    names = [_display_name(n) for n in re.split(r"\s*[,，、·&/]\s*", core)]
-    names = [n for n in names if n and LETTER_RE.search(n)]
+    names: list[str] = []
+    for n in (_display_name(n) for n in re.split(r"\s*[,，、·&/]\s*", core)):
+        if re.fullmatch(r"\d+", n):                      # 독일군 1,2: the second is 독일군 2
+            base = re.fullmatch(r"(.*\D)\d+", names[-1]) if names else None
+            n = base.group(1) + n if base else ""
+        if n and LETTER_RE.search(n) and not re.search(r"[<>《》〈〉]", n):     # '<제목' is no name
+            names.append(n)
     out["name"] = "/".join(names) or None
     return out
 

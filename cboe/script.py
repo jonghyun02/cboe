@@ -81,6 +81,8 @@ LETTER_RE = sp.LETTER_RE
 TIME_RE = re.compile(r"(\d+):(\d+):(\d+)[,.](\d+)\s*-->\s*(\d+):(\d+):(\d+)[,.](\d+)")
 SOUND_LABEL_RE = re.compile(r"\s[-–—]\s|\s.*(?:다|소리|음|음악|효과음)$")      # [달칵 - 문], [문이 열린다]
 MANY_LINES = 30       # from this many dialogue lines a script without speakers is not started
+FEW_NAMED = 0.1       # ... nor one whose lines name a speaker this seldom
+NOT_SPEAKER_RE = re.compile(rf"\s*(?:{sp._ONSCREEN}|시간|장소|날짜|일시|배경|때|곳)\s*", re.I)    # 자막: …, 시간: …
 
 _clean = sp.clean
 _spoken = sp.spoken
@@ -181,6 +183,21 @@ def parse_lines(raw_lines: list[str]) -> list[dict]:
     return [{"speaker": ln["speaker"], "text": ln["text"]} for ln in lines_document(raw_lines)["lines"]]
 
 
+def _colon_cells(rows: list[str], ev: dict) -> list[str]:
+    """In a script whose speaker cells are set off by a tab or a gap, ``이름: 대사`` of a name
+    those cells use is a speaker cell too: the colon is read as the tab of the others (the
+    words stay as written). A colon after any other word (``자막: …``) is left alone."""
+    names = set(ev["_gap_names"]) | {sp._cue_key(m.group(1)) for r in rows for m in [sp.TAB_CUE.fullmatch(r)]
+                                     if m and sp.cue_like(m.group(1))}
+    out = []
+    for r in rows:
+        named = _split_named(r.strip()) if "\t" not in r else None
+        if named and sp._cue_key(named[0]) in names and sp.cue_like(named[0]):
+            r = f"{named[0].strip()}\t{named[1]}"
+        out.append(r)
+    return out
+
+
 def read_rows(rows: list[str]) -> dict:
     """Text lines of a script of either kind: a shooting script when its speaker cells are
     set off from the dialogue (``cboe.screenplay.plain_evidence``) on more lines than name
@@ -188,7 +205,7 @@ def read_rows(rows: list[str]) -> dict:
     ev = sp.plain_evidence(rows)
     colon = sum(1 for r in rows if _split_named(r.strip()))
     if ev["cues"] >= sp.MIN_CUES and ev["cues"] > colon:
-        doc = sp.build(sp.classify_plain(rows, ev))
+        doc = sp.build(sp.classify_plain(_colon_cells(rows, ev) if colon else rows, ev))
         doc["layout"] = max(("tab", "gap", "stacked"), key=lambda k: ev[k])
     else:
         doc = lines_document(rows)
@@ -220,8 +237,11 @@ def docx_lines(path: Path) -> list[str]:
     table rows, a row with a short first cell read as ``이름: 대사``."""
     import xml.etree.ElementTree as ET
     import zipfile
-    with zipfile.ZipFile(path) as z:
-        root = ET.fromstring(z.read("word/document.xml"))
+    try:
+        with zipfile.ZipFile(path) as z:
+            root = ET.fromstring(z.read("word/document.xml"))
+    except (zipfile.BadZipFile, KeyError, ET.ParseError, EOFError):
+        raise ValueError("Word(.docx) 파일을 읽지 못했습니다 (깨졌거나 Word 문서가 아닙니다)") from None
     out: list[str] = []
 
     def walk(parent):
@@ -266,10 +286,17 @@ LINE_KEYS = ("raw", "language", "sung", "source", "delivery", "vocal", "directio
 
 
 def _read_json(path: Path) -> dict:
-    data = json.loads(read_text(path))
+    try:
+        data = json.loads(read_text(path))
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"JSON 파일을 읽지 못했습니다 ({exc.lineno}번째 줄 {exc.colno}번째 글자)") from None
     rows = data.get("lines", []) if isinstance(data, dict) else data
+    if not isinstance(rows, list):
+        raise ValueError('JSON 대본은 [{"speaker": …, "text": …}] 꼴의 줄 목록이어야 합니다')
     b = sp.Builder("lines")
     for r in rows:
+        if not isinstance(r, dict):
+            continue
         text = _clean(r.get("text") or "")
         if not text:
             continue
@@ -488,8 +515,9 @@ def summary(doc: dict) -> dict:
     """Counts and warnings of a script document for the preview before an analysis.
 
     ``ok`` is False when starting an analysis with it would only waste the run: no dialogue,
-    many dialogue lines of a text none of which names its speaker (a shooting script pasted
-    as plain text), or "speakers" that are scene headings.
+    many dialogue lines of a text hardly any of which names its speaker (under a tenth, not
+    counting ``자막:`` or ``시간:`` lines — a shooting script pasted as plain text), or
+    "speakers" that are scene headings.
     """
     lines = doc.get("lines") or []
     elements = doc.get("elements") or []
@@ -527,8 +555,11 @@ def summary(doc: dict) -> dict:
             ln["speaker"] for ln in lines if ln.get("speaker")
             and sp.heading_candidate(f"{ln['speaker']} : {ln.get('raw') or ln.get('text') or ''}"))
         return fail(f"인물 이름 자리에 장면 머리가 읽혔습니다 (예: {eg}). 촬영 대본은 PDF 나 HWP 파일을 그대로 넣어 주세요")
-    if free and n >= MANY_LINES and not named:
-        return fail(f"대사 {n}줄에 화자가 하나도 없습니다. 촬영 대본을 글로 옮긴 파일이면 PDF 나 HWP 원본을 넣고, "
+    # '자막: 1980년 서울', '시간: 오후 3시' name nobody: a line or two like that does not make a script with speakers
+    people = sum(1 for ln in lines if ln.get("speaker") and not NOT_SPEAKER_RE.fullmatch(ln["speaker"]))
+    if free and n >= MANY_LINES and people < FEW_NAMED * n:
+        how = "하나도 없습니다" if not people else f"{people}줄에만 있습니다"
+        return fail(f"대사 {n}줄에 화자가 {how}. 촬영 대본을 글로 옮긴 파일이면 PDF 나 HWP 원본을 넣고, "
                     "아니면 줄마다 '이름: 대사'로 적어 주세요")
     if named < n:
         share = round(100 * (n - named) / n)

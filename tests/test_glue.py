@@ -160,6 +160,21 @@ def test_summary_does_not_count_the_title_page_as_unread(tmp_path):
 
 
 # ------------------------------------------------------------ the GUI file dialog
+def test_summary_stops_a_text_whose_lines_hardly_name_a_speaker(tmp_path):
+    rows = []
+    for k in range(5):
+        rows += [f"{k + 1}. 거실 / 낮", ""] + [f"아무개 이런저런 말을 {k}{j}번 한다" for j in range(8)] + [""]
+    for extra, ok in (([], False), (["자막: 어느 해 오월 바닷가"], False), (["시간: 오후 세 시"], False),
+                      (["나래: 가자."], False), ([f"나래: 가자 {j}." for j in range(6)], True)):
+        doc = script.read_rows(rows + extra)
+        doc["source"] = {"path": str(tmp_path / "s.txt")}
+        s = script.summary(doc)
+        assert s["ok"] is ok, extra
+        if not ok:
+            assert "대사" in s["error"] and "화자가" in s["error"]
+    assert "하나도 없습니다" in script.summary({**script.read_rows(rows), "source": {"path": "s.txt"}})["error"]
+
+
 def test_the_script_dialog_offers_every_kind_the_reader_reads():
     from cboe import gui
     text = gui.script_filter()

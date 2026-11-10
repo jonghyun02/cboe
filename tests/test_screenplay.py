@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import struct
 import types
 import zlib
@@ -172,6 +173,22 @@ def test_pdf_without_text_is_refused(tmp_path):
     f.write_bytes(_pdf([""]))
     with pytest.raises(ValueError, match="글자가 없는 PDF"):
         sp.pdf_lines(f)
+
+
+def test_broken_files_give_a_message_in_korean(tmp_path):
+    whole = _pdf([PDF_PAGE_1, PDF_PAGE_2])
+    cases = {"cut.pdf": whole[: len(whole) // 2], "junk.pdf": b"not a pdf at all", "empty.docx": b"",
+             "junk.docx": b"PK\x03\x04 broken", "empty.json": b"", "bad.json": b'{"lines": [', "shape.json": b'{"lines": 3}'}
+    for name, data in cases.items():
+        f = tmp_path / name
+        f.write_bytes(data)
+        with pytest.raises(ValueError) as err:
+            script.read(f)
+        assert re.search("[가-힣]", str(err.value)), name
+        assert not re.search(r"Unexpected EOF|zip file|Expecting value|Root object", str(err.value)), name
+    f = tmp_path / "mixed.json"
+    f.write_text('[{"speaker": "나래", "text": "가자."}, "아무 글", 3]', encoding="utf-8")
+    assert [ln["text"] for ln in script.read(f)["lines"]] == ["가자."]
 
 
 # ------------------------------------------------------- lines with positions
@@ -453,6 +470,17 @@ def test_classify_plain_name_line_above_the_dialogue():
     assert any("어림" in w for w in script.summary(doc)["warnings"])
 
 
+def test_a_name_colon_line_among_tab_or_gap_cells_is_dialogue():
+    for sep in ("\t", "     "):
+        rows = ["나래" + sep + "왔어?", "도윤" + sep + "응 방금.", "나래" + sep + "배고프지?", "도윤" + sep + "조금.",
+                "나래: 그럼 먹으러 가자.", "자막: 그날 저녁"]
+        doc = script.read_rows(rows)
+        assert doc["format"] == "screenplay", sep
+        assert [(ln["speaker"], ln["text"]) for ln in doc["lines"]] == [
+            ("나래", "왔어?"), ("도윤", "응 방금."), ("나래", "배고프지?"), ("도윤", "조금."), ("나래", "그럼 먹으러 가자.")], sep
+        assert doc["elements"][-1]["text"] == "자막: 그날 저녁" and doc["elements"][-1]["type"] != "dialogue"
+
+
 def test_plain_lines_that_are_no_screenplay():
     rows = ["엄마", "엄마 어디 가?", "엄마", "금방 올게.", "엄마", "기다려.", "3. 세 번째 줄", "4. 네 번째 줄"]
     ev = sp.plain_evidence(rows)                       # repeated short lines alone do not make name lines
@@ -513,6 +541,9 @@ def test_parse_cue():
     assert cue("M") == ("M", None)                               # a single letter may be a name
     assert cue("보 라") == ("보 라", None) and cue("꽃집 주인") == ("꽃집 주인", None) and cue("도윤.") == ("도윤", None)
     assert cue("나래, 도윤") == ("나래/도윤", None) and cue("나래/도윤 :") == ("나래/도윤", None)
+    # a number after a comma is the next of the same kind; a bracket of a title is no name
+    assert cue("경비병 1,2") == ("경비병 1/경비병 2", None) and cue("일꾼3, 4") == ("일꾼3/일꾼4", None)
+    assert cue("일꾼, 2") == ("일꾼", None) and cue("바닷가 , <제2화") == ("바닷가", None)
     assert cue("") == (None, None)
     c = sp.parse_cue("도윤(영)")
     assert (c["name"], c["language"], c["raw"]) == ("도윤", "영어", "도윤(영)")
@@ -543,6 +574,13 @@ def test_direction_types():
     for t in ("돌아보며", "긴장", "일어나며", "바람 불어", "노래를 끄며", "전화를 받으며", "TV를 끈다", "숨을 죽이고"):
         assert kinds[t] == ("action", None), t
     assert kinds["영어 선생에게"][0] == "to"
+    # sounds of the voice written with a space or as they sound, and how loud or in what speech
+    for t in ("한 숨", "거친 숨", "숨", "함성", "후~", "후우~", "휴~", "하하", "흐흐", "으악", "아악", "끙"):
+        assert sp.direction_type(t) == ("vocal", None), t
+    for t in ("더 크게", "크게", "강조", "강조하며", "서울말", "경상도 말투"):
+        assert sp.direction_type(t) == ("delivery", None), t
+    for t in ("웃음기", "잠시 후", "눈을 크게 뜨며", "숨는다", "휴대폰을 본다", "거짓말"):     # no sound, no manner
+        assert sp.direction_type(t) == ("action", None), t
 
 
 def test_annotate_splits_directions_from_words():
