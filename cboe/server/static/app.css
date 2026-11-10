@@ -705,6 +705,9 @@ select.input-sm { width: auto; max-width: 220px; background: #fff; }
 .tl-env .env-music path { fill: rgba(116, 72, 194, .16); }
 .tl-btn { height: 28px; }
 .tl-btn.is-on { color: var(--primary-700); background: var(--primary-50); }
+.tl-bar > * { flex: none; white-space: nowrap; }
+.tl-bar .tl-legend { flex: 0 1 auto; min-width: 0; overflow: hidden; }
+@media (max-width: 1440px) { .tl-bar .tl-legend { display: none; } }
 .tl-bar #env-toggle:not([hidden]), .tl-bar #env-toggle[hidden] + .tl-add { margin-left: auto; }
 .tl-bar .seg-zoom { margin-left: 4px; }
 .seg-frame button { padding: 0 9px; }

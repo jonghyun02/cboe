@@ -2072,15 +2072,17 @@
   }
 
   // ------------------------------------------------------ 인물 (people, 3-01)
+  // decided = the writer chose how the person is shown before the name is told (p.mode); a stored
+  // reveal line alone does not decide it
   function personIn(p, f) {
-    if (f === 'open') return num(p.lines) > 0 && !p.decision && !p.role;
+    if (f === 'open') return num(p.lines) > 0 && !p.mode && !p.role;
     if (f === 'early') return !!p.early;
-    if (f === 'decided') return !!p.decision;
+    if (f === 'decided') return !!p.mode;
     return true;
   }
   function personState(p) {
-    if (p.decision) return ['정함', 'st-inc-done'];
     if (p.early) return ['이름이 일찍 나감', 'st-noroom'];
+    if (p.mode) return [p.mode === 'generic' && p.before ? `정함 · ${bracket(p.before)}` : '정함 · 이름 그대로', 'st-inc-done'];
     if (p.role) return ['역할 이름', 'st-exc'];
     if (!num(p.lines)) return ['자막 줄 없음', 'st-exc'];
     return ['정하지 않음', 'st-check'];
@@ -2122,7 +2124,7 @@
     const shown = D.allLines.filter((l) => l.include && String(l.name || '').split(split).map((x) => x.trim()).includes(p.name));
     const told = p.told && D.lines.get(p.told.line);
     const dec = p.decision || {};
-    const mode = dec.mode || null, before = dec.before || '';
+    const mode = p.mode || null, before = p.before || dec.before || '';
     const [lab, cls] = personState(p);
     const opt = (on, attrs, label) => `<button type="button" class="mchip${on ? ' is-on' : ''}" ${attrs} aria-pressed="${on}">${label}</button>`;
     const custom = mode === 'generic' && !GENERIC.includes(before) ? before : '';
@@ -2515,7 +2517,10 @@
       case 'x-line': extraToLine(id, el); break;
       case 'x-use-time': useExtraTime(id, el.dataset.line); break;
       // 인물
-      case 'pp-mode': peopleSet(el.dataset.mode === 'generic' ? { mode: 'generic', before: el.dataset.before } : { mode: el.dataset.mode || null }); break;
+      case 'pp-mode':
+        peopleSet(el.dataset.mode === 'generic' ? { mode: 'generic', before: el.dataset.before }
+          : el.dataset.mode ? { mode: el.dataset.mode } : { mode: null, reveal: 'auto' });      // 정하지 않음: back to the default
+        break;
       case 'pp-custom': {
         const inp = el.closest('[data-box]').querySelector('[data-f="before"]');
         const v = String(inp.value || '').trim().replace(/^\[\s*|\s*\]$/g, '');
