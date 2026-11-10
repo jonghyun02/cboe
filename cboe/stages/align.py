@@ -42,16 +42,21 @@ in the video) | ``out_of_range`` (outside a partial processing window). ``absent
 A line the script marks as foreign (``language``) cannot match the Korean script text by
 letters: it is placed like any other line, never ``differs``, and is ``ok`` with ``note``
 "foreign" when it was not heard. ``asr_text`` is what the ASR heard over the line, ``diff``
-the word-level differences and ``hints`` ["spelling"] when they look like spelling only.
+the word-level differences and ``hints``: "spelling" when they look like spelling only, "name"
+when the words differ only where the script says a character's name (the line is ``ok``:
+``compare``), "language" when the language the chunks of asr.json were told to be differs from
+the script's mark (``heard_language`` '영어': ``_finish``). Hints never change the text.
 ASR words that no aligned line uses are ``extras`` (speech that is in no script line, 감사 1-04).
 The unheard lines of a found scene stay near its matched lines (``_place_scenes``).
 
 An extra shaped like the ASR model's own noise ('감사합니다' alone, a subtitle credit, one word over
 and over) with no voice under it is ``suspect`` (kept, for the screen to fold: ``noise_shape``,
-``no_voice``).
+``no_voice``). Where the stored SED scores of the mix say somebody sings (``Voice.singing``), the
+regions are ``singing`` and an extra sung there is ``sung`` (``mark_sung``).
 
 dialogue.json {"mode", "extras": [{"id", "start", "end", "text", "words", "scene_id",
-"overlaps", "short", "suspect", "suspect_by"}], "lines": [...]}; scenes.json {"scenes": [{"id", "number", "heading",
+"overlaps", "short", "suspect", "suspect_by", "sung"}], "lines": [...], "singing": [[s, e]] (only
+when there is one)}; scenes.json {"scenes": [{"id", "number", "heading",
 "start", "end" (the matched lines), "span" (every line with a time, when wider), "status",
 "score", "how", "lines", "guess", "note"}]}.
 """
@@ -65,9 +70,10 @@ from difflib import SequenceMatcher
 
 import numpy as np
 
+from .. import people
 from ..util import log, read_json, write_json
 
-KEEP = re.compile(r"[0-9A-Za-z가-힣ㄱ-ㆎ]")
+KEEP =re.compile(r"[0-9A-Za-z가-힣ㄱ-ㆎ]")
 VOICE = ("Speech", "Male speech, man speaking", "Female speech, woman speaking", "Child speech, kid speaking",
          "Conversation", "Narration, monologue", "Human voice", "Whispering", "Shout", "Yell", "Screaming",
          "Battle cry", "Children shouting", "Laughter", "Belly laugh", "Giggle", "Chuckle, chortle", "Snicker",
@@ -76,6 +82,16 @@ VOICE_ON = 0.3
 VOCAL_FX = ("Screaming", "Shout", "Yell", "Battle cry", "Children shouting", "Laughter", "Belly laugh", "Giggle",
             "Crying, sobbing", "Whimper", "Wail, moan", "Groan", "Grunt", "Gasp", "Sigh", "Human voice", "Breathing")
 VOCAL_FX_ON = 0.08
+# 노래 구간 (감사 5-03, 5-m1): the sung-voice classes of PretrainedSED (the singing rows of
+# data/sfx_classes.tsv, family 'music'; Humming is left out: no words are sung there), read on the
+# mix, where the stored scores of the one film looked at were higher than on the music track. The
+# limits follow the music segments of stages/music.py (T_ON, T_OFF, GAP_S, MIN_SEG_S); not measured
+# on singing. Speech the ASR heard that is in no script line is ``sung`` when at least SUNG_SHARE
+# of its words have their middle inside a singing region (not measured).
+SINGING = ("Singing", "Male singing", "Female singing", "Child singing", "Choir", "Synthetic singing",
+           "Rapping", "Yodeling", "Chant", "Mantra")
+SING_ON, SING_OFF, SING_GAP_S, SING_MIN_S = 0.30, 0.15, 2.5, 2.0
+SUNG_SHARE = 0.5
 # syllables of Korean vocalisations (비명·신음·웃음·감탄): a line made of these is a vocalisation
 VOCAL_SYL = set("아악앗어억엇으윽읏흐흑흡흣허헉헐하학핫히힉흥흠음읍오옥우욱와왁에엑이익꺄캬꺅끄끅끙크큭킥후휴휘쿨컥켁푸풉퓨헤해웩퉤쯧칫챠힝앙엉응")
 SEC_PER_CHAR = 0.13
@@ -112,7 +128,11 @@ KEEP_MATCH, KEEP_LETTERS = 0.5, 3
 SCENE_SEC_PER_CHAR, SCENE_SLACK = 0.6, 4.0
 FOREIGN_STRETCH = 3.0  # foreign lines not heard may take up to this many times their letters' time
 MINOR_CHARS = 2       # letters that may differ in a stretch before it counts as a different word
-EXTRA_GAP = 0.8       # s of silence that ends a group of ASR words that are in no script line
+# a stretch that differs only where the script says a character's name (``compare``, 감사 1-01): the
+# ASR may write up to this many letters more there than the script has (a name heard as a longer
+# string of letters); more than that is taken for other words said. Not measured.
+NAME_MORE_LETTERS = 2
+EXTRA_GAP = 0.8      # s of silence that ends a group of ASR words that are in no script line
 # groups made only of these (and vocalisations) are not kept as speech that is in no script line
 INTERJECTIONS = {"네", "예", "응", "야", "얘", "어머", "어머나", "아이고", "에이", "참", "뭐", "자", "음", "흠", "헐", "엥"}
 EXTRA_SHORT = 2       # a group of this many letters or fewer is marked "short" (a word fragment, mostly)
@@ -252,6 +272,9 @@ class Voice:
             s.update(t0=t0, v=probs[:, [names.index(c) for c in VOICE if c in names]].max(axis=1))
             if "Music" in names:
                 s["music"] = probs[:, names.index("Music")].copy()
+            sung = [names.index(c) for c in SINGING if c in names]
+            if sung:
+                s["sing"] = probs[:, sung].max(axis=1)
             fx, _, _ = sed_load(self.p, "effects")
             vfx = np.maximum(fx[:, [names.index(c) for c in VOCAL_FX]].max(axis=1),
                              probs[:, [names.index(c) for c in VOCAL_FX]].max(axis=1))
@@ -295,6 +318,24 @@ class Voice:
             if y > a and x < b:
                 regs.append([max(x, a), min(y, b), 0.5, "speech"])
         return merge_regions(regs)
+
+    def singing(self) -> list[tuple[float, float]]:
+        """Where somebody sings (감사 5-03, 5-m1): runs of frames whose SED score of a sung-voice
+        class (SINGING) on the mix stays at SING_OFF or more and reaches SING_ON, joined over gaps
+        shorter than SING_GAP_S, at least SING_MIN_S long. [] without the mix's score file."""
+        s, fps = self._load(), self.FPS
+        if "sing" not in s:
+            return []
+        t0, v = s["t0"], s["sing"]
+        runs = [(x, y) for x, y in _runs(v >= SING_OFF) if float(v[x:y].max()) >= SING_ON]
+        joined: list[list[float]] = []
+        for x, y in runs:
+            a, b = t0 + x / fps, t0 + y / fps
+            if joined and a - joined[-1][1] < SING_GAP_S:
+                joined[-1][1] = b
+            else:
+                joined.append([a, b])
+        return [(round(a, 3), round(b, 3)) for a, b in joined if b - a >= SING_MIN_S]
 
     def scores(self, a: float, b: float) -> dict:
         """Mean scores over (a, b): "speech" (SED voice classes of the mix), "music" (SED Music
@@ -933,6 +974,44 @@ def _spelling_like(a: str, b: str) -> bool:
     return True
 
 
+def _name_keys(names) -> list[tuple[str, int]]:
+    """(letters, words) of the characters' names the ASR may mishear: every person of a speaker
+    name ('가람/나래'), without the role names (``people.is_role``: '경비2', '남자' — a common
+    word the ASR hears as well as any other)."""
+    out: list[tuple[str, int]] = []
+    for n in names or ():
+        for one in people.parts(n):
+            k = "".join(norm_chars(one))
+            if k and not people.is_role(one) and (k, len(one.split())) not in out:
+                out.append((k, len(one.split())))
+    return out
+
+
+def _name_spans(sw: list[str], s_o: list[int], nkeys: list[tuple[str, int]]) -> tuple[dict[int, str], set[int]]:
+    """Where a script line says a character's name: {word index: name letters} for the words of
+    each name said as a word (as it is, with an honorific, a vocative or a particle — the sure
+    forms of ``people.mentions``; a name of two words written with or without its space), and
+    the indices of the name's own letters in the line's letters (not those of the particle)."""
+    first: dict[int, int] = {}
+    for k, i in enumerate(s_o):
+        first.setdefault(i, k)
+    at: dict[int, str] = {}
+    stem: set[int] = set()
+    for i in range(len(sw)):
+        if i not in first or i in at:
+            continue
+        for key, nw in nkeys:
+            for m in range(1, nw + 1):
+                said = "".join(norm_chars(" ".join(sw[i:i + m])))
+                if key in said and people._called(key, False).fullmatch(said):
+                    at.update({w: key for w in range(i, min(i + m, len(sw)))})
+                    stem.update(range(first[i], first[i] + len(key)))
+                    break
+            if i in at:
+                break
+    return at, stem
+
+
 def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str]]:
     """Word-level differences between a script line and the ASR words heard over it.
 
@@ -945,8 +1024,18 @@ def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str
     both sides and differ by one jamo per syllable (에요/예요, 쨰/째) and that holds none of
     ``names`` (the ASR mishears names that way): the line gets the hint "spelling" (감사
     1-m3; a hint only, the script text is kept). ``"number"``: the differing letters have
-    digits (3층 / 삼 층; not compared). Returns (diff, hints)."""
+    digits (3층 / 삼 층; not compared).
+
+    ``"name": true`` on a word stretch whose letters differ only inside words where the script
+    says a character's name (``names`` without the role names; the name as it is or with an
+    honorific, a vocative or a particle), touching the name itself (a particle said otherwise is
+    a word said otherwise), where something was heard instead (a name not heard at all may not
+    have been said) that is not another character's name and not more than NAME_MORE_LETTERS
+    letters longer: the ASR mishears names it does not know (감사 1-01, 8-m2). When every word
+    stretch is so, the line gets the hint "name" and does not differ (``_finish``; a hint only —
+    the script text is kept, what was heard stays in ``asr_text``). Returns (diff, hints)."""
     keys = [k for k in ("".join(norm_chars(str(n))) for n in names or ()) if len(k) >= 2]
+    nkeys = _name_keys(names)
     sw = text.split()
     s_c, s_o, h_c, h_o = [], [], [], []
     for i, w in enumerate(sw):
@@ -968,20 +1057,36 @@ def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str
                 s2h[i1 + d], h2s[j1 + d] = j1 + d, i1 + d
             continue
         sws, hws = set(s_o[i1:i2]), set(h_o[j1:j2])
+        touched = set(range(i1, i2))           # the script letters of the stretch
         if not sws and 0 < i1 < len(s_c) and s_o[i1 - 1] == s_o[i1]:
             sws = {s_o[i1]}                    # letters missing inside a word
+            touched = {i1 - 1, i1}
         if not hws and 0 < j1 < len(h_c) and h_o[j1 - 1] == h_o[j1]:
             hws = {h_o[j1]}
-        c = {"s": sws, "h": hws, "n": max(i2 - i1, j2 - j1),
+        c = {"s": sws, "h": hws, "n": max(i2 - i1, j2 - j1), "t": touched,
              "sub": [("".join(s_c[i1:i2]), "".join(h_c[j1:j2]))]}
         if chunks and (c["s"] & chunks[-1]["s"] or c["h"] & chunks[-1]["h"]):
             last = chunks[-1]
             last["s"] |= sws
             last["h"] |= hws
             last["n"] += c["n"]
+            last["t"] |= touched
             last["sub"] += c["sub"]
         else:
             chunks.append(c)
+    name_at, stem = _name_spans(sw, s_o, nkeys) if nkeys else ({}, set())
+
+    def name_only(c: dict) -> bool:
+        """The stretch differs only where the script says a name, and on the name (see above)."""
+        if not c["s"] or not c["s"] <= set(name_at) or not c["t"] & stem:
+            return False
+        got = sum(len(b) for _, b in c["sub"])
+        if not got or got > sum(len(a) for a, _ in c["sub"]) + NAME_MORE_LETTERS:
+            return False
+        said = {name_at[i] for i in c["s"]}
+        return not any(key not in said and key in hw and people._called(key, False).fullmatch(hw)
+                       for hw in ("".join(norm_chars(heard[j])) for j in c["h"]) for key, _ in nkeys)
+
     def widen(ss: set, hs: set) -> tuple[set, set]:
         """Whole words on both sides: the script words whose letters the heard words of the
         stretch also hold, and back, until nothing is added (review B1: '같아.' shown against
@@ -1016,14 +1121,23 @@ def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str
             if all(_spelling_like(a, b) for a, b in c["sub"]) and len(s_key) == len(h_key) and \
                     not any(k in s_key or k in h_key for k in keys):
                 row["spelling"] = True
+        elif name_only(c):                     # a different word, where the script says a name
+            row["name"] = True
         # the kind is judged on the stretch itself; what is shown is widened to whole words
         ss, hs = widen(set(c["s"]), set(c["h"]))
         if out and (ss & out[-1]["_s"] or hs & out[-1]["_h"]):       # widened into the stretch before
             last = out[-1]
             rank = {"word": 0, "number": 1, "minor": 2}
+            # a name stretch stays one when what it is shown with is no other word
+            named = all(r["kind"] != "word" or r.get("name") for r in (last, row)) and \
+                any(r.get("name") for r in (last, row))
             last["kind"] = min(last["kind"], row["kind"], key=rank.get)
             if not (last.get("spelling") and row.get("spelling")):
                 last.pop("spelling", None)
+            if named and last["kind"] == "word":
+                last["name"] = True
+            else:
+                last.pop("name", None)
             last["_s"] |= ss
             last["_h"] |= hs
             continue
@@ -1035,6 +1149,9 @@ def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str
                    at=[min(ss), max(ss) + 1] if ss else None)
         if row.get("spelling") and "spelling" not in hints:
             hints.append("spelling")
+    words = [r for r in out if r["kind"] == "word"]
+    if words and all(r.get("name") for r in words):
+        hints.append("name")
     return out, hints
 
 
@@ -1060,9 +1177,46 @@ def _edge_out(out: list[dict], t_lo: float, t_hi: float, head_cut: bool, tail_cu
     return n
 
 
-def _finish(out: list[dict], words: list[dict], heard_g: dict, names=()) -> list[dict]:
-    """Statuses and what was heard over each line (``asr_text``, ``diff``, ``hints``)."""
+def _word_languages(words: list[dict], chunks) -> list[str | None]:
+    """Per ASR word: the language its asr.json chunk was told to be (``asr.trusted_language``), or
+    None (no chunk, or a chunk whose language was not told from the audio)."""
+    from .asr import CLIP_PAD_S, trusted_language
+    spans = sorted((float(c["start"]), float(c["end"]), trusted_language(c)) for c in chunks or ()
+                   if c.get("start") is not None and c.get("end") is not None)
+    starts = [a for a, _, _ in spans]
+    out: list[str | None] = []
+    for w in words:
+        m = (float(w["s"]) + float(w["e"])) / 2
+        j = bisect.bisect_right(starts, m + CLIP_PAD_S)
+        best = None
+        for a, b, lang in spans[max(0, j - 4):j]:          # the chunk that holds the middle, else the nearest
+            d = 0.0 if a <= m <= b else min(abs(m - a), abs(m - b))
+            if d <= CLIP_PAD_S and (best is None or d < best[0]):
+                best = (d, lang)
+        out.append(best[1] if best else None)
+    return out
+
+
+def heard_language(langs: list[str | None]) -> str | None:
+    """The language most of a line's words were heard in (``_word_languages`` of its words): the
+    one told for more than half of those whose language was told; None otherwise."""
+    told = [x for x in langs if x]
+    if not told:
+        return None
+    best = max(set(told), key=told.count)
+    return best if 2 * told.count(best) > len(told) else None
+
+
+def _finish(out: list[dict], words: list[dict], heard_g: dict, names=(), chunks=None) -> list[dict]:
+    """Statuses and what was heard over each line (``asr_text``, ``diff``, ``hints``).
+
+    With asr.json ``chunks`` whose language was told from the audio (``asr_detect_language``,
+    감사 5-02, 8-06): a line heard in another language than the script marks (``language``), or
+    one without a mark heard in a language other than Korean, gets the hint "language" and
+    ``heard_language`` (its Korean name, '영어'). The text and the status stay."""
+    from .asr import language_name, same_language
     names = set(names or ()) | {ln.get("speaker") for ln in out if ln.get("speaker")}
+    w_lang = _word_languages(words, chunks) if chunks else [None] * len(words)
     for r in out:
         for k, v in LINE_DEFAULTS.items():
             r.setdefault(k, list(v) if isinstance(v, list) else v)
@@ -1105,19 +1259,25 @@ def _finish(out: list[dict], words: list[dict], heard_g: dict, names=()) -> list
         r["asr_text"] = " ".join(str(words[k]["w"]).strip() for k in ks)
         r.pop("diff", None)
         r.pop("hints", None)
+        r.pop("heard_language", None)
+        hints: list[str] = []
         if r.get("language"):                  # 외국어 줄: the script text is a translation
             r["note"] = "foreign"
             if r["status"] in (UNHEARD, DIFFERS):
                 r["status"] = OK
-            continue
-        if (r.get("aligned") and r.get("timing") == "asr") or (r.get("timing") == "script" and i in heard_g):
+        elif (r.get("aligned") and r.get("timing") == "asr") or (r.get("timing") == "script" and i in heard_g):
             diff, hints = compare(str(r.get("text") or ""), [str(words[k]["w"]) for k in ks], names)
             if diff:
                 r["diff"] = diff
-            if hints:
-                r["hints"] = hints
-            if any(d["kind"] == "word" for d in diff):
+            if any(d["kind"] == "word" and not d.get("name") for d in diff):
                 r["status"] = DIFFERS
+        code = heard_language([w_lang[k] for k in ks])
+        if code and ((r.get("language") and not same_language(code, r["language"])) or
+                     (not r.get("language") and code != "ko")):
+            hints = hints + ["language"]
+            r["heard_language"] = language_name(code)
+        if hints:
+            r["hints"] = hints
     return out
 
 
@@ -1249,6 +1409,19 @@ def _extras(out: list[dict], words: list[dict], heard_g: dict, hotwords, gaps=()
     return extras
 
 
+def mark_sung(extras: list[dict], singing) -> int:
+    """``sung: true`` on the speech in no script line (``_extras``) sung inside a singing region
+    (``Voice.singing``): at least SUNG_SHARE of its words have their middle there. Returns how many."""
+    n = 0
+    for x in extras:
+        ws = x.get("words") or [{"s": x["start"], "e": x["end"]}]
+        inside = sum(any(a <= (float(w["s"]) + float(w["e"])) / 2 <= b for a, b in singing) for w in ws)
+        if singing and inside >= SUNG_SHARE * len(ws):
+            x["sung"] = True
+            n += 1
+    return n
+
+
 def run(p, cfg: dict) -> dict:
     if p.path("dialogue.json").exists():
         return {"skipped": True}
@@ -1285,9 +1458,14 @@ def run(p, cfg: dict) -> dict:
             seq = [r for r in lines if r.get("status") not in NO_TIME]
             _place_unaligned(voice, seq, t_lo, t_hi)
             mode = "aligned"
-        _finish(lines, words, heard_g, script.get("characters"))
+        _finish(lines, words, heard_g, script.get("characters"), asr.get("chunks"))
         extras = _extras(lines, words, heard_g, hotwords, gaps, voice)
-    write_json(p.path("dialogue.json"), {"mode": mode, "extras": extras, "lines": lines})
+    singing = voice.singing()
+    sung = mark_sung(extras, singing)
+    out = {"mode": mode, "extras": extras, "lines": lines}
+    if singing:
+        out["singing"] = [[a, b] for a, b in singing]
+    write_json(p.path("dialogue.json"), out)
     rows = _scene_rows(script, lines, info) if script and script.get("lines") else []
     write_json(p.path("scenes.json"), {"scenes": rows})
     timing, status, sc = {}, {}, {}
@@ -1296,7 +1474,7 @@ def run(p, cfg: dict) -> dict:
         status[ln.get("status")] = status.get(ln.get("status"), 0) + 1
     for r in rows:
         sc[r["status"]] = sc.get(r["status"], 0) + 1
-    log.info("align (%s): %d lines, timing %s, status %s, scenes %s, extras %d (%.1f s)", mode, len(lines),
-             timing, status, sc, len(extras), time.time() - t_start)
+    log.info("align (%s): %d lines, timing %s, status %s, scenes %s, extras %d (sung %d, singing regions %d) "
+             "(%.1f s)", mode, len(lines), timing, status, sc, len(extras), sung, len(singing), time.time() - t_start)
     return {"mode": mode, "lines": len(lines), "timing": timing, "status": status, "scenes": sc,
-            "extras": len(extras)}
+            "extras": len(extras), "singing": len(singing), "sung": sung}

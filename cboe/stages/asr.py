@@ -21,7 +21,8 @@ Language: one language for the whole run, as before. ``cfg["asr_detect_language"
 by default) asks the model for the language of each chunk first, where the backend can
 (faster-whisper; not the OpenVINO pipeline), and transcribes the chunk in it. Either way
 ``chunks`` records the language used for every chunk, for the lines the script marks as
-foreign (넷플릭스 II.6).
+foreign (넷플릭스 II.6): the align stage compares the language a line's chunks were told to be
+(``trusted_language``) with the script's mark and names it in Korean (``LANG_KO``).
 
 Output asr.json {"language", "words": [{"w","s","e","p"}], "vad": [[s, e]],
 "chunks": [{"start","end","language","detected","words"}], "hint_echo": [words],
@@ -54,6 +55,22 @@ HOTWORDS_MAX = 30
 # twice, '할머니, 할머니!': no different hint word in it).
 ECHO_MIN_WORDS, ECHO_MIN_RUN = 2, 4
 LANG_MIN_PROB = 0.5           # a detected chunk language under this is not trusted (not validated)
+CLIP_PAD_S = 0.1              # each chunk is transcribed with this much audio on both sides
+# Whisper's language codes -> the Korean names of the language tables already in use
+# (screenplay.LANG_NAMES, check._LANGUAGES), for what the align stage tells the writer
+LANG_KO = {
+    "ko": "한국어", "en": "영어", "ja": "일본어", "zh": "중국어", "yue": "광둥어", "de": "독일어", "fr": "프랑스어",
+    "ru": "러시아어", "es": "스페인어", "it": "이탈리아어", "pt": "포르투갈어", "ar": "아랍어", "vi": "베트남어",
+    "th": "태국어", "mn": "몽골어", "hi": "힌디어", "id": "인도네시아어", "ms": "말레이어", "tr": "튀르키예어",
+    "el": "그리스어", "la": "라틴어", "nl": "네덜란드어", "he": "히브리어", "uk": "우크라이나어", "tl": "타갈로그어",
+    "fa": "페르시아어", "pl": "폴란드어", "sv": "스웨덴어", "no": "노르웨이어", "nn": "노르웨이어", "da": "덴마크어",
+    "fi": "핀란드어", "cs": "체코어", "hu": "헝가리어", "ro": "루마니아어", "sr": "세르비아어", "hr": "크로아티아어",
+    "bg": "불가리아어", "ur": "우르두어", "bn": "벵골어", "ta": "타밀어", "km": "크메르어", "lo": "라오어",
+    "my": "미얀마어", "ne": "네팔어", "sw": "스와힐리어",
+}
+# the other names a script may give the language of such a code (the same language to the writer)
+LANG_SAME = {"tr": {"터키어"}, "km": {"캄보디아어"}, "tl": {"필리핀어"}, "zh": {"광둥어", "표준 중국어"},
+             "yue": {"중국어"}}
 
 
 def _cuda_dlls() -> None:
@@ -64,6 +81,28 @@ def _cuda_dlls() -> None:
         os.environ["PATH"] = str(lib) + os.pathsep + os.environ.get("PATH", "")
     if hasattr(os, "add_dll_directory"):
         os.add_dll_directory(str(lib))
+
+
+def language_name(code: str | None) -> str | None:
+    """The Korean name of a Whisper language code ('en' -> '영어'); the code itself when the table
+    has no name for it, None for none."""
+    code = str(code or "").strip().lower()
+    return LANG_KO.get(code, code) if code else None
+
+
+def same_language(code: str | None, name: str | None) -> bool:
+    """Whether the language ``code`` heard is the language a script names ``name`` ('영어')."""
+    return bool(code) and bool(name) and (language_name(code) == name or name in LANG_SAME.get(str(code).lower(), ()))
+
+
+def trusted_language(chunk: dict) -> str | None:
+    """The language of an asr.json chunk when it was told from the audio (``detected``, with a
+    probability of LANG_MIN_PROB or more when one was given); None otherwise — a chunk
+    transcribed in the language of the run without asking tells nothing."""
+    if not chunk.get("detected") or not chunk.get("language"):
+        return None
+    prob = chunk.get("prob")
+    return str(chunk["language"]).lower() if prob is None or float(prob) >= LANG_MIN_PROB else None
 
 
 def script_language(script: dict | None) -> str | None:
@@ -301,7 +340,7 @@ def transcribe_chunks(audio: np.ndarray, groups: list[tuple[int, int]], model, l
     words, echo, rows = [], [], []
     for gi, (a, b) in enumerate(groups):
         progress("asr", gi, len(groups))
-        pad_a, pad_b = max(0, a - int(0.1 * SR)), min(len(audio), b + int(0.1 * SR))
+        pad_a, pad_b = max(0, a - int(CLIP_PAD_S * SR)), min(len(audio), b + int(CLIP_PAD_S * SR))
         off = t0 + pad_a / SR
         clip = audio[pad_a:pad_b]
         lang, prob, found = base, None, False
