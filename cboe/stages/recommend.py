@@ -364,6 +364,13 @@ def _script_opts(cue: dict) -> list[dict]:
             if t and t != "[소리]"]
 
 
+def _sound_ending(phrase) -> bool:
+    """A caption the guide check marks (II.9, should: cboe.check 'sound_ending'): '[… 소리]',
+    '[… 들린다]' — not '목소리', not a speaker label."""
+    body = str(phrase or "").strip().strip("[]").strip()
+    return body.endswith(("소리", "들린다")) and not body.endswith("목소리") and "/" not in body
+
+
 def _merge_opts(first: list[dict], rest: list[dict]) -> list[dict]:
     seen, out = set(), []
     for o in first + rest:
@@ -415,6 +422,13 @@ def attach_sound(c: dict, cue: dict) -> None:
         c["named_by"] = "script"
     elif opts:
         c["phrases"] = _merge_opts(c.get("phrases") or [], opts)
+        # II.9 asks not to end a sound in '소리': the script's own word for the same kind of sound
+        # ('[한숨]' for the detector's '[한숨 소리]') goes first; the detector's stays a choice
+        fit = next((o for o in opts if not _sound_ending(o["text"])), None)
+        if fit and _sound_ending(c.get("phrase")) and not c.get("cue_far") and \
+                cue_mod.compatible(cue, c) == "kind" and not cue.get("vague"):
+            c["phrases"] = _merge_opts([fit], c["phrases"])
+            c["phrase"], c["short"] = fit["text"], fit["short"]
     if cue["type"] == "vocal" and cue.get("line_id"):
         c["source_line"] = cue["line_id"]           # the script says whose sound it is
 

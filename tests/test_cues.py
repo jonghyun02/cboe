@@ -659,6 +659,18 @@ def test_a_sound_far_from_the_cues_scene_is_no_reason(tmp_path):
     assert it["rec"] == "check" and "대본 단서의 장면에서 먼 소리" in it["reason"]
 
 
+def test_the_scripts_word_for_the_same_sound_goes_first_when_the_detectors_ends_in_sori(tmp_path):
+    """'(한숨)' on a line and a sigh detected there: '[한숨]' first, not '[한숨 소리]' (II.9, should);
+    the detector's caption stays a choice. A caption that keeps II.9 ('[천둥]') stays first."""
+    sigh = _sound("S0001", 20.5, "Sigh", "한숨 소리", category="vocal")
+    _, items = _rec(tmp_path, [sigh], {"S0001": UNSEEN})
+    it = next(x for x in items if x["id"] == "S0001")
+    assert it["cue_id"] == "C0003" and it["phrase"] == "[한숨]" and it["short"] == "[한숨]"
+    assert [o["text"] for o in it["phrases"]][:2] == ["[한숨]", "[한숨 소리]"]
+    _, items = _rec(tmp_path, [_sound("S0001", 7.0)], {"S0001": UNSEEN})
+    assert next(x for x in items if x["id"] == "S0001")["phrase"] == "[천둥]"
+
+
 def test_a_visible_source_is_still_excluded_first(tmp_path):
     seen = {"S0001": {**UNSEEN, "visible": "보임", "observation": "창밖 번개가 보임"}}
     _, items = _rec(tmp_path, [_sound("S0001", 7.0)], seen)
