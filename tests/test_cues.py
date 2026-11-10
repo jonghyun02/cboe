@@ -520,6 +520,22 @@ def test_scenes_without_dialogue_in_a_row_at_the_head_and_tail_share_the_edge_of
     assert all(cues.scene_at(c["guess"], starts) == c["scene_id"] for c in got)
     # the stretch unknown: the head has no time, the tail cannot be shared
     assert cues.scene_starts(out, rows) == [(40.0, s[3]), (200.0, s[4]), (201.0, s[5]), (201.0, s[6])]
+    # in the middle too: two cues of one scene and none of the next stay in the first one's part
+    m = Doc()
+    a, b, c, e, f = m.scene(1), m.scene(2, "지어낸 옥상"), m.scene(3, "지어낸 지붕"), m.scene(4, "지어낸 계단"), m.scene(5)
+    m.say(a, "가자.")
+    m.act(b, "멀리서 천둥 소리가 들린다.")
+    m.act(b, "쿵! 기왓장이 떨어진다.")
+    m.act(e, "전화벨이 울린다.")
+    m.say(f, "괜찮아?")
+    out = [_timed("L0001", a, 10.0, 12.0), _timed("L0002", f, 40.0, 42.0)]
+    sc = [{"id": a, "start": 10.0, "end": 12.0, "status": "found"}] + \
+        [{"id": x, "start": 12.0, "end": 40.0, "status": "unknown"} for x in (b, c, e)] + \
+        [{"id": f, "start": 40.0, "end": 42.0, "status": "found"}]
+    starts = cues.scene_starts(out, sc, (0.0, 100.0))
+    got = cues.build(m.doc(), out, sc, (0.0, 100.0))
+    assert [x["guess"] for x in got] == [12.0, 16.667, 30.667]
+    assert [cues.scene_at(x["guess"], starts) for x in got] == [b, b, e]
 
 
 def _two_doors():
