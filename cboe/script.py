@@ -21,8 +21,9 @@ Accepted files
 - ``.json``: ``[{"speaker": ..., "text": ...}]`` or ``{"lines": [...]}``.
 - ``.srt`` / ``.vtt``: a timed dialogue subtitle; ``[이름] 대사``, ``[이름/영어] 대사``,
   ``(이름) 대사`` or ``이름: 대사`` give the speaker (and language), ``♪ 가사 ♪`` is sung, a row
-  that is only ``[...]`` is a sound and no dialogue. Times are kept (``start``/``end``) so
-  alignment can be skipped.
+  that is only ``[...]`` is a sound and no dialogue — except ``[이름]`` alone with the words going
+  on in the next row without a hyphen (a cell broken right after a long label): it names the
+  speaker of those words. Times are kept (``start``/``end``) so alignment can be skipped.
 Text files are read as UTF-8, UTF-16 (with a byte order mark) or CP949.
 
 Output (``read``)::
@@ -41,9 +42,12 @@ Output (``read``)::
 directions), ``raw`` the dialogue as written. ``language`` is the foreign language named by
 ``(영)``, ``(영어로)`` ...; ``sung`` is set by ``(노래)``; ``source`` (offscreen, narration, inner,
 phone, radio, broadcast, video) comes from the speaker cell — ``길동(V.O)``, ``(NA)길동``, a cell
-in parentheses ``(길동)`` — or a direction; ``delivery`` and ``vocal`` list directions on the
-manner of speech and on sounds the speaker makes; ``directions`` lists every direction with
-its kind. ``summary`` gives the counts and warnings shown before an analysis starts.
+in parentheses ``(길동)`` — or a direction; ``delivery`` lists directions on the manner of
+speech (``(웃으며)``, ``(웃다가 심각)``: said while laughing) and ``vocal`` the sounds the speaker
+makes (``(한숨)``, ``(통곡)``, ``(키득)``); ``directions`` lists every direction with its kind, and
+a sound that others make (``(학생들 폭소)``) carries ``by`` (``"학생들"``) and stays out of
+``vocal``. In a shooting script nothing before the first scene heading is dialogue (title page,
+cast list). ``summary`` gives the counts and warnings shown before an analysis starts.
 """
 from __future__ import annotations
 
