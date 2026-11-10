@@ -212,6 +212,83 @@ def test_a_door_sound_no_table_has_stays_as_written():
         assert c["phrase"] is None and not any("덜컥" in p or "문" in p for p in c["phrases"])
 
 
+@pytest.mark.parametrize("text, phrase", [
+    ("문이 끼익하는 소리를 내며 열린다.", "[끼익 - 문]"),
+    ("문이 끼익대는 소리와 함께 열린다.", "[끼익 - 문]"),
+    ("문이 끼익거리는 소리와 함께 열린다.", "[끼익 - 문]"),
+    ("현관문이 끼익하는 소리와 함께 열린다.", "[끼익 - 현관문]"),
+    ("가온이 문을 끼익하는 소리와 함께 연다.", "[끼익 - 문]"),
+    ("문이 쿵하는 소리와 함께 닫힌다.", "[쿵 - 문]"),
+    ("문이 탕하는 소리를 내며 닫힌다.", "[탕 - 문]"),
+    ("문이 삐걱이는 소리를 내며 열린다.", "[삐걱 - 문]"),
+    ("문이 끽하는 소리를 내며 열린다.", "[끽 - 문]"),
+])
+def test_the_doors_own_sound_written_with_hanun_before_sori_is_the_door(text, phrase):
+    """'문이 끼익하는 소리를 내며 열린다': the '하는' / '대는' written onto the door's onomatopoeia is
+    no part of it — still the door's sound (as with '끼익 하는'), not a brake or a sound of nobody."""
+    c = cues.sfx_cue(text)
+    assert c["phrase"] == phrase and "door" in c["families"]
+    assert "[급정거]" not in c["phrases"] and "car" not in c["families"]
+
+
+@pytest.mark.parametrize("text, door_family", [
+    ("주문을 외우며 연다. 펑!", False), ("의문을 품으며 연다. 탕!", False), ("끼익 소리를 내며 주문이 열린다.", False),
+    ("질문을 던지며 연다. 쾅!", True),                 # '쾅' alone may be a door (its own families), not '[쾅! - 문]'
+])
+def test_a_word_ending_in_mun_that_is_no_door_opens_no_door(text, door_family):
+    """'주문을 외우며 연다' is a spell, not a door: no '[… - 문]', no '[문소리]'; a '…문' that is a door
+    stays one ('회전문', '병원문', '방문')."""
+    c = cues.sfx_cue(text)
+    assert not any("문" in p for p in c["phrases"])
+    assert ("door" in c["families"]) == door_family
+    for door, phrase in (("회전문이 끼익 열린다.", "[끼익 - 문]"), ("병원문을 끼익 연다.", "[끼익 - 문]"),
+                         ("방문을 끼익 연다.", "[끼익 - 문]")):
+        assert cues.sfx_cue(door)["phrase"] == phrase
+
+
+@pytest.mark.parametrize("text, phrase, family", [
+    ("문이 바람 소리와 함께 쾅 닫힌다.", "[쾅 - 문]", "wind"),
+    ("문이 빗소리와 함께 쾅 닫힌다.", "[쾅 - 문]", "rain"),
+    ("문이 사이렌 소리와 함께 쾅 닫힌다.", "[쾅 - 문]", "siren"),
+    ("문이 총소리와 함께 쾅 닫힌다.", "[쾅 - 문]", "gun"),
+    ("현관문이 초인종 소리와 함께 쾅 닫힌다.", "[쾅 - 현관문]", "doorbell"),
+])
+def test_the_door_that_bangs_with_another_sound_is_the_source_of_the_bang(text, phrase, family):
+    """'문이 바람 소리와 함께 쾅 닫힌다': the '쾅' is the door's (II.9: '[의성어 - 출처]', the source
+    that makes the onomatopoeia), not the wind's — and the wind still sounds: its family stays."""
+    c = cues.sfx_cue(text)
+    assert c["phrase"] == phrase and "[쾅]" in c["phrases"]
+    assert "door" in c["families"] and family in c["families"]
+    assert not any(p.startswith("[쾅 - ") and p != phrase for p in c["phrases"])
+
+
+@pytest.mark.parametrize("text, phrase", [
+    ("끼익 소리를 내며 문이 열린다.", "[끼익 - 문]"),          # the onomatopoeia before the door
+    ("끼익하는 소리와 함께 현관문이 열린다.", "[끼익 - 현관문]"),
+    ("끽 소리를 내며 문이 열린다.", "[끽 - 문]"),               # one no table has: as written, no '덜컥'
+    ("문이 천천히 끼익 열린다.", "[끼익 - 문]"),               # two words between the door and its verb
+    ("문이 끼익 천천히 열린다.", "[끼익 - 문]"),
+    ("문이 끼익거리며 천천히 열린다.", "[끼익 - 문]"),
+    ("창문이 바람에 덜컹 열린다.", "[덜컹 - 창문]"),
+])
+def test_the_doors_onomatopoeia_before_the_door_or_one_word_off_its_verb_is_the_door(text, phrase):
+    """The door's own sound written before it ('끼익 소리를 내며 문이 열린다') or with one more word
+    beside it ('문이 천천히 끼익 열린다') is the door, not a brake; a car stopping near a door still
+    brakes, and what else '…소리' names before the door still names the cue."""
+    c = cues.sfx_cue(text)
+    assert c["phrase"] == phrase and "door" in c["families"]
+    assert "[급정거]" not in c["phrases"] and "car" not in c["families"]
+    assert not any("덜컥" in p for p in c["phrases"])
+    for brake in ("문 앞에 차가 끼익 선다.", "문 옆에 트럭이 끼익 멈춘다.", "타이어가 끼익 소리를 내며 문 앞에 선다.",
+                  "자동차가 끼익 소리를 내며 멈추고, 문이 열린다."):
+        car = cues.sfx_cue(brake)
+        assert car["phrase"] == "[끼익]" and "[급정거]" in car["phrases"] and "car" in car["families"]
+    for text2, phrase2 in (("구둣발 소리와 함께 문이 열린다.", "[저벅저벅]"), ("사이렌 소리와 함께 문이 열린다.", "[위이잉 - 사이렌]")):
+        assert cues.sfx_cue(text2)["phrase"] == phrase2
+    wind = cues.sfx_cue("창문이 바람에 덜컹 열린다.")
+    assert "wind" in wind["families"]                  # the word beside it names a sound of its own
+
+
 @pytest.mark.parametrize("text", [
     "책상을 툭 친다.",                    # a manner word, not written as a sound
     "텅 빈 거리.",

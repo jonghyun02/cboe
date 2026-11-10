@@ -98,6 +98,17 @@ _ONO_ANY = re.compile(rf"(?:{_ALT(ONO_STRONG + ONO_WEAK)})")
 OFFSCREEN = re.compile(r"멀리서|먼\s*곳에서|밖에서|바깥에서|어디선가|어디에선가|어디서인가|화면\s*밖|문\s*밖|창\s*밖|"
                        r"벽\s*너머|너머로|너머에서|\((?:O\.?S\.?|E|V\.?O\.?|off)\)", re.I)
 
+# The door of the door entry of SOURCES: '문' that is no word ending in '문' which is no door ('주문을
+# 외우며 연다' is a spell, '질문을 던지며 연다' a question). Words of two letters, kept out by their first
+# letter; '…문' doors that end in the same two letters stay doors, so 회전문 (전문), 병원문 (원문),
+# 파출소문 (소문), 경찰서문 (서문) and 방문 are not here.
+NOT_DOORS = ("주문", "질문", "논문", "신문", "의문", "명문", "공문", "본문", "영문", "한문", "작문", "예문", "부문", "자문")
+_DOOR = rf"(?<![{''.join(w[0] for w in NOT_DOORS)}])문"
+_DOOR_VERB = r"(?:닫|열|여닫|연다|연(?![가-힣]))"
+_ONO_WORD = rf"(?:{_ALT(ONO_STRONG + ONO_WEAK)})+"            # a word of the table's onomatopoeia ('쾅쾅')
+# what may follow the door's own sound before '소리' or the verb: '끼익거리며', '끼익대는', '끼익하는'
+_ONO_TAIL = r"(?:(?:거리|대)(?:며|고|는)|하는|이는)?"
+
 # What makes a sound, for naming the cue and matching it to a detected sound: (words,
 # '- 출처' noun or None, onomatopoeia or None, description, families of cboe/data/sfx_classes.tsv).
 # The first entry that matches names the cue; the families of every entry that matches count.
@@ -108,15 +119,23 @@ SOURCES = (
     (r"폭발|폭음|폭탄|포탄|포성|포격|수류탄|최루탄", None, "쾅", "폭발음", ("explosion", "gun")),
     (r"노크|두드리|두드린|두들기|똑똑", "문", "똑똑", "노크", ("door", "impact", "hit")),
     # also with the onomatopoeia between the door and its verb: '문이 끼익 열린다', '철문이 삐걱- 닫힌다',
-    # '문이 끼익거리며 닫힌다', '문이 끼익, 열린다', '문을 끼익 연다'; and before '소리를 내며 / 소리와
-    # 함께' ('문이 끼익 소리를 내며 열린다'), the word ``sori``: only the door's own sound when it is an
-    # onomatopoeia (``_door_sound``) — '문이 사이렌 소리와 함께 열린다' is a siren
-    (r"문[이을]?\s*(?:쾅|닫|열|여닫)|"
-     r"문[이을]?\s+[가-힣]{1,4}(?:(?:거리|대)(?:며|고))?[-~!,]*\s*(?:(?:하고|하며|하더니)\s*)?"
-     r"(?:닫|열|여닫|연다|연(?![가-힣]))|"
-     r"문[이을]?\s+(?P<sori>[가-힣]{1,4})(?:(?:거리|대)(?:며|고))?[-~!,]*\s*"
-     r"(?:하는\s*)?소리(?:를\s*내(?:며|고)|와\s*함께)\s*(?:닫|열|여닫|연다|연(?![가-힣]))|"
-     r"문\s*닫히|문\s*열리|문소리|문\s*여는|문\s*닫는", "문", "덜컥", "문소리", ("door", "impact")),
+    # '문이 끼익거리며 닫힌다', '문이 끼익, 열린다', '문을 끼익 연다'; with one more word beside a word of
+    # the table's onomatopoeia: '문이 천천히 끼익 열린다', '문이 끼익 천천히 열린다', '문이 바람에 쾅
+    # 닫힌다'; and before '소리를 내며 / 소리와 함께' ('문이 끼익 소리를 내며 열린다', '문이 끼익하는
+    # 소리와 함께 열린다'), the word ``sori``: only the door's own sound when it is an onomatopoeia
+    # (``_door_sound``) — '문이 사이렌 소리와 함께 열린다' is a siren — or when the door's own sound
+    # (``bang``) comes after it: '문이 바람 소리와 함께 쾅 닫힌다' is the door banging with the wind
+    # (``_other_span``); and the same before the door (``ahead``): '끼익 소리를 내며 문이 열린다'
+    (rf"{_DOOR}[이을]?\s*(?:쾅|닫|열|여닫)|"
+     rf"{_DOOR}[이을]?\s+[가-힣]{{1,4}}(?:(?:거리|대)(?:며|고))?[-~!,]*\s*(?:(?:하고|하며|하더니)\s*)?{_DOOR_VERB}|"
+     rf"{_DOOR}[이을]?\s+(?P<beside>[가-힣]{{1,4}}),?\s+{_ONO_WORD}(?:(?:거리|대)(?:며|고))?[-~!,]*\s*"
+     rf"(?:(?:하고|하며|하더니)\s*)?{_DOOR_VERB}|"
+     rf"{_DOOR}[이을]?\s+{_ONO_WORD}(?:(?:거리|대)(?:며|고))?[-~!,]*\s+(?P<beside2>[가-힣]{{1,4}})\s*{_DOOR_VERB}|"
+     rf"{_DOOR}[이을]?\s+(?P<sori>[가-힣]{{1,4}}?){_ONO_TAIL}[-~!,]*\s*(?:하는\s*)?소리(?:를\s*내(?:며|고)|와\s*함께),?\s*"
+     rf"(?:(?P<bang>{_ONO_WORD})[-~!,]*\s*(?:(?:하고|하며|하더니)\s*)?)?{_DOOR_VERB}|"
+     rf"(?<![가-힣])(?P<ahead>[가-힣]{{1,4}}?){_ONO_TAIL}[-~!,]*\s*(?:하는\s*)?소리(?:를\s*내(?:며|고)|와\s*함께),?\s*"
+     rf"[가-힣]{{0,3}}?{_DOOR}[이을]?\s*{_DOOR_VERB}|"
+     rf"{_DOOR}\s*닫히|{_DOOR}\s*열리|{_DOOR}소리|{_DOOR}\s*여는|{_DOOR}\s*닫는", "문", "덜컥", "문소리", ("door", "impact")),
     (r"전화벨|벨이?\s*울|벨소리|따르릉|휴대폰|핸드폰|휴대전화|전화가?\s*(?:울|온|와)|"
      r"울리는\s*(?:[가-힣]+\s+){0,3}전화(?![가-힣])", "전화", "따르릉", "전화벨", ("phone", "alarm", "bell")),
     (r"인터폰", "인터폰", None, "인터폰", ("doorbell", "phone", "bell", "alarm")),
@@ -172,6 +191,7 @@ SOURCES = (
     (r"무전", "무전기", "치익", "무전 소리", ("media", "phone")),
 )
 _SOURCES = tuple((re.compile(p), noun, ono, desc, fam) for p, noun, ono, desc, fam in SOURCES)
+_DOOR_AT = next(k for k, (rx, *_rest) in enumerate(_SOURCES) if "sori" in rx.groupindex)     # the door entry
 _DOOR_NOUNS = ("현관문", "대문", "창문", "철문", "문")
 _HEARD = {"들리", "들려", "들린", "울려", "울리", "울린"}      # 'is heard' / 'rings': say nothing of what sounds
 _SOUND_NAMES = {"함성", "환호", "야유", "비명", "고함", "박수", "울음", "웃음", "기침", "한숨"}   # sounds, not sources
@@ -190,13 +210,14 @@ def _inside_families(fam, word: str) -> tuple:
     return tuple(f for f in fam if f in MANNER_FAMILIES)
 
 
-_ONO_RUN = re.compile(rf"(?:{_ALT(ONO_STRONG + ONO_WEAK)})+")
+_ONO_RUN = re.compile(_ONO_WORD)
 
 
 def _door_sound(word: str) -> bool:
-    """The word before '소리를 내며 / 소리와 함께' between the door and its verb is the door's own
-    sound: an onomatopoeia ('끼익', '쾅쾅', also one no table has: '끽', '띵'), not what else sounds
-    while the door opens ('문이 사이렌 소리와 함께 열린다', '빗소리', '초인종 소리', '음악 소리')."""
+    """The word before '소리를 내며 / 소리와 함께' of a door match (``sori``, ``ahead``) is the door's own
+    sound: an onomatopoeia ('끼익', '쾅쾅', also one no table has: '끽', '띵'; without the '하는' /
+    '대는' written after it, which the door pattern leaves out), not what else sounds while the door
+    opens ('문이 사이렌 소리와 함께 열린다', '빗소리', '초인종 소리', '음악 소리')."""
     if _ONO_RUN.fullmatch(word):
         return True
     names = MUSIC_WORD.search(word) or any(rx.search(word + "소리") for rx, *_ in _SOURCES)
@@ -204,9 +225,47 @@ def _door_sound(word: str) -> bool:
 
 
 def _sounds_else(m: re.Match) -> bool:
-    """A door match whose word before '소리' is not the door's own sound (``_door_sound``)."""
-    word = m.groupdict().get("sori")
-    return word is not None and not _door_sound(word)
+    """A door match whose word before '소리' is not the door's own sound (``_door_sound``) and no
+    onomatopoeia of the door follows it before the verb (``bang``)."""
+    g = m.groupdict()
+    if g.get("sori") is not None:
+        return not g.get("bang") and not _door_sound(g["sori"])
+    return g.get("ahead") is not None and not _door_sound(g["ahead"])
+
+
+def _door_word(m: re.Match | None) -> tuple[int, str] | None:
+    """(where, the word) of the door's own sound written before '소리' in a door match ('문이 끽
+    소리를 내며 열린다', '끽 소리를 내며 문이 열린다'); None without one."""
+    for g in ("sori", "ahead"):
+        if m is not None and m.group(g) is not None and _door_sound(m.group(g)):
+            return m.start(g), m.group(g)
+    return None
+
+
+def _other_span(m: re.Match | None) -> tuple[int, int] | None:
+    """Where a door match that names the cue writes what else sounds: the 'X 소리' of '문이 바람
+    소리와 함께 쾅 닫힌다' (X no sound of the door, the door's ``bang`` after it), the word beside the
+    door's onomatopoeia ('문이 천둥에 덜컹 열린다'). What is written there is no sound of the door:
+    it names nothing (the door does) and all the families of what it names count."""
+    if m is None:
+        return None
+    if m.group("sori") is not None and m.group("bang") and not _door_sound(m.group("sori")):
+        return m.start("sori"), m.string.index("소리", m.end("sori")) + 2
+    for g in ("beside", "beside2"):
+        if m.group(g) is not None and not _door_sound(m.group(g)):
+            return m.span(g)
+    return None
+
+
+def _door_match(text: str) -> tuple[re.Match | None, bool]:
+    """(the first match of the door entry of SOURCES that is the door's own sound, whether a match
+    that is not came before it: ``_sounds_else``). A match that is not is passed over letter by
+    letter: '구둣발 소리와 함께 문이 열린다' still holds '문이 열린다'."""
+    rx, passed = _SOURCES[_DOOR_AT][0], False
+    m = rx.search(text)
+    while m is not None and _sounds_else(m):
+        passed, m = True, rx.search(text, m.start() + 1)
+    return m, passed
 
 # music
 MUSIC_WORD = re.compile(r"음악|노래(?!방)|노랫|선율|멜로디|연주|BGM|O\.?S\.?T|애국가|(?<![가-힣])가요(?![가-힣])|팝송|"
@@ -385,13 +444,23 @@ def _sound_name(text: str) -> tuple[str | None, list[str], list[str], tuple[int,
     matches only inside the naming entry's match (the '끼익' of '문이 끼익 열린다') adds only its
     ``MANNER_FAMILIES`` (``_inside_families``). A door that opens with what else sounds ('문이
     사이렌 소리와 함께 열린다', ``_sounds_else``) names nothing and swallows nothing: its families
-    count when another entry names the cue."""
+    count when another entry names the cue. A door that bangs with what else sounds ('문이 바람
+    소리와 함께 쾅 닫힌다') names the cue; what else sounds there (``_other_span``) names nothing and
+    keeps all its families."""
     desc, nouns, fams, onos, first, at, late = None, [], [], [], True, None, []
+    door, passed = _door_match(text)
+    other = _other_span(door)
     for k, (rx, noun, ono, d, fam) in enumerate(_SOURCES):
-        m = rx.search(text)
-        if m and _sounds_else(m):
-            late.extend(fam)
-            m = next((x for x in rx.finditer(text, m.end()) if not _sounds_else(x)), None)
+        if k == _DOOR_AT:
+            m = door
+            if passed:
+                late.extend(fam)
+        else:
+            m = rx.search(text)
+            if m and other and other[0] <= m.start() and m.end() <= other[1]:
+                fams.extend(f for f in fam if f not in fams)
+                m = next((x for x in rx.finditer(text, m.end()) if not (other[0] <= x.start() and x.end() <= other[1])),
+                         None)
         if m:
             if desc is None:
                 desc = d
@@ -526,9 +595,10 @@ def sfx_cue(text: str) -> dict | None:
         # line without a sound word
         named = bool(desc or fams)
         written = {p: o for p, o in _written_onos(t) if not named or SORI_AFTER.match(t, p + len(o.rstrip("!")))}
-        door = _SOURCES[src_at[1]][0].match(t, src_at[0]) if src_at and not written else None
-        if door and door.groupdict().get("sori"):      # '문이 끽 소리를 내며 열린다': the door's sound as written
-            written = {door.start("sori"): door.group("sori")}
+        door = _door_word(_SOURCES[_DOOR_AT][0].match(t, src_at[0])) if src_at and src_at[1] == _DOOR_AT \
+            and not written else None
+        if door:                                       # '문이 끽 소리를 내며 열린다': the door's sound as written
+            written = dict([door])
         onos += list(written.items())
     if not onos and set(words) <= _HEARD and "목소리" in raw:
         return None                                    # '그의 목소리가 들린다': a line spoken off screen
