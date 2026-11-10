@@ -417,6 +417,16 @@ def test_inspect_takes_pdf_and_hwp(bare, tmp_path):
     assert ".pdf" in studio_app.SCRIPT_TYPES and ".hwp" in studio_app.SCRIPT_TYPES and "*.pdf *.hwp" in studio_app.PICK_CODE
 
 
+def test_script_file_types_come_from_the_reader():
+    """The check, the message and the file dialog all list what cboe.script reads (one list)."""
+    from cboe import script
+    assert studio_app.SCRIPT_TYPES == set(script.SUFFIXES)
+    assert studio_app.SCRIPT_TYPES_TEXT.split(" · ") == [s[1:] for s in script.SUFFIXES]
+    assert f'("대본", "{" ".join("*" + s for s in script.SUFFIXES)}")' in studio_app.PICK_CODE
+    assert "@SCRIPT_PATTERNS@" not in studio_app.PICK_CODE
+    compile(studio_app.PICK_CODE, "<pick>", "exec")                      # still a valid program
+
+
 def test_script_stage_on_the_start_screen(tmp_path):
     assert studio.ALL_STAGES[:3] == ["ingest", "script", "separate"] and studio.STAGE_LABELS["script"] == "대본 읽기"
     assert set(studio.STAGE_LABELS) == set(studio.KEY_OUTPUT) == set(studio.ALL_STAGES)

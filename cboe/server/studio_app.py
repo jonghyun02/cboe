@@ -30,12 +30,15 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from .. import guard, paths, pipeline
+from ..script import SUFFIXES as SCRIPT_SUFFIXES
 from ..studio import STAGE_LABELS, JobBusy, JobManager, Workspace, open_folder
 from ..util import NO_WINDOW, log
 from .app import STATIC, LocalOnly, SafeJSONResponse, create_app
 
-SCRIPT_TYPES = {".pdf", ".hwp", ".txt", ".docx", ".srt", ".vtt", ".csv", ".tsv", ".json"}
-SCRIPT_TYPES_TEXT = "pdf · hwp · txt · docx · srt · vtt · csv · tsv · json"
+# the file types the script reader knows (cboe.script.SUFFIXES): one list for the check, the
+# message and the file dialog
+SCRIPT_TYPES = set(SCRIPT_SUFFIXES)
+SCRIPT_TYPES_TEXT = " · ".join(s[1:] for s in SCRIPT_SUFFIXES)
 SCRIPT_MAX_BYTES = 20 * 1024 * 1024
 
 RUN_MODES = {"continue": [], "all": ["all"]}     # 이어서 (끝난 단계 건너뜀) / 처음부터 다시
@@ -84,11 +87,11 @@ kind = sys.argv[1]
 if kind == "video":
     p = filedialog.askopenfilename(title="영상 파일 고르기", filetypes=[("영상", "*.mp4 *.mkv *.mov *.avi *.webm *.m4v *.ts *.wmv"), ("모든 파일", "*.*")])
 elif kind == "script":
-    p = filedialog.askopenfilename(title="대본 파일 고르기", filetypes=[("대본", "*.pdf *.hwp *.txt *.docx *.srt *.vtt *.csv *.tsv *.json"), ("모든 파일", "*.*")])
+    p = filedialog.askopenfilename(title="대본 파일 고르기", filetypes=[("대본", "@SCRIPT_PATTERNS@"), ("모든 파일", "*.*")])
 else:
     p = filedialog.askdirectory(title="폴더 고르기")
 sys.stdout.write(p or "")
-"""
+""".replace("@SCRIPT_PATTERNS@", " ".join("*" + s for s in SCRIPT_SUFFIXES))
 
 
 def pick_dialog(kind: str) -> str | None:
