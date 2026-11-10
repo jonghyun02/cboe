@@ -415,6 +415,17 @@ def test_speaker_going_on_after_a_line_still_to_check_follows_it(tmp_path):
     assert all("follows" not in it for it in recommend.build(p, {}) if it["kind"] == "speaker")
 
 
+def test_detection_evidence_leaves_out_plain_sound_in_the_path():
+    def text(path_ko):
+        c = _sound(label={"class": "Breathing", "ko": "숨", "score": 0.52, "confident": True, "unknown": False,
+                          "competing": [], "path_ko": path_ko, "top": []})
+        return recommend.sfx_evidence(c, None, None)[0]["text"]
+    assert text(["숨", phrases.SOUND, phrases.SOUND]) == "검출: 숨 0.52"               # nothing above it is named
+    assert text(["발걸음", "발걸음", phrases.SOUND]) == "검출: 숨 0.52"
+    assert text(["뛰는", "발걸음", phrases.SOUND]) == "검출: 숨 0.52 (뛰는 → 발걸음)"
+    assert text(["웅성거리는", "사람들", phrases.SOUND, "목소리"]) == "검출: 숨 0.52 (웅성거리는 → 사람들 → 목소리)"
+
+
 def _reaction(line_id="L0001") -> dict:
     return {"id": "S0001", "relation": "reaction", "line_id": line_id, "evidence": "직후 \"방금 뭐였지\"", "plot_hint": "",
             "source": "llm"}

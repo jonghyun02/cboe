@@ -176,8 +176,12 @@ def sfx_evidence(c: dict, screen: dict | None, dia: dict | None) -> list[dict]:
     if lab.get("unknown"):
         out.append(ev("소리", c["onset"], f"목록에 없는 소리 (갑자기 {c.get('level_jump_db', 0):.0f}dB 커짐)", "neutral", "sed"))
     else:
-        path = " → ".join(lab.get("path_ko", [])[:3])
-        txt = f"검출: {lab['ko']} {lab['score']:.2f}" + (f" ({path})" if len(lab.get("path_ko", [])) > 1 else "")
+        # the classes above it, without the ones that are only '소리' in Korean ('숨 → 소리 → 소리')
+        # and without a name said twice in a row
+        names = [k for k in lab.get("path_ko", []) if k and k != phrases.SOUND]
+        names = [k for i, k in enumerate(names) if i == 0 or k != names[i - 1]]
+        path = " → ".join(names[:3])
+        txt = f"검출: {lab['ko']} {lab['score']:.2f}" + (f" ({path})" if len(names) > 1 else "")
         if lab.get("competing"):
             txt += " · 경쟁: " + ", ".join(f"{x['ko']} {x['score']:.2f}" for x in lab["competing"][:2])
         out.append(ev("소리", c["onset"], txt, "neutral", "sed", c["t1"]))
