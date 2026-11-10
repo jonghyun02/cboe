@@ -1010,6 +1010,47 @@ def test_agent_stage_stops_asking_when_a_tool_keeps_raising(tmp_path, monkeypatc
     assert len(read_json(p.path("agent_results.json"))["items"]) == 5
 
 
+def test_agent_counts_a_raising_tool_when_the_call_then_fails(tmp_path, monkeypatch):
+    """The tool raised and the model never answered (the call failed afterwards): still a tool
+    error — counted for TOOL_ERROR_STOP and kept as tool_error, not a plain call error."""
+    sounds = [_sound(f"S{i:04d}", float(i), confident=False, unknown=True, level_jump_db=20.0) for i in range(1, 7)]
+    p = _project(tmp_path, sfx={"candidates": sounds})
+    made, asked_ids = [], []
+
+    def fake_serve(tools):
+        made.append(tools)
+        return "http://127.0.0.1:0/mcp", SimpleNamespace(should_exit=False)
+
+    def fake_ask(parts, schema, **kw):
+        iid = kw["tag"].split(":")[1]
+        asked_ids.append(iid)
+        kw["trace"].append({"tool": "describe_sound", "input": {"start": float(iid[1:]), "end": float(iid[1:]) + 1}})
+        try:
+            agent_tools.tool_functions(made[-1])["describe_sound"](**kw["trace"][-1]["input"])
+        except RuntimeError:
+            pass
+        raise llm.LLMError("max turns")                 # the model gave no answer in the end
+    monkeypatch.setattr(agent, "Tools", _FakeTools)
+    monkeypatch.setattr(agent, "serve", fake_serve)
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    _null_lock(monkeypatch)
+    _FakeTools.broken = True
+    res = agent.run(p, {"agent_limit": 5, "jobs": 1})
+    assert len(asked_ids) == agent.TOOL_ERROR_STOP and res["stopped"] is True and res["tool_failed"] == 3
+    stored = read_json(p.path("agent_results.json"))
+    assert stored["items"] == {} and all(stored["failed"][i]["status"] == "tool_error" for i in asked_ids)
+    assert stored["failed"][asked_ids[0]]["tool_errors"][0]["tool"] == "describe_sound"
+    record = read_json(p.path("agent") / f"{asked_ids[0]}.json")
+    assert record["error"] == "max turns" and record["result"]["status"] == "tool_error"
+    # a call that fails with no tool error stays a plain error and does not stop the queue
+    _FakeTools.broken = False
+    asked_ids.clear()
+    res = agent.run(p, {"agent_limit": 5, "jobs": 1})
+    assert len(asked_ids) == 5 and res["failed"] == 5 and res["tool_failed"] == 0 and res["stopped"] is False
+    assert {v["status"] for v in read_json(p.path("agent_results.json"))["failed"].values()} == {"error"}
+
+
 # ================================================================== 받아쓰기 (1-10, 6-m3, 5-02)
 def test_hotwords_are_the_names_said_in_the_dialogue():
     script = {"characters": ["가온", "나래", "친구1", "군인 2", "다솜이", "박 선생님", "솔", "가온"],

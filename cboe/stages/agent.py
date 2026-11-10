@@ -17,7 +17,8 @@ longer made.
 
 A re-check in which a tool raised and never answered (the sound description model out of
 GPU memory, say) is not a finished re-check: it is kept as ``tool_error`` under "failed" in
-agent_results.json, is not counted against ``agent_limit`` and is asked again by the next
+agent_results.json — also when the model then gave no answer at all (the call failed, the
+turn limit) — is not counted against ``agent_limit`` and is asked again by the next
 run (감사 4-m1). After TOOL_ERROR_STOP such re-checks in a row the rest of the queue is not
 asked in this run (it would be asked for nothing) and stays for the next one.
 
@@ -248,11 +249,17 @@ def run(p, cfg: dict) -> dict:
                           tag=f"agent:{it['id']}", trace=trace, prompt_version=PROMPT_VERSION)
         except Exception as e:
             tools.log.claim(trace, since=t)               # what the tools returned before the call failed
+            res = {"status": "error", "summary": "재확인 실패", "tools": [x["tool"] for x in trace],
+                   "steps": len(trace), "evidence": [], "fp": _fp(it)}
+            bad = failed_tools(trace)
+            if bad:                                       # a raising tool left the model without an answer
+                res["status"] = "tool_error"
+                res["tool_errors"] = [{"tool": c["tool"], "error": c.get("output")} for c in trace
+                                      if c.get("error") and c["tool"] in bad]
             write_json(p.path("agent") / f"{it['id']}.json", {"prompt": q, **versions, "error": str(e)[:500],
-                                                              "trace": trace})
-            note("error")
-            return it["id"], {"status": "error", "summary": "재확인 실패", "tools": [x["tool"] for x in trace],
-                              "steps": len(trace), "evidence": [], "fp": _fp(it)}
+                                                              "trace": trace, "result": res})
+            note(res["status"])
+            return it["id"], res
         tools.log.claim(trace, since=t)                   # each call's output, or the exception it raised
         res = normalise(it, ans, trace, time.time() - t)
         res["fp"] = _fp(it)
