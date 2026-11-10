@@ -883,3 +883,53 @@ def test_a_decision_kept_aside_never_comes_back_over_a_newer_one(tmp_path):
     assert [k for k in read_json(p.path("review.json"))["lines"]] == ["L0001"]
     reread(p, v1)                                            # the script goes back to version 1
     assert by_id(p.effective_lines())["L0001"]["text"] != "네 첫 결정"
+
+
+# =================================================================== 4차: 화자 항목 결정은 줄을 따라감
+def speaker_v1():
+    return [line("L0001", "하늘", "네", 10.0, 10.5), line("L0002", "바다", "네", 12.0, 12.5),
+            line("L0003", "하늘", "알았어 갈게", 14.0, 15.0)]
+
+
+def shifted(ls):
+    """The script read again with one more line in front: every line id moves by one, items made again."""
+    return renumbered([line("L0000", "구름", "어이", 5.0, 5.5)] + ls)
+
+
+def read_again(p, ls):
+    write_json(p.path("dialogue.json"), {"mode": "scenes", "extras": [], "lines": ls})
+    write_json(p.path("items.json"), {"items": [speaker_item(x) for x in ls]})
+
+
+def test_a_speaker_decision_follows_its_line_when_the_ids_move(tmp_path):
+    v1 = speaker_v1()
+    p = make(tmp_path, lines=v1, items=[speaker_item(x) for x in v1], extras=[])
+    p.set_decision("P0002", decision="exclude")              # 바다's '네'
+    p.set_decision("P0003", decision="exclude")
+    p.set_line("L0003", text="알았어 지금 갈게")
+    stored = read_json(p.path("review.json"))["items"]["P0002"]
+    assert stored["fp"] == "speaker@" + line_fp(v1[1], 0) and stored["ctx"]["next"][0] == "line@하늘:알았어 갈게"
+    read_again(p, shifted(v1))
+    it, ln = by_id(p.effective_items()), by_id(p.effective_lines())
+    got = {i: (ln[x["speaker"]["line_id"]]["name"], x["final"], x["decided"]) for i, x in it.items()}
+    assert got == {"P0001": ("구름", "include", False), "P0002": ("하늘", "include", False),
+                   "P0003": ("바다", "exclude", True), "P0004": ("하늘", "exclude", True)}
+    assert ln["L0004"]["text"] == "알았어 지금 갈게"
+    p.set_decision("P0001", decision="include")              # a write keys today's ids
+    assert set(read_json(p.path("review.json"))["items"]) == {"P0001", "P0003", "P0004"}
+
+
+def test_a_speaker_decision_of_the_older_form_is_read_and_written_in_todays(tmp_path):
+    v1 = speaker_v1()
+    old = {"items": {"P0002": {"decision": "exclude", "fp": "speaker@L0002:네"}}}
+    p = make(tmp_path, lines=v1, items=[speaker_item(x) for x in v1], extras=[], review=old)
+    assert by_id(p.effective_items())["P0002"]["final"] == "exclude"           # read as it is
+    assert read_json(p.path("review.json")) == old                            # reading writes nothing
+    p.set_decision("P0001", decision="include")                               # the next write: today's form
+    st = read_json(p.path("review.json"))["items"]
+    assert st["P0002"]["fp"] == "speaker@" + line_fp(v1[1], 0) and "ctx" in st["P0002"]
+    read_again(p, shifted(v1))
+    it = by_id(p.effective_items())
+    assert (it["P0003"]["final"], it["P0003"]["decided"]) == ("exclude", True)    # 바다's '네'
+    assert (it["P0002"]["final"], it["P0002"]["decided"]) == ("include", True)    # 하늘's '네' (P0001 before)
+    assert not it["P0001"]["decided"]

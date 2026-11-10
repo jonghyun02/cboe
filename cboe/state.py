@@ -8,7 +8,9 @@ time a choice changes, ``Project.recompute()`` merges both, runs placement
 
 ``review.json`` (every section may be missing; an older file opens as it is)::
 
-    items     {item id: {decision, phrase, short, name, fp, at}}       후보 결정 (as before)
+    items     {item id: {decision, phrase, short, name, fp, ctx, at}}  후보 결정 (a speaker item's fp is
+                         'speaker@' + its line's line_fp, with the line's ctx: it follows the line;
+                         the older 'speaker@{line id}:{text}' is read and written anew on the next write)
     placement {item id: {action "move", t, fp}}                        배치 고치기 (as before)
     lines     {line id: {fp, ctx, at, include, text, text_from, name, language, sung,
                          start, end, breaks, keep, show_name}}         대사 줄 결정
@@ -229,6 +231,56 @@ def _aside_candidates(d: dict, index: dict) -> tuple[list[str], str]:
     return cands, "same_words"
 
 
+def _resolve(claims: list[tuple]) -> dict:
+    """``{target: decision}`` from claims ``(how sure, stored under the target's id, key, target,
+    decision)`` — one decision per target, the surest first. Two decisions with a fingerprint as
+    sure of one target both stay aside: once the script is read again the key they are stored
+    under (an id of before) tells nothing."""
+    out, blocked = {}, set()
+    for sure, _own, key, tgt, d in sorted(claims, key=lambda c: (-c[0], not c[1], c[2])):
+        if tgt in out or tgt in blocked:
+            continue
+        if d.get("fp") and any(c[3] == tgt and c[0] == sure and c[2] != key and c[4].get("fp") for c in claims):
+            blocked.add(tgt)                            # as sure as another one: neither is this one's
+            continue
+        out[tgt] = d
+    return out
+
+
+def _old_speaker_fp(it: dict) -> str:
+    """The older fingerprint of a speaker item: 'speaker@{line id}:{text}'."""
+    return f"speaker@{(it.get('speaker') or {}).get('line_id')}:{it.get('phrase', '')}"
+
+
+def _speaker_decisions(stored: dict, speakers: list[dict], lindex: dict) -> dict:
+    """``{speaker item id: decision}``: a decision of today's form ('speaker@' + line fingerprint,
+    with ``ctx``) is about the item of the line ``_pick_line`` finds; one of the older form
+    ('speaker@{line id}:{text}') about the item of that line id and text; one without a
+    fingerprint about the item it is stored under."""
+    of_line = {(it.get("speaker") or {}).get("line_id"): it["id"] for it in speakers}
+    old = {_old_speaker_fp(it): it["id"] for it in speakers}
+    ids = set(of_line.values())
+    claims = []
+    for key, d in (stored or {}).items():
+        if not isinstance(d, dict):
+            continue
+        fp = str(d.get("fp") or "")
+        if not fp:
+            if key in ids:
+                claims.append((1, True, key, key, d))
+            continue
+        if not fp.startswith("speaker@"):
+            continue
+        if fp.startswith("speaker@line@"):
+            lid, sure = _pick_line(fp[len("speaker@"):], d.get("ctx"), lindex)
+            iid = of_line.get(lid)
+        else:
+            iid, sure = old.get(fp), 1
+        if iid:
+            claims.append((sure, key == iid, key, iid, d))
+    return _resolve(claims)
+
+
 def _aside_row(key: str, d: dict, index: dict) -> dict:
     """A line decision kept aside as ``compose`` lists it (``aside``)."""
     base, _ = _split_fp(d.get("fp"))
@@ -355,21 +407,34 @@ class Project:
 
     # ------------------------------------------------------------- decisions
     @staticmethod
-    def fingerprint(it: dict) -> str:
-        """What a decision was made about: kind and onset of a sound, line id and text of a
-        speaker line. Item ids are sequence numbers and change when a stage is re-run, so a
-        stored decision only applies to the item with the same fingerprint."""
+    def fingerprint(it: dict, lindex: dict | None = None) -> str:
+        """What a decision was made about: kind and onset of a sound; for a speaker item, its line:
+        'speaker@' + the line's fingerprint (``line_fp``; the decision keeps the line's context as
+        ``ctx`` too), found again as a line decision is (``_pick_line``) — line ids are sequence
+        numbers that move when the script is read again. Item ids are sequence numbers and change
+        when a stage is re-run, so a stored decision only applies to the item with the same
+        fingerprint. Without ``lindex`` (``_line_index``), or for a line not in it, a speaker item
+        has the older form 'speaker@{line id}:{text}' (still read: ``_speaker_decisions``)."""
         if it.get("kind") == "speaker":
-            sp = it.get("speaker") or {}
-            return f"speaker@{sp.get('line_id')}:{it.get('phrase', '')}"
+            lid = (it.get("speaker") or {}).get("line_id")
+            if lindex and lid in lindex["fps"]:
+                return f"speaker@{lindex['fps'][lid]}"
+            return _old_speaker_fp(it)
         return f"{it.get('kind')}@{float(it.get('onset', 0.0)):.2f}"
 
-    def _decisions(self, review: dict, items: list[dict], section: str) -> dict[str, dict]:
-        """Decisions of ``review[section]`` keyed by the current item id (fingerprint-checked)."""
+    def _lindex(self) -> dict:
+        return _line_index([ln for ln in self.dialogue() if isinstance(ln, dict) and ln.get("id")])
+
+    def _decisions(self, review: dict, items: list[dict], section: str, lindex: dict | None = None) -> dict[str, dict]:
+        """Decisions of ``review[section]`` keyed by the current item id (fingerprint-checked; a
+        speaker item's by its line, ``_speaker_decisions``)."""
         stored = review.get(section, {})
+        speakers = [it for it in items if it.get("kind") == "speaker"]
         by_fp = {d["fp"]: d for d in stored.values() if isinstance(d, dict) and d.get("fp")}
         out = {}
         for it in items:
+            if it.get("kind") == "speaker":
+                continue
             fp = self.fingerprint(it)
             d = stored.get(it["id"])
             if d and d.get("fp") and d["fp"] != fp:
@@ -377,15 +442,18 @@ class Project:
             d = d or by_fp.get(fp)
             if d:
                 out[it["id"]] = d
+        if speakers:
+            out.update(_speaker_decisions(stored, speakers, lindex if lindex is not None else self._lindex()))
         return out
 
-    def _merge_items(self, review: dict, items: list[dict], lines: dict) -> list[dict]:
+    def _merge_items(self, review: dict, items: list[dict], lines: dict, lindex: dict | None = None,
+                     dec: dict | None = None) -> list[dict]:
         """Items with the stored decisions merged in (``final``, ``decided``, ``phrase``/``short``,
         ``placement``; a speaker item's ``speaker.name`` = the line's name). ``lines``: the
         merged lines by id (their ``name`` is the writer's line name, else the name stored on the
-        item, else the script's)."""
-        dec = self._decisions(review, items, "items")
-        plc = self._decisions(review, items, "placement")
+        item, else the script's). ``dec``: the item decisions when already looked up."""
+        dec = dec if dec is not None else self._decisions(review, items, "items", lindex)
+        plc = self._decisions(review, items, "placement", lindex)
         out = []
         for it in items:
             it = dict(it)
@@ -451,7 +519,7 @@ class Project:
                     self.save_review(review)
                     return {"changed": changed, "lines": done}
             stamp = time.strftime("%Y-%m-%dT%H:%M:%S")
-            self._normalise(review, "items")              # decisions under today's ids first
+            lindex = self._normalise(review, "items")     # decisions under today's ids first
             cur = dict(review["items"].get(item_id, {}))
             for k, v in fields.items():
                 if v is None:
@@ -459,42 +527,55 @@ class Project:
                 else:
                     cur[k] = v
             cur["at"] = stamp
-            cur["fp"] = self.fingerprint(it)
-            review["items"][item_id] = cur
+            review["items"][item_id] = self._keyed(it, cur, lindex)
             self.save_review(review)
             return {"changed": changed}
 
-    def _normalise(self, review: dict, section: str) -> None:
+    def _keyed(self, it: dict, d: dict, lindex: dict) -> dict:
+        """``d`` with the fingerprint of ``it`` (and, for a speaker item, its line's context)."""
+        d = dict(d, fp=self.fingerprint(it, lindex))
+        lid = (it.get("speaker") or {}).get("line_id") if it.get("kind") == "speaker" else None
+        if lid in lindex["ctx"]:
+            d["ctx"] = lindex["ctx"][lid]
+        else:
+            d.pop("ctx", None)
+        return d
+
+    def _normalise(self, review: dict, section: str) -> dict:
         """Re-key ``review[section]`` by today's item ids, matched by fingerprint, so that a write
-        under an id never lands on the decision of another candidate that used to have it.
-        Decisions whose candidate is gone are kept under ``fp:<fingerprint>`` and come back
-        when the candidate does."""
+        under an id never lands on the decision of another candidate that used to have it; a
+        speaker decision of the older form ('speaker@{line id}:{text}') is written in today's
+        (its line's fingerprint and context). Decisions whose candidate is gone are kept under
+        ``fp:<fingerprint>`` and come back when the candidate does. Returns the ``_line_index``."""
         items = self.items()
+        lindex = self._lindex()
         stored = review.get(section, {})
-        current = self._decisions(review, items, section)
-        new, used = {}, set()
+        current = self._decisions(review, items, section, lindex)
+        new, used, claimed = {}, set(), set()
         for it in items:
             d = current.get(it["id"])
             if d:
-                d = dict(d)
-                d["fp"] = self.fingerprint(it)
-                new[it["id"]] = d
-                used.add(d["fp"])
-        for d in stored.values():
-            if isinstance(d, dict) and d.get("fp") and d["fp"] not in used:
-                new[f"fp:{d['fp']}"] = d
+                claimed.add(id(d))
+                new[it["id"]] = self._keyed(it, d, lindex)
+                used.add(new[it["id"]]["fp"])
+        for key, d in _aside_keys(stored, claimed):
+            # a sound's fingerprint names one candidate: an older copy of a decision kept goes; one
+            # line fingerprint may be two lines' (the same words twice): both are kept
+            if d["fp"] not in used or str(d["fp"]).startswith("speaker@line@"):
+                new[key] = d
         review[section] = new
+        return lindex
 
     def set_placement(self, item_id: str, action: str | None, t: float | None = None) -> None:
         """Writer's fix for a '배치 확인 필요' item: move (to time t) or clear."""
         with self._lock:
             review = self.review()
             it = next((x for x in self.items() if x["id"] == item_id), None)
-            self._normalise(review, "placement")
+            lindex = self._normalise(review, "placement")
             review["placement"].pop(item_id, None)
             if action not in (None, "clear"):
                 review["placement"][item_id] = {"action": action, "t": t,
-                                                "fp": self.fingerprint(it) if it else None}
+                                                "fp": self.fingerprint(it, lindex) if it else None}
             self.save_review(review)
 
     # -------------------------------------------------------- line decisions
@@ -942,15 +1023,7 @@ class Project:
             lid, sure = _pick_line(d["fp"], d.get("ctx"), index)
             if lid:
                 claims.append((sure, key == lid, key, lid, d))
-        out, blocked = {}, set()
-        for sure, _own, key, lid, d in sorted(claims, key=lambda c: (-c[0], not c[1], c[2])):
-            if lid in out or lid in blocked:
-                continue
-            if d.get("fp") and any(c[3] == lid and c[0] == sure and c[2] != key and c[4].get("fp") for c in claims):
-                blocked.add(lid)                    # as sure as another one: neither is this line's
-                continue
-            out[lid] = d
-        return out, index
+        return _resolve(claims), index
 
     def _line(self, ln: dict, idx: int, d: dict, item_name, asr) -> dict:
         """One dialogue line with the writer's decision ``d`` (module doc)."""
@@ -1065,9 +1138,9 @@ class Project:
                 cache["w"] = (read_json(self.path("asr.json"), {}) or {}).get("words", []) or []
             return cache["w"]
 
-        item_dec = self._decisions(review, items, "items")
-        sp_of = {(it.get("speaker") or {}).get("line_id"): it for it in items if it.get("kind") == "speaker"}
         line_dec, lindex = self._line_decisions(review, dlg)
+        item_dec = self._decisions(review, items, "items", lindex)
+        sp_of = {(it.get("speaker") or {}).get("line_id"): it for it in items if it.get("kind") == "speaker"}
         aside = [_aside_row(key, d, lindex) for key, d in _aside_keys(review.get("lines"), {id(d) for d in line_dec.values()})]
         lines = []
         for idx, ln in enumerate(dlg):
@@ -1090,7 +1163,7 @@ class Project:
         _film_order(lines)
         _scene_of_added(lines)
         by_line = {ln["id"]: ln for ln in lines}
-        eff = self._merge_items(review, items, by_line) + added_items
+        eff = self._merge_items(review, items, by_line, lindex, item_dec) + added_items
         # in, but no cell in that placement — or in an earlier round of the same settle (draft "unplaced")
         unplaced = (_no_room_lines(draft) | set((draft or {}).get("unplaced") or ())) & set(by_line)
         _speaker_runs(lines, eff, recommend.decide_speaker, unplaced)
