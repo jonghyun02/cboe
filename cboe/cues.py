@@ -929,11 +929,13 @@ def windows(cues: list[dict], doc: dict, lines: list[dict], scenes=None, span=No
     # time, in script order. Before a scene's first line with the window reaching into the scene
     # before (or to the start): spread inside it, none on the far end. After a scene's last line:
     # one after another from that line (써니 앞 30분: sounds written after a scene's last line
-    # followed it within 4 s; those before a first line came 1–82 s before it).
+    # followed it within 4 s; those before a first line came 1–82 s before it). Scenes without
+    # dialogue in a row share the time between their neighbours: their cues share it in order.
     groups: dict[tuple, list[dict]] = {}
     for c in cues:
         if c.get("window") and c["type"] != "vocal":
-            groups.setdefault((c["scene_id"], tuple(c["window"])), []).append(c)
+            key = None if c["window_by"] == ["scene", "scene"] and c["scene_id"] not in own else c["scene_id"]
+            groups.setdefault((key, tuple(c["window"])), []).append(c)
     for group in groups.values():
         lo, hi = group[0]["window"]
         n, far = len(group), _far_end(group[0])

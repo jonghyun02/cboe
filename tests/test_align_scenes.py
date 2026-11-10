@@ -460,6 +460,17 @@ def test_extras_leave_out_interjections_and_hint_echoes(tmp_path, doc):
     assert [(x["text"], x.get("short", False)) for x in d["extras"]] == [("타파하 코토포 무부수", False), ("쿄쿄", True)]
 
 
+def test_scenes_without_dialogue_in_a_row_share_the_gap(tmp_path, doc):
+    two = {**doc, "lines": [ln for ln in doc["lines"] if ln["scene_id"] != "SC013"]}   # SC012 and SC013 silent
+    words, vad, truth, t_end = speak(film_of(two))
+    _, sc, _ = run(tmp_path, two, words, vad, t_end)
+    row = {r["id"]: r for r in sc}
+    gap = [row["SC011"]["end"], row["SC014"]["start"]]
+    assert gap[0] < gap[1]
+    assert [row["SC012"]["start"], row["SC012"]["end"]] == [row["SC013"]["start"], row["SC013"]["end"]] == gap
+    assert row["SC012"]["status"] == row["SC013"]["status"] == "unknown"
+
+
 def test_asr_noise_shapes():
     assert align.noise_shape(["감사합니다."]) == "greeting"
     assert align.noise_shape(["수고하셨습니다.", "수고하셨습니다."]) == "greeting"

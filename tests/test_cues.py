@@ -394,6 +394,29 @@ def test_guessed_times_in_a_window_that_reaches_into_another_scene():
     assert [c["guess"] for c in got] == [52.0, 52.0 + cues.GUESS_STEP_S]
 
 
+def test_scenes_without_dialogue_in_a_row_share_the_gap_in_order():
+    d = Doc()
+    s1, s2, s3, s4 = d.scene(1), d.scene(2, "지어낸 옥상"), d.scene(3, "지어낸 지붕"), d.scene(4, "지어낸 마당")
+    d.elements.clear()
+    d._el("heading", s1, "1.")
+    d.say(s1, "올라가 보자.")
+    d._el("heading", s2, "2.")
+    d.act(s2, "멀리서 천둥 소리가 들린다.")
+    d._el("heading", s3, "3.")
+    d.act(s3, "쿵! 기왓장이 떨어진다.")
+    d._el("heading", s4, "4.")
+    d.say(s4, "괜찮아?")
+    lines = [{"id": "L0001", "scene_id": s1, "start": 10.0, "end": 12.0, "timing": "asr", "status": "ok"},
+             {"id": "L0002", "scene_id": s4, "start": 40.0, "end": 42.0, "timing": "asr", "status": "ok"}]
+    scenes = [{"id": s1, "start": 10.0, "end": 12.0, "status": "found"},
+              {"id": s2, "start": 12.0, "end": 40.0, "status": "unknown"},
+              {"id": s3, "start": 12.0, "end": 40.0, "status": "unknown"},
+              {"id": s4, "start": 40.0, "end": 42.0, "status": "found"}]
+    a, b = cues.build(d.doc(), lines, scenes, (0.0, 100.0))
+    assert a["window"] == b["window"] == [12.0, 40.0] and a["window_by"] == ["scene", "scene"]
+    assert (a["guess"], b["guess"]) == (12.0, 26.0)                       # in script order, not both at 12 s
+
+
 def test_wide_windows_take_the_named_kind_and_the_music_near_the_scene():
     d, lines, scenes = _scene_first()
     built = {c["id"]: c for c in cues.build(d.doc(), lines, scenes, (0.0, 100.0))}

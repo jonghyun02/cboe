@@ -903,8 +903,10 @@ def _scene_rows(doc: dict, out: list[dict], info: list[dict] | None) -> list[dic
             row["status"] = OUT
             continue
         row["status"] = "unknown"
-        a = next((r["end"] for r in rows[k - 1::-1] if r["end"] is not None), None) if k else None
-        b = next((r["start"] for r in rows[k + 1:] if r["start"] is not None), None)
+        # from the scenes with lines only: several scenes without dialogue in a row share the gap
+        # (a time given to the one before is no edge of this one)
+        a = next((r["end"] for r in rows[k - 1::-1] if r["lines"] and r["end"] is not None), None) if k else None
+        b = next((r["start"] for r in rows[k + 1:] if r["lines"] and r["start"] is not None), None)
         row["start"], row["end"] = a, b
     return rows
 
