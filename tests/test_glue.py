@@ -365,6 +365,33 @@ def test_a_two_speaker_cell_is_read_back_as_two_lines(tmp_path):
                    (None, "집에.", None, 4.0), ("철수", "비가 오는데 우산은 있어?", None, 7.0), ("영희", "응.", None, 7.0)]
 
 
+def test_unnamed_hyphen_rows_are_two_speakers_and_a_label_keeps_its_sound(tmp_path):
+    """'- 누구야?' / '- 나야' with no name: two lines that say they are two speakers (``turn``),
+    the name left empty; '[가람] [재채기] 나도야!' and '[나래] [웃음]' are the speaker's own sounds."""
+    from cboe.state import Project
+    from cboe.stages import align
+    from cboe.util import read_json, write_json
+    f = tmp_path / "subs.srt"
+    f.write_text("1\n00:01:20,000 --> 00:01:21,375\n- 누구야?\n- 나야\n\n"
+                 "2\n00:01:25,000 --> 00:01:27,000\n그래, 가자\n\n"
+                 "3\n00:01:30,000 --> 00:01:32,000\n- [가람] [한숨] 됐어.\n- [나래] 그래.\n\n"
+                 "4\n00:01:33,000 --> 00:01:35,000\n[가람] [재채기] 나도야!\n\n"
+                 "5\n00:01:36,000 --> 00:01:38,000\n[나래] 정말이야?\n[나래] [웃음]\n", encoding="utf-8")
+    doc = script.read(f)
+    got = [(ln["speaker"], ln["text"], ln.get("turn"), ln["vocal"]) for ln in doc["lines"]]
+    assert got == [(None, "누구야?", "1-1", []), (None, "나야", "1-2", []), (None, "그래, 가자", None, []),
+                   ("가람", "됐어.", "3-1", ["한숨"]), ("나래", "그래.", "3-2", []),
+                   ("가람", "나도야!", None, ["재채기"]), ("나래", "정말이야?", None, ["웃음"])]
+    # the alignment keeps it in dialogue.json (what the review layer and the placement read)
+    write_json(tmp_path / "project.json", {"t0": 0.0, "t1": 120.0, "duration": 120.0, "fps": 24.0})
+    write_json(tmp_path / "script.json", doc)
+    write_json(tmp_path / "asr.json", {"words": [{"w": "누구야?", "s": 80.0, "e": 80.3}, {"w": "나야", "s": 80.6, "e": 80.9}],
+                                       "vad": [[80.0, 81.0]]})
+    align.run(Project(tmp_path), {})
+    lines = read_json(tmp_path / "dialogue.json")["lines"]
+    assert [(ln["speaker"], ln.get("turn")) for ln in lines[:3]] == [(None, "1-1"), (None, "1-2"), (None, None)]
+
+
 def test_a_sound_alone_on_its_row_names_nobody(tmp_path):
     # another writer's subtitle: a sound on the row above the words, without hyphens
     sounds = ["전화벨", "정적", "침묵", "문 열림", "음악 계속", "빵빵", "띵동", "멀리서", "통화 중"]

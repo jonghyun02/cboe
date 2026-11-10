@@ -423,6 +423,19 @@ def _labelled_names(cells) -> set[str]:
     return out
 
 
+def _vocal_heads(text: str) -> tuple[list[str], str]:
+    """(the speaker's own sounds in brackets at the head of ``text``, the rest): ``[재채기] 나도야!``
+    -> (['재채기'], '나도야!'). A bracket that is no such sound stays in the rest."""
+    sounds = []
+    text = text.strip()
+    while True:
+        m = BRACKET_NAME_RE.match(text)
+        if not m or sp.direction_type(m.group(1).strip())[0] != "vocal":
+            return sounds, text
+        sounds.append(m.group(1).strip())
+        text = m.group(2).strip()
+
+
 def _subtitle_line(rows: list[str], known: set) -> tuple[dict, list[str]]:
     """The speaker cue and the words of the rows of one speaker in a cell."""
     cue = sp.parse_cue("")
@@ -434,6 +447,14 @@ def _subtitle_line(rows: list[str], known: set) -> tuple[dict, list[str]]:
             own = BRACKET_NAME_RE.fullmatch(r)
             if own and not own.group(2) and sp.direction_type(own.group(1))[0] == "vocal":
                 cue["vocal"].append(own.group(1).strip())     # in the speaker's rows: the speaker's own sound (II.5)
+            elif own and own.group(2):            # '[나래] [웃음]': a speaker label, then the speaker's own sound
+                probe = sp.parse_cue("")
+                sounds = _vocal_heads(own.group(2))
+                if sounds[0] and not sounds[1] and _label(own.group(1), probe) and probe["name"] and \
+                        (cue["name"] is None or re.sub(r"\s+", "", cue["name"]) == re.sub(r"\s+", "", probe["name"])):
+                    if cue["name"] is None:
+                        _label(own.group(1), cue)
+                    cue["vocal"].extend(sounds[0])
             continue                              # a sound line (a speaker label alone is read below)
         if r.startswith("♪"):                     # ♪ 가사 ♪
             r = r.strip("♪ ").strip()
@@ -442,6 +463,8 @@ def _subtitle_line(rows: list[str], known: set) -> tuple[dict, list[str]]:
         if m:
             _label(m.group(1), cue)
             r = m.group(2).strip()
+            sounds, r = _vocal_heads(r)           # '[가람] [재채기] 나도야!': the speaker's own sound (II.5)
+            cue["vocal"].extend(sounds)
             if r.startswith("♪"):                 # [영희] ♪ 가사 ♪
                 r = r.strip("♪ ").strip()
                 cue["sung"] = True
@@ -458,15 +481,26 @@ def _subtitle_line(rows: list[str], known: set) -> tuple[dict, list[str]]:
 
 def _read_subtitle(path: Path) -> dict:
     """A timed subtitle: one line per speaker of a cell — the two rows of a two-speaker cell
-    (``- [미나] …`` / ``- [준호] …``) are two lines with the time of the cell."""
+    (``- [미나] …`` / ``- [준호] …``) are two lines with the time of the cell. Such lines carry
+    ``turn`` "<cell>-<speaker>" (1-based): the hyphen says they are two speakers even when no
+    name is written (``- 누구야?`` / ``- 나야``), and the speaker stays None. A speaker's own sound
+    written alone after the label (``[미나] [웃음]``) goes to that speaker's words in the cell."""
     b = sp.Builder("timed")
     cells = _subtitle_cells(path)
     known = _labelled_names(cells)
-    for start, end, shown in cells:
-        for rows in _speaker_rows(shown):
+    for n, (start, end, shown) in enumerate(cells, 1):
+        groups = _speaker_rows(shown)
+        mine: list[dict] = []
+        for g, rows in enumerate(groups, 1):
             cue, texts = _subtitle_line(rows, known)
             if texts:
-                b.line(cue, _clean(" ".join(texts)), start=start, end=end)
+                extra = {"turn": f"{n}-{g}"} if len(groups) > 1 else {}
+                mine.append(b.line(cue, _clean(" ".join(texts)), start=start, end=end, **extra))
+            elif cue["vocal"] and cue["name"]:
+                who = re.sub(r"\s+", "", cue["name"])
+                to = next((ln for ln in reversed(mine) if re.sub(r"\s+", "", ln["speaker"] or "") == who), None)
+                if to is not None:
+                    to["vocal"].extend(v for v in cue["vocal"] if v not in to["vocal"])
     return b.document()
 
 
