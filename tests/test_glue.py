@@ -275,3 +275,42 @@ def test_a_class_without_a_description_is_never_named_in_english(monkeypatch):
         assert phrases.ko("Thunder") == "천둥"                  # a described class is as before
     finally:
         phrases.described_parent.cache_clear()
+
+
+# ------------------------------------------------------------ a subtitle read back as a script
+def test_a_speaker_label_alone_on_its_row_names_the_words_below(tmp_path):
+    f = tmp_path / "s.srt"
+    blocks = ["[김철수]\n안녕하세요반갑습니다만나서정말로", "[박영희/속마음/영어]\n오늘은 정말로 날씨가 좋네요",
+              "[쾅]\n뭐야 무슨 소리야", "[한숨]\n알았어 알았다고", "[음악]\n여기서 뭐 해", "[영어]\n이쪽으로 오세요 빨리요",
+              "- [천둥]\n- [미나] 누구세요?", "[김철수]", "[김철수]\n[달칵 - 문]", "[미나]\n- 거기 누구야"]
+    f.write_text("\n".join(f"{k}\n00:00:{k:02d},000 --> 00:00:{k:02d},800\n{b}\n" for k, b in enumerate(blocks, 1)),
+                 encoding="utf-8")
+    d = script.read(f)
+    got = [(ln["speaker"], ln["text"]) for ln in d["lines"]]
+    assert got == [("김철수", "안녕하세요반갑습니다만나서정말로"), ("박영희", "오늘은 정말로 날씨가 좋네요"),
+                   (None, "뭐야 무슨 소리야"), (None, "알았어 알았다고"), (None, "여기서 뭐 해"),
+                   (None, "이쪽으로 오세요 빨리요"), ("미나", "누구세요?"), (None, "거기 누구야")]
+    second = d["lines"][1]
+    assert (second["source"], second["language"]) == ("inner", "영어")
+    assert d["lines"][3]["vocal"] == ["한숨"] and d["lines"][5]["language"] == "영어"
+    assert d["characters"] == ["김철수", "박영희", "미나"]
+
+
+def test_an_exported_subtitle_keeps_its_speakers_when_read_back(tmp_path):
+    from cboe import export, placement
+    said = [("김철수", [], None, "안녕하세요반갑습니다만나서정말로"), ("김철수", ["속마음"], "영어", "오늘은 정말로 날씨가 좋네요"),
+            ("박영희", [], None, "응"), ("나래", [], None, "괜찮아 정말 괜찮다니까 걱정하지 마"),
+            ("할아버지", ["속마음"], None, "이제와서뭘어쩌자는거냐너는"), ("도윤", [], "독일어", "이쪽으로 오세요 빨리요 시간이 없어요")]
+    lines = [{"id": f"L{k:04d}", "speaker": name, "show_name": True, "name": name, "label_extra": extra, "language": lang,
+              "text": text, "start": 10.0 * k + 1.0, "end": 10.0 * k + 4.0, "timing": "asr", "status": "ok", "words": []}
+             for k, (name, extra, lang, text) in enumerate(said, 1)]
+    draft = placement.place(lines, [], [], 24.0, window=(0.0, None))
+    alone = [c["lines"] for c in draft["cells"] if c["lines"][0].startswith("[") and c["lines"][0].endswith("]")]
+    assert alone, "the placement breaks a line right after a long label (the case this reading is for)"
+    out = tmp_path / "out.srt"
+    export.write(draft["cells"], out, "srt", fps=24.0)
+    back = script.read(out)
+    assert [ln["speaker"] for ln in back["lines"]] == [name for name, *_ in said]
+    assert [ln["text"].replace(" ", "") for ln in back["lines"]] == [text.replace(" ", "") for *_, text in said]
+    assert [(ln["language"], ln["source"]) for ln in back["lines"]] == [
+        (None, None), ("영어", "inner"), (None, None), (None, None), (None, "inner"), ("독일어", None)]

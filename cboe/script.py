@@ -54,6 +54,7 @@ import io
 import json
 import re
 from collections import Counter
+from functools import lru_cache
 from pathlib import Path
 
 from . import screenplay as sp
@@ -291,6 +292,36 @@ def _label(text: str, cue: dict) -> bool:
     return True
 
 
+@lru_cache(maxsize=1)
+def _sound_words() -> frozenset:
+    """The sound words and descriptions of the phrase table ('쾅', '천둥', '천둥 소리')."""
+    from . import phrases
+    out = set()
+    for r in phrases.table().values():
+        for w in (r["ono"], r["desc"]):
+            if w:
+                out.update((w, re.sub(r"\s*소리$", "", w)))
+    return frozenset(out)
+
+
+def _label_line(r: str, following: list[str]) -> bool:
+    """A row that is only ``[이름]`` is the speaker label of the words on the next row when the
+    cell was broken right after the label (a long label, ``[김철수/속마음]`` then the words): the
+    next row goes on without a hyphen, and the label names somebody or a language — not a
+    sound (``[쾅]``, ``[음악]``, ``[한숨]``)."""
+    m = BRACKET_NAME_RE.fullmatch(r)
+    nxt = next((x for x in following if x), None)
+    if not m or m.group(2) or nxt is None or nxt.startswith(("-", "–")):
+        return False
+    if not LETTER_RE.search(BRACKETS_RE.sub(" ", INLINE_DIRECTION_RE.sub(" ", nxt))):
+        return False                                  # the next row is a sound too
+    probe = sp.parse_cue("")
+    if not _label(m.group(1), probe):
+        return False
+    name = probe["name"]
+    return not (name and (name in _sound_words() or re.search(r"(?:음악|소리|효과음)$", name)))
+
+
 def _read_subtitle(path: Path) -> dict:
     b = sp.Builder("timed")
     blocks = re.split(r"\n\s*\n", read_text(path).replace("\r\n", "\n").replace("\r", "\n").strip())
@@ -302,10 +333,16 @@ def _read_subtitle(path: Path) -> dict:
         g = TIME_RE.search(rows[tl]).groups()
         cue = sp.parse_cue("")
         texts = []
-        for r in rows[tl + 1:]:
-            r = re.sub(r"<[^>]+>", "", r).strip().lstrip("-").strip()
-            if not r or r.startswith("♬") or (r.startswith("[") and _direction_only(r)):
-                continue                              # a music or sound line
+        shown = [re.sub(r"<[^>]+>", "", r).strip() for r in rows[tl + 1:]]
+        for k, row in enumerate(shown):
+            r = row.lstrip("-").strip()
+            if not r or r.startswith("♬"):
+                continue                              # a music line
+            if r.startswith("[") and _direction_only(r) and not (row == r and _label_line(r, shown[k + 1:])):
+                own = BRACKET_NAME_RE.fullmatch(r) if row == r else None
+                if own and not own.group(2) and sp.direction_type(own.group(1))[0] == "vocal":
+                    cue["vocal"].append(own.group(1).strip())     # without a hyphen: the speaker's own sound (II.5)
+                continue                              # a sound line (a speaker label alone is read below)
             if r.startswith("♪"):                     # ♪ 가사 ♪
                 r = r.strip("♪ ").strip()
                 cue["sung"] = True
