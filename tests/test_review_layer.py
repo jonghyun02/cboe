@@ -575,6 +575,10 @@ def test_extras_added_and_people_api(client):
     assert c.post("/api/people", json={"names": []}).status_code == 400
     st = c.post("/api/people", json={"names": ["바다", "경찰1"], "mode": "name"}).json()
     assert st["export_check"]["names_early"] == []
+    # a sound the script writes down: moved inside its window like any other sound, then no guess
+    st = c.post("/api/placement/C0001", json={"action": "move", "t": 82.0}).json()
+    cell = next(x for x in st["draft"]["cells"] if "C0001" in x["refs"])
+    assert by_id(st["items"])["C0001"]["final"] == "include" and "timing_estimated" not in cell["flags"]
     # the older routes still work next to the new ones
     assert c.post("/api/items/S0001", json={"decision": "exclude"}).status_code == 200
     assert c.post("/api/placement/S0001", json={"action": "move", "t": 27.0}).status_code == 200

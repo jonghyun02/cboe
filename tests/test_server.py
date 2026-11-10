@@ -379,3 +379,23 @@ def test_cli_rejects_folder_without_project(tmp_path):
     with pytest.raises(SystemExit) as e:
         main([str(tmp_path)])
     assert e.value.code == 2
+
+
+# ------------------------------------------------------------- the review layer
+def test_an_older_sample_folder_carries_the_review_layer(client, work):
+    # the sample folder is written like an older work folder: no line status, no extras, no scenes
+    st = client.get("/api/state").json()
+    assert len(st["lines"]) == len(st["dialogue"]) and st["extras"] == [] and st["scenes"] == [] and st["added"] == []
+    sm = st["summary"]["lines"]
+    assert sm["status"]["ok"] == sm["total"] == len(st["dialogue"]) and sm["included"] == sm["total"]
+    assert all(r.get("include") and r["cells"] for r in st["lines"])
+    chk = st["export_check"]
+    assert chk["lines"]["differs_open"] == [] and chk["extras_open"] == [] and "names_early" in chk
+    assert {p["name"] for p in st["people"]} >= {ln["speaker"] for ln in st["dialogue"] if ln.get("speaker")}
+    # a line taken out and back through the new route; the old item routes are untouched
+    first = st["lines"][0]["id"]
+    st = client.post(f"/api/lines/{first}", json={"include": False}).json()
+    assert not any(first in c["refs"] for c in st["draft"]["cells"])
+    assert review(work)["lines"][first]["include"] is False and review(work)["items"] == {}
+    st = client.post(f"/api/lines/{first}", json={"include": None}).json()
+    assert any(first in c["refs"] for c in st["draft"]["cells"]) and first not in review(work)["lines"]
