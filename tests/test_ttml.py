@@ -120,6 +120,35 @@ def test_two_frames_between_cells_stay_two_frames_in_the_file(tmp_path, fps, end
     assert export.write(cells, tmp_path / "b.ttml", "ttml", fps=fps)["check"]["violations"] == []
 
 
+@pytest.mark.parametrize("fps, rate, mult", [
+    (30.00001486621153, "30", None), (60.00002, "60", None), (24.00001, "24", None), (25.000001, "25", None),
+    (29.99999, "30", None), (23.97603, "24", "1000 1001"), (29.97003, "30", "1000 1001"),
+    (29999 / 1251, "24", "29999 30024"), (12.5, "13", "25 26")])
+def test_a_rate_a_hair_off_a_whole_or_ntsc_rate_is_that_rate(tmp_path, fps, rate, mult):
+    # 4th round check: ffprobe's avg_frame_rate of a 30 fps video (frames over duration) was
+    # 30.00001486621153, and the header said ttp:frameRate="31" x 22198001/22937923. A rate within
+    # RATE_TOLERANCE of a whole or NTSC rate is that rate; a rate of its own (29999/1251) stays exact
+    assert export.frame_rate(fps) == (int(rate), mult)
+    cells = []
+    for n, at in enumerate((1128.0, 7000.0)):                 # a draft at fps: two frames between two cells
+        k = round(at * fps)
+        end, start = round(k / fps, 3), round((k + 2) / fps, 3)
+        cells += [cell(f"C{2 * n + 1}", round(end - 1.5, 3), end, ["가나다"]),
+                  cell(f"C{2 * n + 2}", start, round(start + 1.5, 3), ["라마바"])]
+    assert check.run({"cells": cells, "fps": fps})["violations"] == []
+    path = export.write(cells, tmp_path / "a.ttml", "ttml", fps=fps)["path"]
+    text = path.read_text(encoding="utf-8")
+    root = parse(text)
+    assert root.get(TTP + "frameRate") == rate and root.get(TTP + "frameRateMultiplier") == mult
+    got, meta = check.parse_ttml(text)
+    half = 0.5 / meta["fps"] + 1e-6
+    for a, b in zip(got, cells, strict=True):                 # the seconds come back within half a frame
+        assert abs(a["start"] - b["start"]) <= half and abs(a["end"] - b["end"]) <= half, (fps, a, b)
+    frames = [(round(c["start"] * meta["fps"]), round(c["end"] * meta["fps"])) for c in got]
+    assert [frames[1][0] - frames[0][1], frames[3][0] - frames[2][1]] == [2, 2]    # in the file's own frames
+    assert check.run(path, fps=fps)["violations"] == [] and check.run(path)["violations"] == []
+
+
 def test_characters_xml_cannot_hold_are_left_out():
     text = export.to_ttml([cell("C1", 1.0, 2.0, ["가\x02나\x1f", "\x0b다￾"])], 24, title="제\x00목")
     root = parse(text)                                        # still well-formed

@@ -12,7 +12,8 @@ adhere to the following technical specifications" = 자막·SDH 용 TTML 파일�
 따라야 한다): percentage values only, positioning with ``tts:textAlign`` and ``tts:displayAlign``
 on two regions (bottom, top) that have static ``tts:extent`` and ``tts:origin``, ``tts:fontSize``
 100%. Times are whole video frames (``240f`` with ``ttp:frameRate`` and, for 23.976 / 29.97 /
-59.94, ``ttp:frameRateMultiplier="1000 1001"``; another rate as it is, 29999/1251 = ``24`` x
+59.94, ``ttp:frameRateMultiplier="1000 1001"``; a rate within ``RATE_TOLERANCE`` of a whole or
+NTSC rate is that rate, 30.000015 = ``30``; another rate as it is, 29999/1251 = ``24`` x
 ``29999 30024``) counted at the rate the header states, so that the file gives back the seconds
 of the SRT within half a frame and the draft's frames (2 frames between cells stay 2); a cell's
 ``pos`` "top" is ``{\\an8}`` in SRT and ``line:10%`` in VTT; ``xml:lang`` is ko; characters
@@ -128,20 +129,35 @@ def _rounded(fps: float) -> bool:
     return abs(fps * 1000 - round(fps * 1000)) < 1e-6
 
 
+# How close (relative) a rate has to be to a whole or an NTSC rate to be taken as that rate. ffprobe's
+# avg_frame_rate is frames over duration and wobbles a little: a 30 fps video gave 30.00001486621153
+# (5e-7 off), which the header must not write as 31 x 22198001/22937923 (4th round check). 29999/1251
+# (23.98002, 1.7e-4 off 23.976 and 8e-4 off 24) is a rate of its own and stays as it is. Over two
+# hours 1e-5 is a few hundredths of a second, and the frames of the file still read back to the
+# draft's (``_ttml_frames``).
+RATE_TOLERANCE = 1e-5
+
+
+def _near(fps: float, rate: float) -> bool:
+    return abs(fps - rate) <= RATE_TOLERANCE * rate
+
+
 def frame_rate(fps: float) -> tuple[int, str | None]:
     """``ttp:frameRate`` and ``ttp:frameRateMultiplier`` of a video frame rate:
     24 -> (24, None), 23.976 -> (24, "1000 1001"), 29.97 -> (30, "1000 1001"). A rate a reader
-    rounded (OpenCV gives 23.98 for 24000/1001 video) is taken as the NTSC rate next to it. Any
-    other rate is written as it is, so that the frames of the file are the frames of the draft:
-    ffprobe gives 29999/1251 (23.98002) for some videos, which is ``24`` x ``29999 30024``, not
-    24 x 1000/1001 (counted at 23.976 a 2-frame gap of the draft became 1 frame in the file)."""
+    rounded (OpenCV gives 23.98 for 24000/1001 video) is taken as the NTSC rate next to it, and so
+    is a rate within ``RATE_TOLERANCE`` of a whole or NTSC rate (30.000015 -> 30). Any other rate is
+    written as it is, so that the frames of the file are the frames of the draft: ffprobe gives
+    29999/1251 (23.98002) for some videos, which is ``24`` x ``29999 30024``, not 24 x 1000/1001
+    (counted at 23.976 a 2-frame gap of the draft became 1 frame in the file)."""
     whole = max(1, round(fps))
+    ntsc = whole * 1000 / 1001
     exact = Fraction(fps).limit_denominator(1_000_000)
     if abs(float(exact) - fps) > 1e-9 * max(1.0, fps):
         exact = Fraction(fps).limit_denominator(1001)        # no small fraction: the nearest simple one
-    if exact == whole or (_rounded(fps) and abs(fps - whole) < 1e-3):
+    if exact == whole or _near(fps, whole) or (_rounded(fps) and abs(fps - whole) < 1e-3):
         return whole, None
-    if exact == Fraction(whole * 1000, 1001) or (_rounded(fps) and abs(fps - whole * 1000 / 1001) < 5e-3):
+    if exact == Fraction(whole * 1000, 1001) or _near(fps, ntsc) or (_rounded(fps) and abs(fps - ntsc) < 5e-3):
         return whole, "1000 1001"
     rate = max(1, math.ceil(exact))
     mult = exact / rate
