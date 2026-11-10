@@ -933,3 +933,53 @@ def test_a_speaker_decision_of_the_older_form_is_read_and_written_in_todays(tmp_
     assert (it["P0003"]["final"], it["P0003"]["decided"]) == ("exclude", True)    # 바다's '네'
     assert (it["P0002"]["final"], it["P0002"]["decided"]) == ("include", True)    # 하늘's '네' (P0001 before)
     assert not it["P0001"]["decided"]
+
+
+# =================================================================== 4차: 앞 줄이 확인 필요인 이어 말함
+def waiting_project(tmp_path):
+    ls = [line("L0001", "바다", "어서 들어와", 8.0, 9.0),
+          line("L0002", "하늘", "거기 누구 있어요", 10.0, 11.0),
+          line("L0003", "하늘", "대답 좀 해 봐요", 11.5, 12.5)]
+    items = [speaker_item(ls[0], face="visible", rec="exclude", reason="말하는 얼굴이 보임"),
+             speaker_item(ls[1], face="unclear", rec="check", reason="말하는 얼굴 판정 애매"),
+             # what the recommend stage leaves on the line after a 확인 필요 line of the same speaker
+             speaker_item(ls[2], rec="include", follows="P0002", reason="말하는 얼굴 안 보임 · 앞 줄을 먼저 정해야 함",
+                          evidence=[{"src": "script", "text": "앞 줄(P0002)과 같은 화자가 이어 말함 · 앞 줄은 아직 확인 필요"}])]
+    return make(tmp_path, lines=ls, items=items, extras=[])
+
+
+def p3_and_cells(p):
+    d = p.recompute()
+    it = by_id(p.effective_items(draft=d))["P0003"]
+    return (it["rec"], it.get("follows"), it["reason"]), [c["lines"] for c in d["cells"]]
+
+
+def test_the_line_after_one_still_to_check_waits_for_it_and_follows_the_writers_choice(tmp_path):
+    p = waiting_project(tmp_path)
+    got, cells = p3_and_cells(p)                 # nothing decided: the stage's link and note stay
+    assert got == ("include", "P0002", "말하는 얼굴 안 보임 · 앞 줄을 먼저 정해야 함")
+    assert cells == [["어서 들어와"], ["거기 누구 있어요"], ["[하늘] 대답 좀 해 봐요"]]
+    with TestClient(create_app(p.work)) as c:    # and reach the review screen
+        it = by_id(c.get("/api/state").json()["items"])["P0003"]
+        assert it["follows"] == "P0002" and it["reason"].endswith("앞 줄을 먼저 정해야 함")
+    p.set_decision("P0002", decision="include")  # the name goes on the line before: this one goes on from it
+    got, cells = p3_and_cells(p)
+    assert got == ("exclude", "P0002", "같은 화자가 이어 말함 · 앞 줄에 이름 표시")
+    assert cells == [["어서 들어와"], ["[하늘] 거기 누구 있어요"], ["대답 좀 해 봐요"]]
+    p.set_decision("P0002", decision="exclude")  # no name there (its face was not seen): the name comes here
+    got, cells = p3_and_cells(p)
+    assert got == ("include", None, "말하는 얼굴 안 보임")
+    assert cells == [["어서 들어와"], ["거기 누구 있어요"], ["[하늘] 대답 좀 해 봐요"]]
+    p.set_decision("P0002", decision=None)
+    p.set_line("L0002", include=False)           # the line before is out
+    got, cells = p3_and_cells(p)
+    assert got == ("include", None, "말하는 얼굴 안 보임") and cells == [["어서 들어와"], ["[하늘] 대답 좀 해 봐요"]]
+
+
+def test_a_line_left_without_a_name_whose_face_was_seen_still_identifies(tmp_path):
+    ls = run_lines()[:2]
+    items = [speaker_item(ls[0], face="visible", rec="exclude", reason="말하는 얼굴이 보임"), speaker_item(ls[1])]
+    p = make(tmp_path, lines=ls, items=items, extras=[])
+    p.set_decision("P0001", decision="exclude")
+    it = by_id(p.effective_items())["P0002"]
+    assert (it["final"], it["follows"]) == ("exclude", "P0001")

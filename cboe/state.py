@@ -49,7 +49,10 @@ recommendations that lean on another item worked out again, ``effective_items``)
 - '같은 화자가 이어 말함' (감사 3-07) is worked out again from the merged lines: the line before
   (in film order, in the subtitles) is of the same person and the same scene and source, and that
   person was identified there (the name shown, or no name needed: a visible face, an earlier
-  run) — no time limit. The writer's own decisions are never changed.
+  run) — no time limit. The writer leaving the name out of a line whose face is not seen
+  identifies nobody: the next line shows the name. While the line before is still 확인 필요, the
+  line keeps its own recommendation, ``follows`` that line and says '앞 줄을 먼저 정해야 함' (as the
+  recommend stage leaves it). The writer's own decisions are never changed.
 - '앞 자막에서 이미 알림' (감사 6-m2, 9-x1): a sound or music item that ``follows`` a root is
   'already told' only when the root really goes out (final include and placed); otherwise it is
   확인 필요. The writer's own decisions are never changed.
@@ -79,7 +82,8 @@ ADDED_KINDS = ("line", "sfx", "music")
 MAX_TEXT = 1000                               # letters of a line the writer writes (a long speech is ~300)
 MAX_PHRASE = 200                              # letters of a sound or note the writer writes
 CONTINUES = "같은 화자가 이어 말함"            # the reason of a speaker item whose name a run carries
-SETTLE_MAX = 64                               # placements of one settle at most (a chain ends far sooner)
+WAITS = "앞 줄을 먼저 정해야 함"               # the same speaker after a line still 확인 필요 (recommend)
+SETTLE_MAX = 64                              # placements of one settle at most (a chain ends far sooner)
 
 
 class ReviewError(ValueError):
@@ -1447,8 +1451,10 @@ def _speaker_runs(lines: list[dict], eff: list[dict], decide, unplaced=()) -> No
             continue
         person = ln.get("name")
         it = by_id.get(ln.get("speaker_item")) if ln.get("speaker_item") else None
-        cont = bool(last is not None and person and last["person"] == person and last["ident"]
+        same = bool(last is not None and person and last["person"] == person
                     and last["scene"] == ln.get("scene_id") and last["source"] == ln.get("source"))
+        cont = same and last["ident"]
+        pending = None
         if it is None:
             # a line the writer added or brought back (no speaker item: it had no time); any other
             # line without one is shown without a name, as before
@@ -1458,6 +1464,7 @@ def _speaker_runs(lines: list[dict], eff: list[dict], decide, unplaced=()) -> No
             ident, root = ln["show_name"], ln["id"]
         else:
             sp = it["speaker"]
+            face = sp.get("face")
             if not it["decided"]:
                 rec, reason = it.get("rec", "check"), it.get("reason")
                 s2 = dict(it, speaker=dict(sp, estimated=ln["estimated"]))
@@ -1465,9 +1472,13 @@ def _speaker_runs(lines: list[dict], eff: list[dict], decide, unplaced=()) -> No
                 if stage_cont or bool(sp.get("stage_name")) != bool(sp.get("name")):
                     rec, reason, _ = decide(s2, None)        # the stage's run, or a name the script did not give
                 follows = None
-                if cont and decide(s2, last)[0] == "exclude" and sp.get("face") == "not_visible":
+                if cont and decide(s2, last)[0] == "exclude" and face == "not_visible":
                     rec, follows = "exclude", last["root"]
                     reason = f"{CONTINUES} · " + ("앞 줄에 이름 표시" if last["shown"] else "앞 줄에서 이미 식별됨")
+                elif same and last["pending"]:
+                    # the same speaker goes on after a line still 확인 필요: this line keeps its own
+                    # recommendation until the writer decides that one (recommend: '앞 줄을 먼저 정해야 함')
+                    follows, reason = last["pending"], f"{reason} · {WAITS}"
                 if (rec, reason, follows) != (it.get("rec"), it.get("reason"), it.get("follows")):
                     it["rec_stage"] = it.get("rec_stage", it.get("rec"))
                     it["rec"], it["reason"] = rec, reason
@@ -1476,13 +1487,19 @@ def _speaker_runs(lines: list[dict], eff: list[dict], decide, unplaced=()) -> No
                     else:
                         it.pop("follows", None)
                 it["final"] = rec
+                if rec == "check":
+                    pending = it["id"]
             ln["show_name"] = it["final"] == "include" and bool(person)
-            ident = bool(person) and it["final"] in ("include", "exclude")
+            # identified here: the name is shown, the face is seen, or the run goes on (also when the
+            # writer agrees to it); the writer leaving the name out of a line whose face is not seen
+            # names nobody, so the line after it shows the name (II.8: '… cannot be visually identified')
+            ident = bool(person) and (it["final"] == "include" or face == "visible"
+                                      or (it["final"] == "exclude" and (cont or not it["decided"])))
             root = last["root"] if cont and it["final"] == "exclude" and it.get("follows") else it["id"]
         if ln["id"] in unplaced:
-            ident, root = False, ln["id"]
+            ident, root, pending = False, ln["id"], None
         last = {"person": person, "scene": ln.get("scene_id"), "source": ln.get("source"), "ident": ident,
-                "shown": ln["show_name"] and ln["id"] not in unplaced, "root": root}
+                "shown": ln["show_name"] and ln["id"] not in unplaced, "root": root, "pending": pending}
 
 
 def _followers(eff: list[dict], draft: dict | None) -> None:
