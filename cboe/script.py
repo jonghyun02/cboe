@@ -3,7 +3,9 @@
 
 Accepted files
 - ``.pdf`` / ``.hwp``: a shooting script (촬영 대본) — scene headings, action, speaker cells with
-  the dialogue beside them, directions in parentheses. Read by ``cboe.screenplay``.
+  the dialogue beside them, directions in parentheses. Read by ``cboe.screenplay``. A PDF without
+  a speaker column is read as text (below); a row that only goes on with the words of a full
+  row above it is joined to that row, so a long ``이름: 대사`` stays one line.
 - ``.txt`` / ``.docx``: told apart by what is in them. A text whose speaker cells are set off by
   a tab or a wide gap (or stand on the line above, under scene headings) is a shooting script.
   Otherwise one dialogue line per text line (a Word paragraph, a line break inside one, or a
