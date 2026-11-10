@@ -20,11 +20,21 @@ frame about every second (fast seeking), ``+faststart``. Its 0 s is the film's t
   rule: ``build`` calls ``guard.check_window`` first, as ``pipeline.run`` does). Only the first
   video stream and the first sound stream are used; the frame rate is not changed.
 * ``build(work, meta, ...)`` — runs it (``-progress`` → ``on_progress(0..1)``) into
-  ``review.mp4.part``, renames it when done and writes ``review.mp4.json`` = ``{"video", "size",
-  "mtime", "t0", "t1", "encoder", "width", "height"}``.
+  ``review.mp4.<pid>.part`` (a name of this process only), checks the result (ffprobe: one H.264
+  video, an AAC sound when the source has one, the length of the window; a second at the start,
+  the middle and the end decodes without an error), renames it when done and writes
+  ``review.mp4.json`` = ``{"video", "size", "mtime", "t0", "t1", "encoder", "width", "height"}``.
+  The whole build holds ``review.mp4.lock`` (``filelock``, as ``pipeline.run`` holds
+  ``.run.lock``): a second build of the same work folder — another ``Worker`` in this process
+  (the studio dropped a project's review app and opened it again) or another server — waits
+  for the first (``on_wait``) and then takes its copy when it is fresh, instead of starting a
+  second ffmpeg on the same file. Part files left by an ended process are removed under it.
 * ``fresh(work, meta)`` — is ``review.mp4`` still the copy of this source and this window.
 * ``Worker`` — one background thread per work folder and the state the server shows
   (``status()``: none | source | building | ready | failed); ``close()`` ends ffmpeg.
+* On Windows every ffmpeg of a build is put in one Job Object of this process that ends its
+  processes when the process ends in any way, so a server killed hard (``taskkill /F``, where
+  ``atexit`` does not run) leaves no ffmpeg writing into the work folder.
 """
 from __future__ import annotations
 
@@ -33,11 +43,14 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import threading
 import time
 from pathlib import Path
 from typing import Callable
+
+from filelock import FileLock, Timeout
 
 from . import guard
 from .util import NO_WINDOW, log, read_json, write_json
@@ -45,6 +58,8 @@ from .util import NO_WINDOW, log, read_json, write_json
 FFMPEG = "ffmpeg"
 FFPROBE = "ffprobe"
 OUT_NAME = "review.mp4"
+LOCK_NAME = f"{OUT_NAME}.lock"      # held for a whole build: one ffmpeg per work folder
+WAIT_NOTE = "다른 곳에서 이 작업의 재생용 영상을 만드는 중입니다 · 끝나면 그것을 씁니다"
 MAX_WIDTH = 960
 GPU_ENCODERS = ("h264_qsv", "h264_nvenc", "h264_amf")
 CPU_ENCODER = "libx264"
@@ -214,9 +229,37 @@ def encoders(refresh: bool = False) -> list[str]:
 
 # ------------------------------------------------------------------ files
 def paths(work) -> tuple[Path, Path, Path]:
-    """``review.mp4``, ``review.mp4.json`` and ``review.mp4.part`` of a work folder."""
+    """``review.mp4``, ``review.mp4.json`` and the part file this process writes while it makes
+    the copy (``review.mp4.<pid>.part``: an ffmpeg left by another process never writes it)."""
     work = Path(work)
-    return work / OUT_NAME, work / f"{OUT_NAME}.json", work / f"{OUT_NAME}.part"
+    return work / OUT_NAME, work / f"{OUT_NAME}.json", work / f"{OUT_NAME}.{os.getpid()}.part"
+
+
+def part_files(work) -> list[Path]:
+    """Every part file in the work folder: this process's, other processes' and the old fixed
+    name ``review.mp4.part``."""
+    work = Path(work)
+    found = sorted(work.glob(f"{OUT_NAME}.*.part"))
+    old = work / f"{OUT_NAME}.part"
+    return ([old] if old.is_file() else []) + found
+
+
+def _clear_parts(work) -> None:
+    """Under the lock: remove the part files of builds that ended without renaming them (a
+    process killed hard). One still open elsewhere (an ffmpeg left running by such a process)
+    cannot be removed on Windows; it is kept, as this build writes its own name. This process's
+    own name must go, or the build would write into a file someone else has open."""
+    own = paths(work)[2]
+    for p in part_files(work):
+        try:
+            p.unlink()
+            log.info("재생용 영상: 끝나지 못한 만들기의 조각 파일 %s 을 지웠습니다", p.name)
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            if p == own:
+                raise BuildError(f"{p.name} 을 지우지 못했습니다 · 다른 프로그램이 쓰고 있습니다") from exc
+            log.warning("재생용 영상: %s 은 다른 프로그램이 아직 쓰고 있어 그대로 둡니다", p.name)
 
 
 def window(meta: dict) -> tuple[float, float | None]:
@@ -286,6 +329,83 @@ def _end_live() -> None:
             pass
 
 
+_JOB_LIMIT_KILL_ON_JOB_CLOSE = 0x2000
+_JOB_EXTENDED_LIMIT_INFORMATION = 9           # JOBOBJECTINFOCLASS
+_job_lock = threading.Lock()
+_job_made: list = []                          # [(kernel32, handle) or None] once tried
+
+
+def _make_job():
+    """A Windows Job Object that ends its processes when its last handle closes."""
+    import ctypes
+    from ctypes import wintypes
+
+    class IoCounters(ctypes.Structure):
+        _fields_ = [(n, ctypes.c_ulonglong) for n in ("ReadOperationCount", "WriteOperationCount",
+                    "OtherOperationCount", "ReadTransferCount", "WriteTransferCount", "OtherTransferCount")]
+
+    class BasicLimits(ctypes.Structure):
+        _fields_ = [("PerProcessUserTimeLimit", ctypes.c_int64), ("PerJobUserTimeLimit", ctypes.c_int64),
+                    ("LimitFlags", wintypes.DWORD), ("MinimumWorkingSetSize", ctypes.c_size_t),
+                    ("MaximumWorkingSetSize", ctypes.c_size_t), ("ActiveProcessLimit", wintypes.DWORD),
+                    ("Affinity", ctypes.c_size_t), ("PriorityClass", wintypes.DWORD),
+                    ("SchedulingClass", wintypes.DWORD)]
+
+    class ExtendedLimits(ctypes.Structure):
+        _fields_ = [("BasicLimitInformation", BasicLimits), ("IoInfo", IoCounters),
+                    ("ProcessMemoryLimit", ctypes.c_size_t), ("JobMemoryLimit", ctypes.c_size_t),
+                    ("PeakProcessMemoryUsed", ctypes.c_size_t), ("PeakJobMemoryUsed", ctypes.c_size_t)]
+
+    k32 = ctypes.WinDLL("kernel32", use_last_error=True)        # own function objects: no shared argtypes
+    k32.CreateJobObjectW.restype = wintypes.HANDLE
+    k32.CreateJobObjectW.argtypes = (ctypes.c_void_p, wintypes.LPCWSTR)
+    k32.SetInformationJobObject.restype = wintypes.BOOL
+    k32.SetInformationJobObject.argtypes = (wintypes.HANDLE, ctypes.c_int, ctypes.c_void_p, wintypes.DWORD)
+    k32.AssignProcessToJobObject.restype = wintypes.BOOL
+    k32.AssignProcessToJobObject.argtypes = (wintypes.HANDLE, wintypes.HANDLE)
+    k32.CloseHandle.argtypes = (wintypes.HANDLE,)
+    job = k32.CreateJobObjectW(None, None)
+    if not job:
+        raise ctypes.WinError(ctypes.get_last_error())
+    limits = ExtendedLimits()
+    limits.BasicLimitInformation.LimitFlags = _JOB_LIMIT_KILL_ON_JOB_CLOSE
+    if not k32.SetInformationJobObject(job, _JOB_EXTENDED_LIMIT_INFORMATION, ctypes.byref(limits),
+                                       ctypes.sizeof(limits)):
+        err = ctypes.get_last_error()
+        k32.CloseHandle(job)
+        raise ctypes.WinError(err)
+    return k32, job
+
+
+def _job():
+    """The Job Object of this process (made once), or None off Windows or when Windows refuses.
+    Only this process holds its handle, so Windows ends the ffmpeg in it when this process
+    ends in any way, also when it is killed hard and ``atexit`` cannot run."""
+    with _job_lock:
+        if not _job_made:
+            made = None
+            if sys.platform == "win32":
+                try:
+                    made = _make_job()
+                except (OSError, AttributeError, ValueError) as exc:
+                    log.warning("재생용 영상: 작업 개체를 만들지 못했습니다 (%s) · 서버를 강제로 끄면 ffmpeg 가 남을 수 있습니다", exc)
+            _job_made.append(made)
+        return _job_made[0]
+
+
+def _to_job(proc: subprocess.Popen) -> bool:
+    """Put a started ffmpeg in this process's Job Object (True when it is in it)."""
+    made = _job()
+    handle = getattr(proc, "_handle", None)
+    if made is None or handle is None:
+        return False
+    k32, job = made
+    if k32.AssignProcessToJobObject(job, int(handle)):
+        return True
+    log.warning("재생용 영상: ffmpeg 를 작업 개체에 넣지 못했습니다 · 서버를 강제로 끄면 ffmpeg 가 남을 수 있습니다")
+    return False
+
+
 def _run_ffmpeg(cmd: list[str], span: float, on_progress, cancel, on_process) -> tuple[int, str]:
     """Run one ffmpeg, report ``out_time / span`` and return (return code, last error line)."""
     with tempfile.TemporaryFile() as errf:          # stderr off a pipe: a flood of decode errors cannot block ffmpeg
@@ -293,6 +413,7 @@ def _run_ffmpeg(cmd: list[str], span: float, on_progress, cancel, on_process) ->
                                 creationflags=NO_WINDOW)
         with _live_lock:
             _live.add(proc)
+        _to_job(proc)                               # ended with this process, even when it is killed hard
         if on_process is not None:
             on_process(proc)
         try:
@@ -335,15 +456,69 @@ def _replace(src: Path, dst: Path) -> None:
             time.sleep(0.1)
 
 
+def check_copy(path, span: float, has_audio: bool, timeout: float = 60.0) -> str | None:
+    """None when a made copy looks whole, else the reason (one Korean line). ffprobe must find
+    an H.264 video, an AAC sound when the source has sound, and ``span`` seconds (±1 s or 1 %);
+    then one second at the start, the middle and the end must decode without an error line.
+    A file two writers wrote at once has the right length and streams but fails the decoding
+    ('Invalid NAL unit size')."""
+    try:
+        got = probe(path, timeout=timeout)
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        return f"만든 파일을 읽지 못했습니다 · {_reason(exc)}"
+    if got.get("vcodec") != "h264":
+        return f"만든 파일에 H.264 영상이 없습니다 ({got.get('vcodec')})"
+    if has_audio and got.get("acodec") != "aac":
+        return f"만든 파일에 AAC 소리가 없습니다 ({got.get('acodec')})"
+    length = float(got.get("duration") or 0.0)
+    if abs(length - span) > max(1.0, 0.01 * span):
+        return f"만든 파일의 길이가 {length:.1f}초입니다 (처리 구간 {span:.1f}초)"
+    for at in sorted({0.0, round(span / 2.0, 3), round(max(0.0, span - 1.0), 3)}):
+        cmd = [FFMPEG, "-hide_banner", "-nostdin", "-v", "error", "-xerror", "-ss", f"{at:.3f}", "-i", str(path),
+               "-t", "1", "-f", "null", "-"]
+        try:
+            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                               timeout=timeout, creationflags=NO_WINDOW)
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"만든 파일을 풀어 보지 못했습니다 · {at:.1f}초 · {type(exc).__name__}"
+        lines = [x.strip() for x in r.stderr.splitlines() if x.strip()]
+        if r.returncode != 0 or lines:
+            return f"만든 파일이 깨져 있습니다 · {at:.1f}초 · " + (lines[0] if lines else f"ffmpeg 종료 코드 {r.returncode}")
+    return None
+
+
+def _hold(work: Path, cancel: threading.Event | None, on_wait: Callable[[], None] | None) -> FileLock:
+    """Take ``review.mp4.lock`` of the work folder, waiting while another build holds it (in this
+    process or another). ``on_wait`` is called once when it has to wait; ``cancel`` stops the wait."""
+    lock = FileLock(str(work / LOCK_NAME))
+    told = False
+    while True:
+        try:
+            lock.acquire(timeout=0.25)
+            return lock
+        except Timeout:
+            if cancel is not None and cancel.is_set():
+                raise Cancelled("재생용 영상 만들기를 멈췄습니다") from None
+            if not told:
+                told = True
+                log.info("재생용 영상: %s · %s", WAIT_NOTE, work.name)
+                if on_wait is not None:
+                    on_wait()
+
+
 def build(work, meta: dict, *, info: dict | None = None, encoder_list: list[str] | None = None,
           on_progress: Callable[[float], None] | None = None, cancel: threading.Event | None = None,
-          on_process: Callable[[subprocess.Popen | None], None] | None = None) -> dict:
+          on_process: Callable[[subprocess.Popen | None], None] | None = None,
+          on_wait: Callable[[], None] | None = None) -> dict:
     """Make ``<work>/review.mp4`` from [t0, t1) of ``meta["video"]`` (``meta`` = project.json).
 
-    The window is checked with ``guard.check_window`` first (as ``pipeline.run`` does). The
-    encoders are tried in the order of ``encoder_list`` (default ``encoders()``); the next one
-    only when one fails on this file. Returns what it writes to ``review.mp4.json``. Raises
-    ``ValueError`` (sealed part), ``BuildError`` (cannot be made) or ``Cancelled``."""
+    The window is checked with ``guard.check_window`` first (as ``pipeline.run`` does). Then
+    ``review.mp4.lock`` is taken for the whole build: while another build of this folder holds
+    it this one waits (``on_wait()`` once), and when the copy that build made is fresh for this
+    source and window it is taken as it is (no second ffmpeg). The encoders are tried in the
+    order of ``encoder_list`` (default ``encoders()``); the next one only when one fails on
+    this file or its result fails ``check_copy``. Returns what is in ``review.mp4.json``.
+    Raises ``ValueError`` (sealed part), ``BuildError`` (cannot be made) or ``Cancelled``."""
     work = Path(work)
     video = str(meta.get("video") or "")
     t0, t1 = window(meta)
@@ -358,35 +533,54 @@ def build(work, meta: dict, *, info: dict | None = None, encoder_list: list[str]
     if not encs:
         raise BuildError("쓸 수 있는 H.264 인코더가 없습니다 (h264_qsv · h264_nvenc · h264_amf · libx264 모두 안 됨)")
     out, side, part = paths(work)
-    key = source_key(video, t0, t1)                 # what is read, taken before reading it
-    side.unlink(missing_ok=True)                    # an old copy is not this one any more
-    w, h = out_size(info["width"], info["height"], info.get("sar") or 1.0)
-    errors = []
-    for n, enc in enumerate(encs):
-        if cancel is not None and cancel.is_set():
-            raise Cancelled("재생용 영상 만들기를 멈췄습니다")
-        cmd = command(video, part, t0, t1, enc, width=info["width"], height=info["height"], fps=info.get("fps") or 0.0,
-                      sar=info.get("sar") or 1.0, vindex=info.get("vindex"), aindex=info.get("aindex"),
-                      has_audio=bool(info.get("has_audio")))
-        log.info("재생용 영상: %s 로 만듭니다 · %s %.3f~%.3f초 → %dx%d", enc, Path(video).name, t0, t1, w, h)
-        started = time.time()
-        try:
-            rc, err = _run_ffmpeg(cmd, t1 - t0, on_progress, cancel, on_process)
-        except BaseException:
-            part.unlink(missing_ok=True)
-            raise
-        if rc == 0 and part.is_file() and part.stat().st_size > 0:
-            _replace(part, out)
-            rec = {**key, "encoder": enc, "width": w, "height": h}
-            write_json(side, rec)
-            log.info("재생용 영상: 다 만들었습니다 · %s · %.1f초 걸림 · %.1f MB", enc, time.time() - started,
-                     out.stat().st_size / 1e6)
+    lock = _hold(work, cancel, on_wait)
+    try:
+        if fresh(work, meta):                       # made by the build this one waited for
+            rec = read_json(side)
+            log.info("재생용 영상: 다른 곳에서 만든 것을 씁니다 · %s", rec.get("encoder"))
             return rec
-        part.unlink(missing_ok=True)
-        errors.append(f"{enc}: {err}")
-        log.warning("재생용 영상: %s 로 만들지 못했습니다 (%s)%s", enc, err,
-                    f" · 다음은 {encs[n + 1]}" if n + 1 < len(encs) else "")
-    raise BuildError("재생용 영상을 만들지 못했습니다 · " + " / ".join(errors))
+        _clear_parts(work)
+        key = source_key(video, t0, t1)             # what is read, taken before reading it
+        side.unlink(missing_ok=True)                # an old copy is not this one any more
+        w, h = out_size(info["width"], info["height"], info.get("sar") or 1.0)
+        has_audio = bool(info.get("has_audio"))
+        span = t1 - t0
+        length = float(info.get("duration") or 0.0)
+        if length > t0:
+            span = min(span, length - t0)           # a window past the end of the file gives less
+        errors = []
+        for n, enc in enumerate(encs):
+            if cancel is not None and cancel.is_set():
+                raise Cancelled("재생용 영상 만들기를 멈췄습니다")
+            cmd = command(video, part, t0, t1, enc, width=info["width"], height=info["height"],
+                          fps=info.get("fps") or 0.0, sar=info.get("sar") or 1.0, vindex=info.get("vindex"),
+                          aindex=info.get("aindex"), has_audio=has_audio)
+            log.info("재생용 영상: %s 로 만듭니다 · %s %.3f~%.3f초 → %dx%d", enc, Path(video).name, t0, t1, w, h)
+            started = time.time()
+            try:
+                rc, err = _run_ffmpeg(cmd, t1 - t0, on_progress, cancel, on_process)
+                if rc == 0 and part.is_file() and part.stat().st_size > 0:
+                    bad = check_copy(part, span, has_audio)
+                    err = bad or err
+                else:
+                    bad = err
+            except BaseException:
+                part.unlink(missing_ok=True)
+                raise
+            if bad is None:
+                _replace(part, out)
+                rec = {**key, "encoder": enc, "width": w, "height": h}
+                write_json(side, rec)
+                log.info("재생용 영상: 다 만들었습니다 · %s · %.1f초 걸림 · %.1f MB", enc, time.time() - started,
+                         out.stat().st_size / 1e6)
+                return rec
+            part.unlink(missing_ok=True)
+            errors.append(f"{enc}: {err}")
+            log.warning("재생용 영상: %s 로 만들지 못했습니다 (%s)%s", enc, err,
+                        f" · 다음은 {encs[n + 1]}" if n + 1 < len(encs) else "")
+        raise BuildError("재생용 영상을 만들지 못했습니다 · " + " / ".join(errors))
+    finally:
+        lock.release()
 
 
 # ------------------------------------------------------------------ worker
@@ -419,7 +613,8 @@ class Worker:
          "t0": seconds (the film time of the video's 0 s: 0 for source and none, the window
                start for ready, building and failed),
          "progress": 0..1 while building (None before the first progress line) else None,
-         "note": one Korean line or None}
+         "note": one Korean line or None (while building: ``WAIT_NOTE`` when another build of
+                 this folder runs and this one waits for its copy)}
 
     ``start()`` decides in the background (an up-to-date ``review.mp4`` → ready; a source the
     browser plays → source; otherwise building → ready | failed). When project.json names
@@ -517,10 +712,18 @@ class Worker:
             self._file = file
             self._decided.set()
 
+    def _waiting(self) -> None:
+        """``build`` waits for another build of this folder (another Worker or server)."""
+        with self._lock:
+            if self._state["state"] == "building":
+                self._state["progress"] = None
+                self._state["note"] = WAIT_NOTE
+
     def _progress(self, frac: float) -> None:
         with self._lock:
             if self._state["state"] == "building":
                 self._state["progress"] = round(frac, 3)
+                self._state["note"] = None          # this worker's own ffmpeg makes it now
         tenth = int(frac * 10)
         if tenth != self._last_tenth:
             self._last_tenth = tenth
@@ -583,7 +786,7 @@ class Worker:
         self._set("building", t0, progress=0.0)
         try:
             build(self.work, meta, info=info, on_progress=self._progress, cancel=self._cancel,
-                  on_process=self._on_process)
+                  on_process=self._on_process, on_wait=self._waiting)
         except Cancelled as exc:
             return self._set("failed", t0, note=str(exc))
         except (ValueError, BuildError) as exc:     # ValueError: guard (sealed part), bad size or window

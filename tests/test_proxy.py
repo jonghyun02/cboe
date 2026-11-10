@@ -9,6 +9,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import threading
 import time
 
@@ -225,7 +226,7 @@ def _until(get, cond, timeout=10.0):
 
 
 def _fake_build(gate=None, calls=None, encoder="h264_qsv"):
-    def build(work, meta, *, info, on_progress, cancel, on_process):
+    def build(work, meta, *, info, on_progress, cancel, on_process, **_kw):
         if calls is not None:
             calls.append(dict(meta))
         on_progress(0.5)
@@ -360,7 +361,7 @@ def test_worker_keeps_the_sealed_part_rule(tmp_path, no_ffmpeg):
     with TestClient(create_app(folder(tmp_path, video=src, t1=10.0))) as c:
         m = _until(lambda: c.get("/api/media").json(), lambda m: m["state"] != "building")
         assert m["state"] == "failed" and "연구 규칙" in m["note"]
-    assert not (tmp_path / "work" / "review.mp4.part").exists()
+    assert not proxy.part_files(tmp_path / "work") and not (tmp_path / "work" / "review.mp4.part").exists()
 
 
 def test_closing_the_server_stops_the_build(tmp_path, no_ffmpeg):
@@ -368,7 +369,7 @@ def test_closing_the_server_stops_the_build(tmp_path, no_ffmpeg):
     src.write_bytes(b"source")
     seen = threading.Event()
 
-    def slow(work, meta, *, info, on_progress, cancel, on_process):
+    def slow(work, meta, *, info, on_progress, cancel, on_process, **_kw):
         seen.set()
         assert cancel.wait(10)
         raise proxy.Cancelled("재생용 영상 만들기를 멈췄습니다")
@@ -379,6 +380,138 @@ def test_closing_the_server_stops_the_build(tmp_path, no_ffmpeg):
         assert seen.wait(10) and c.get("/api/media").json()["state"] == "building"
     worker = app.state.review.media
     assert worker._thread is None and worker.status()["state"] == "failed"
+
+
+# ------------------------------------------------------------------ one build per work folder (no ffmpeg)
+def _held_ffmpeg(gate, runs, data=b"one copy"):
+    """``_run_ffmpeg`` stand-in: writes ``data`` to the part file it is given and waits for ``gate``."""
+    running = []
+
+    def run(cmd, span, on_progress, cancel, on_process):
+        runs.append(os.path.basename(cmd[-1]))
+        running.append(1)
+        try:
+            assert len(running) == 1, "two ffmpeg on one work folder"
+            with open(cmd[-1], "wb") as f:
+                f.write(data)
+            if on_progress is not None:
+                on_progress(0.5)
+            while not gate.wait(0.02):
+                if cancel is not None and cancel.is_set():
+                    raise proxy.Cancelled("재생용 영상 만들기를 멈췄습니다")
+            return 0, ""
+        finally:
+            running.pop()
+    return run
+
+
+@pytest.fixture()
+def held(no_ffmpeg):
+    """The real build (lock, part file, rename) with ffmpeg and the decoding check replaced."""
+    no_ffmpeg.setattr(proxy, "probe", lambda p: info())
+    no_ffmpeg.setattr(proxy, "encoders", lambda refresh=False: ["h264_qsv"])
+    no_ffmpeg.setattr(proxy, "check_copy", lambda path, span, has_audio, timeout=60.0: None)
+    return no_ffmpeg
+
+
+READY5 = {"state": "ready", "t0": 5.0, "progress": None, "note": None}
+
+
+def test_a_second_worker_on_the_same_folder_waits_for_the_first_build_and_takes_its_copy(tmp_path, held):
+    src = tmp_path / "film.mkv"
+    src.write_bytes(b"source")
+    work = folder(tmp_path, video=src, t0=5.0, t1=20.0)
+    gate, runs = threading.Event(), []
+    held.setattr(proxy, "_run_ffmpeg", _held_ffmpeg(gate, runs))
+    first = proxy.Worker(work).start()
+    second = None
+    try:
+        assert _until(first.status, lambda m: m.get("progress") == 0.5)["state"] == "building"
+        second = proxy.Worker(work).start()
+        m = _until(second.status, lambda m: m.get("note") == proxy.WAIT_NOTE)
+        assert m == {"state": "building", "t0": 5.0, "progress": None, "note": proxy.WAIT_NOTE}
+        time.sleep(0.3)
+        assert runs == [f"review.mp4.{os.getpid()}.part"]          # the second started no ffmpeg
+        gate.set()
+        assert _until(first.status, lambda m: m["state"] != "building") == READY5
+        assert _until(second.status, lambda m: m["state"] != "building") == READY5
+        assert len(runs) == 1 and second.file() == work / "review.mp4"
+        assert (work / "review.mp4").read_bytes() == b"one copy" and not proxy.part_files(work)
+        assert proxy.fresh(work, json.loads((work / "project.json").read_text(encoding="utf-8")))
+    finally:
+        gate.set()
+        first.close()
+        if second is not None:
+            second.close()
+
+
+def test_an_app_dropped_during_a_build_and_opened_again_starts_no_second_ffmpeg(tmp_path, held):
+    # the studio drops a project's review app without ending its worker, then opens it again
+    src = tmp_path / "film.mkv"
+    src.write_bytes(b"source")
+    work = folder(tmp_path, video=src, t0=5.0, t1=20.0)
+    gate, runs = threading.Event(), []
+    held.setattr(proxy, "_run_ffmpeg", _held_ffmpeg(gate, runs))
+    dropped = create_app(work)
+    try:
+        _until(dropped.state.review.media.status, lambda m: m.get("progress") == 0.5)
+        with TestClient(create_app(work)) as c:
+            m = _until(lambda: c.get("/api/media").json(), lambda m: m.get("note") == proxy.WAIT_NOTE)
+            assert m == {"state": "building", "t0": 5.0, "progress": None, "note": proxy.WAIT_NOTE}
+            assert c.get("/api/state").json()["project"]["media"]["note"] == proxy.WAIT_NOTE
+            assert c.get("/media/video").status_code == 409
+            assert c.post("/api/media/build").json()["state"] == "building" and len(runs) == 1
+            gate.set()
+            assert _until(lambda: c.get("/api/media").json(), lambda m: m["state"] != "building") == READY5
+            assert c.get("/media/video").content == b"one copy" and len(runs) == 1
+    finally:
+        gate.set()
+        dropped.state.review.close()
+
+
+def test_closing_a_worker_that_waits_for_another_build_stops_the_wait(tmp_path, held):
+    src = tmp_path / "film.mkv"
+    src.write_bytes(b"source")
+    work = folder(tmp_path, video=src, t0=5.0, t1=20.0)
+    gate, runs = threading.Event(), []
+    held.setattr(proxy, "_run_ffmpeg", _held_ffmpeg(gate, runs))
+    first = proxy.Worker(work).start()
+    try:
+        _until(first.status, lambda m: m.get("progress") == 0.5)
+        second = proxy.Worker(work).start()
+        _until(second.status, lambda m: m.get("note") == proxy.WAIT_NOTE)
+        t = time.time()
+        second.close()
+        assert time.time() - t < 3 and second._thread is None
+        assert second.status()["state"] == "failed" and len(runs) == 1
+    finally:
+        gate.set()
+        first.close()
+    assert _until(first.status, lambda m: m["state"] != "building") == READY5
+
+
+def test_part_files_left_by_an_ended_process_are_removed_and_never_written_into(tmp_path, held):
+    src = tmp_path / "film.mkv"
+    src.write_bytes(b"source")
+    work = folder(tmp_path, video=src, t0=5.0, t1=20.0)
+    gone = work / "review.mp4.99999999.part"                    # a server killed during its build
+    gone.write_bytes(b"half a copy")
+    old = work / "review.mp4.part"                              # the earlier fixed name, still open in an ffmpeg
+    gate, runs = threading.Event(), []
+    gate.set()
+    held.setattr(proxy, "_run_ffmpeg", _held_ffmpeg(gate, runs, b"this build"))
+    meta = json.loads((work / "project.json").read_text(encoding="utf-8"))
+    with open(old, "wb") as still_open:
+        still_open.write(b"an ffmpeg left running")
+        still_open.flush()
+        rec = proxy.build(work, meta, info=info())
+        assert runs == [f"review.mp4.{os.getpid()}.part"] and rec["encoder"] == "h264_qsv"
+        assert (work / "review.mp4").read_bytes() == b"this build" and not gone.exists()
+        if os.name == "nt":                                     # an open file cannot be removed there
+            assert proxy.part_files(work) == [old]
+    assert proxy.fresh(work, meta)
+    # a fresh copy is taken as it is: no ffmpeg runs again
+    assert proxy.build(work, meta, info=info()) == rec and len(runs) == 1
 
 
 # ------------------------------------------------------------------ real ffmpeg
@@ -520,3 +653,114 @@ def test_real_worker_makes_the_copy_again_for_another_window(tmp_path, film):
         assert m["state"] == "ready" and m["t0"] == 2.0
         second = _check_copy(work, film, 2.0, 3.5, proxy.encoders())
         assert second["t0"] == 2.0 and first["t0"] == 1.0
+
+
+def _decode_errors(path):
+    r = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-i", str(path), "-f", "null", "-"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    return r.returncode, [x for x in r.stderr.splitlines() if x.strip()]
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg / ffprobe are not on PATH")
+def test_real_app_opened_again_during_a_build_gives_one_whole_copy(tmp_path, film, monkeypatch):
+    # the studio drops the review app during the build (its worker goes on) and opens it again
+    work = folder(tmp_path, video=film, t0=1.0, t1=2.5)
+    real_run, gate, runs = proxy._run_ffmpeg, threading.Event(), []
+
+    def held_start(cmd, span, on_progress, cancel, on_process):
+        runs.append(cmd[-1])
+        on_progress(0.01)
+        assert gate.wait(30)
+        return real_run(cmd, span, on_progress, cancel, on_process)
+    monkeypatch.setattr(proxy, "_run_ffmpeg", held_start)
+    dropped = create_app(work)
+    try:
+        _until(dropped.state.review.media.status, lambda m: m.get("progress") == 0.01)
+        with TestClient(create_app(work)) as c:
+            m = _until(lambda: c.get("/api/media").json(), lambda m: m.get("note") == proxy.WAIT_NOTE)
+            assert m["state"] == "building" and m["note"] == proxy.WAIT_NOTE
+            gate.set()
+            m = _until(lambda: c.get("/api/media").json(), lambda m: m["state"] != "building", timeout=120)
+            assert m == {"state": "ready", "t0": 1.0, "progress": None, "note": None}
+            assert len(runs) == 1
+            _check_copy(work, film, 1.0, 2.5, proxy.encoders())
+            assert _decode_errors(work / "review.mp4") == (0, [])
+    finally:
+        gate.set()
+        dropped.state.review.close()
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg / ffprobe are not on PATH")
+def test_real_check_finds_a_copy_two_writers_broke_and_the_next_encoder_is_tried(tmp_path, film, monkeypatch):
+    work = folder(tmp_path, video=film, t0=1.0, t1=2.5)
+    meta = json.loads((work / "project.json").read_text(encoding="utf-8"))
+    rec = proxy.build(work, meta)
+    good = work / "review.mp4"
+    assert proxy.check_copy(good, 1.5, True) is None
+    # the length and the streams stay (the index is at the front), the frames are zeros:
+    # what two ffmpeg writing one file gave ('Invalid NAL unit size')
+    data = bytearray(good.read_bytes())
+    at = data.index(b"mdat") + 64
+    n = len(data) - 64 - at
+    data[at:at + n] = bytes(n)
+    broken = tmp_path / "broken.mp4"
+    broken.write_bytes(bytes(data))
+    assert proxy.probe(broken)["duration"] == pytest.approx(1.5, abs=0.1)
+    reason = proxy.check_copy(broken, 1.5, True)
+    assert reason and "깨져" in reason
+    assert "길이" in proxy.check_copy(good, 9.0, True)
+    assert "H.264" in proxy.check_copy(film, 4.0, True)                 # the source itself is MPEG-4 Part 2
+    # a result that fails the check is not taken: the next encoder makes it
+    real_run, made = proxy._run_ffmpeg, []
+
+    def first_broken(cmd, span, on_progress, cancel, on_process):
+        made.append(cmd[cmd.index("-c:v") + 1])
+        if len(made) == 1:
+            with open(cmd[-1], "wb") as f:
+                f.write(bytes(data))
+            return 0, ""
+        return real_run(cmd, span, on_progress, cancel, on_process)
+    monkeypatch.setattr(proxy, "_run_ffmpeg", first_broken)
+    meta2 = {**meta, "t1": 2.0}
+    rec2 = proxy.build(work, meta2, encoder_list=[rec["encoder"], proxy.CPU_ENCODER])
+    assert made == [rec["encoder"], proxy.CPU_ENCODER] and rec2["encoder"] == proxy.CPU_ENCODER
+    assert _decode_errors(good) == (0, []) and proxy.fresh(work, meta2)
+
+    # every encoder gives a broken file: nothing is taken, no review.mp4.json
+    def always_broken(cmd, span, on_progress, cancel, on_process):
+        with open(cmd[-1], "wb") as f:
+            f.write(bytes(data))
+        return 0, ""
+    monkeypatch.setattr(proxy, "_run_ffmpeg", always_broken)
+    with pytest.raises(proxy.BuildError, match="깨져"):
+        proxy.build(work, meta, encoder_list=[proxy.CPU_ENCODER])
+    assert not (work / "review.mp4.json").exists() and not proxy.part_files(work)
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG or os.name != "nt", reason="Windows Job Object · ffmpeg on PATH")
+def test_real_ffmpeg_ends_when_its_python_is_killed_hard(tmp_path):
+    psutil = pytest.importorskip("psutil")
+    # taskkill /F of the server: atexit does not run, the Job Object still ends ffmpeg
+    child = ("import os\n"
+             "from cboe import proxy\n"
+             "cmd = ['ffmpeg', '-hide_banner', '-nostdin', '-v', 'error', '-re', '-f', 'lavfi', '-i',"
+             " 'color=c=gray:s=160x120:r=24:d=60', '-progress', 'pipe:1', '-nostats', '-f', 'null', '-']\n"
+             "def on_process(p):\n"
+             "    if p is not None:\n"
+             "        print(os.getpid(), p.pid, flush=True)\n"
+             "proxy._run_ffmpeg(cmd, 60.0, None, None, on_process)\n")
+    root = os.path.dirname(os.path.dirname(os.path.abspath(proxy.__file__)))
+    env = dict(os.environ, PYTHONPATH=root)
+    p = subprocess.Popen([sys.executable, "-c", child], stdout=subprocess.PIPE, text=True, env=env, cwd=str(tmp_path))
+    ff = None
+    try:
+        py, ff_pid = map(int, p.stdout.readline().split())
+        ff = psutil.Process(ff_pid)
+        assert ff.ppid() == py and "ffmpeg" in ff.name().lower()
+        time.sleep(0.5)
+        psutil.Process(py).kill()                                # the python that started ffmpeg
+        ff.wait(10)                                              # psutil.TimeoutExpired when ffmpeg outlives it
+    finally:
+        if ff is not None and ff.is_running():
+            ff.kill()
+        p.wait(20)
