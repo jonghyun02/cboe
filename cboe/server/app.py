@@ -589,7 +589,8 @@ class ReviewService:
                        "duration": meta.get("duration"), "width": meta.get("width"), "height": meta.get("height"),
                        "video": bool(video and Path(video).is_file()), "video_url": "media/video",
                        "video_name": Path(video).name if video else None, "sample": bool(meta.get("sample")),
-                       "work": str(p.work), "profile": st.profile}
+                       "work": str(p.work), "profile": st.profile,
+                       "envelope": p.path("env.npz").is_file()}     # /api/envelope has the level curves
             added_cells = {r: [c["id"] for c in cells if r in (c.get("refs") or [])]
                            for r in (a["id"] for a in comp["added"])}
             return {"version": self.version, "project": project,

@@ -106,7 +106,7 @@
     cells: '자막 칸마다 지침 검사 결과',
   };
   const TODO_TITLE = {
-    items: '정하지 않은 확인 필요 후보', lines: '대본과 들린 말이 다른데 고르지 않은 줄 + 자리 없는 줄',
+    items: '정하지 않은 확인 필요 후보 (화자 포함)', lines: '대본과 들린 말이 다른데 고르지 않은 줄 + 자리 없는 줄',
     extras: '정하지 않은 대본에 없는 말', people: '표시를 정하지 않은 인물 (자막 줄이 있는 사람 이름)', cells: '의무 조항에 걸린 칸',
   };
   /** A dialogue line's state on the list: [label, class]. */
@@ -2091,7 +2091,7 @@
     if (p.told) bits.push(`처음 불림 ${told && told.start != null ? fmtTime(told.start) : p.told.line}${p.told.how === 'self' ? ' · 스스로 밝힘' : p.told.by ? ` · ${p.told.by}${ga(p.told.by)} 부름` : ''}`);
     else bits.push('대사에서 불리지 않음');
     if (p.mode === 'generic' && p.before) bits.push(`그 전에는 [${p.before}]`);
-    else if (p.mode === 'name') bits.push('처음부터 이름');
+    else if (p.mode === 'name') bits.push('이름 그대로');
     return bits.join(' · ');
   }
   function personRowHtml(p) {
@@ -2130,7 +2130,7 @@
       ...GENERIC.map((g) => opt(mode === 'generic' && before === g, `data-act="pp-mode" data-mode="generic" data-before="${g}"`, esc(bracket(g)))),
       `<span class="pp-custom" data-box="pp"><input class="input input-sm" data-f="before" value="${esc(custom)}" placeholder="직접 (예: 경찰)" autocomplete="off" aria-label="일반 표시 직접 쓰기">
         <button type="button" class="btn btn-sm${custom ? ' is-on' : ''}" data-act="pp-custom" data-primary="1">쓰기</button></span>`,
-      opt(mode === 'name', 'data-act="pp-mode" data-mode="name"', '처음부터 이름'),
+      opt(mode === 'name', 'data-act="pp-mode" data-mode="name"', '이름 그대로'),
       opt(!mode, 'data-act="pp-mode" data-mode=""', '정하지 않음'),
     ];
     const reveal = dec.reveal || 'auto';
@@ -2162,7 +2162,7 @@
     const p = D.personByName.get(S.person);
     if (!p) return null;
     const what = 'mode' in fields
-      ? (fields.mode === 'generic' ? `이름이 밝혀지기 전 ${bracket(fields.before)}` : fields.mode === 'name' ? '처음부터 이름' : '정하지 않음으로')
+      ? (fields.mode === 'generic' ? `이름이 밝혀지기 전 ${bracket(fields.before)}` : fields.mode === 'name' ? '이름 그대로' : '정하지 않음으로')
       : fields.reveal === 'never' ? '끝까지 일반 표시' : fields.reveal === 'line' ? '고른 줄부터 이름' : '이름이 불린 다음 줄부터 이름';
     return mutate('api/people', { names: [p.name], ...fields }, `${p.name} · ${what}`);
   }
@@ -2376,7 +2376,7 @@
 
   // ---------------------------------------- 소리 세기 곡선 (env.npz, 9-x3)
   async function loadEnv() {
-    if (S.envTried || !S.P) return;
+    if (S.envTried || !S.P || !S.P.envelope) return;      // no sed stage output: no curve, no request
     S.envTried = true;
     try {
       const step = Math.max(0.05, (S.P.t1 - S.P.t0) / 20000);

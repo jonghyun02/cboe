@@ -61,3 +61,12 @@ def test_envelope_without_the_sed_stage_is_404(tmp_path):
     r = c.get("/api/envelope")
     assert r.status_code == 404 and "env.npz" in r.json()["detail"]
     assert c.get("/api/envelope", params={"step": 0}).status_code == 422
+
+
+@pytest.mark.parametrize("env", [True, False])
+def test_the_state_says_whether_there_is_a_level_curve(tmp_path, env):
+    # the page asks for the curve only when there is one (no 404 in the browser's console)
+    w = folder(tmp_path, env=env)
+    write_json(w / "dialogue.json", {"lines": []})
+    st = TestClient(create_app(w)).get("/api/state").json()
+    assert st["project"]["envelope"] is env
