@@ -364,11 +364,12 @@ def st_align(c: Ctx, a, b, full):
     every = a == -1 and b == 1e12           # the whole stage: the lines without a time too
     for ln in lines:
         if overlap(ln.get("start"), ln.get("end"), a, b) or (every and ln.get("start") is None):
-            anch = sum(1 for w in ln.get("words", []) if w.get("anchored"))
+            words = ln.get("words") or []          # a line without a time carries "words": null
+            anch = sum(1 for w in words if w.get("anchored"))
             print(f"  {ln['id']} {ft(ln.get('start'))}~{ft(ln.get('end'))} [{ln.get('speaker') or '-'}] "
                   f"{STATUS_KO.get(ln.get('status') or 'ok', ln.get('status'))} · "
                   f"{TIMING_KO.get(ln.get('timing'), ln.get('timing'))} · match {ln.get('match')} · "
-                  f"맞춘 낱말 {anch}/{len(ln.get('words', []))}")
+                  f"맞춘 낱말 {anch}/{len(words)}")
             print(f"      {cut(ln['text'], 100)}")
 
 

@@ -194,8 +194,8 @@ def test_inspect_reads_the_new_formats(tmp_path, capsys):
     lines = [{**ln, "words": [], "match": 1.0, "timing": "asr", "status": "ok", "start": 1.0 + 3 * k, "end": 2.0 + 3 * k}
              for k, ln in enumerate(doc["lines"])]
     lines[1].update(status="unheard", timing="voice")
-    lines[2].update(status="absent", start=None, end=None, timing=None)
-    lines[4].update(status="out_of_range", start=None, end=None, timing=None)
+    lines[2].update(status="absent", start=None, end=None, timing=None, words=None)     # as align writes them
+    lines[4].update(status="out_of_range", start=None, end=None, timing=None, words=None)
     _write(w / "dialogue.json", {"mode": "test", "lines": lines,
                                  "extras": [{"id": "X0001", "start": 5.0, "end": 6.0, "text": "어", "words": []}]})
     _write(w / "music.json", {"segments": [[10.0, 20.0]], "items": [
