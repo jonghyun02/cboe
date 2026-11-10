@@ -418,6 +418,15 @@ def test_two_people_under_one_generic_label_are_numbered_in_the_scene(tmp_path):
     assert text["L0002"] == ["[남자2] 나야 나"] and text["L0004"] == ["[남자] 그냥 왔지"]
 
 
+def test_a_speaker_called_man_in_the_script_and_a_person_labelled_man_are_two_in_the_subtitles(tmp_path):
+    ls = [line("L0001", "남자", "거기 서 봐요", 10.0, 11.0), line("L0002", "가람", "왜요 무슨 일인데요", 12.0, 13.5),
+          line("L0003", "남자", "이리 좀 와 봐요", 14.0, 15.0)]
+    p = make(tmp_path, lines=ls, items=[speaker_item(x) for x in ls], extras=[])
+    p.set_people(["가람"], mode="generic", before="남자")
+    cells = [c["lines"] for c in p.recompute()["cells"]]
+    assert cells == [["[남자1] 거기 서 봐요"], ["[남자2] 왜요 무슨 일인데요"], ["[남자1] 이리 좀 와 봐요"]]
+
+
 def test_speaker_scopes_go_by_person_not_by_the_label(tmp_path):
     p = make(tmp_path)
     p.set_speaker("L0003", "한별", "from_here")                                  # 하늘's lines from L0003 on

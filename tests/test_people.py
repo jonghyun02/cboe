@@ -30,6 +30,29 @@ def test_a_role_word_inside_a_name_or_a_longer_word_tells_no_name():
     assert people.mentions("김경위 어디 있어", "김 경위")            # written with or without the space
 
 
+@pytest.mark.parametrize("text", ["하늘이라는 애 알아?", "걔 이름이 하늘이래", "하늘이에요 제 동생", "하늘보다 내가 낫지",
+                                  "하늘에게서 연락 왔어", "하늘이나 불러", "하늘이었어", "하늘이란 사람"])
+def test_a_name_said_in_a_sentence_with_a_copula_or_a_particle(text):
+    assert people.mentions(text, "하늘")
+
+
+@pytest.mark.parametrize("text", ["민수라는 애 알아?", "민수래", "민수였어", "민수나 불러", "민수예요"])
+def test_the_same_forms_after_a_name_that_ends_in_a_vowel(text):
+    assert people.mentions(text, "민수")
+
+
+@pytest.mark.parametrize("text, called", [("그럴 수도 있지", False), ("할 수가 없어", False), ("수다 떨지 마", False),
+                                          ("수야 이리 와", True), ("수 씨 계세요?", True), ("수님 오셨어요", True)])
+def test_a_one_letter_name_counts_only_when_it_is_called(text, called):
+    assert people.mentions(text, "수") is called
+    assert not people.introduces("수다 떨지 마", "수") and people.introduces("저는 수입니다", "수")
+
+
+def test_a_short_latin_name_is_found_as_a_word():
+    assert people.mentions("Tom, come here", "Tom") and not people.mentions("Tomorrow then", "Tom")
+    assert people.keys("A") == [] and people.keys("Tom") == ["Tom"]
+
+
 @pytest.mark.parametrize("text", ["저는 하늘입니다", "하늘이에요", "하늘이요", "제 이름은 하늘", "하늘이라고 해요"])
 def test_a_person_telling_their_own_name(text):
     assert people.introduces(text, "하늘")
@@ -115,6 +138,24 @@ def test_two_people_under_one_generic_label_are_numbered_per_scene():
     assert people.display(one_shown, dec)["labels"]["L1"] == "남자"
 
 
+def test_a_speaker_the_script_calls_man_and_a_person_labelled_man_are_numbered():
+    # the script's own speaker '남자' (shown as it is) and 가람 shown as '남자' until named, one scene
+    lines = [ln("L1", "남자", "거기 서 봐요", "SC001"), ln("L2", "가람", "왜요 무슨 일인데요", "SC001"),
+             ln("L3", "남자", "이리 좀 와 봐요", "SC001"), ln("L4", "남자", "또 보네요", "SC002")]
+    for dec in ({"가람": {"mode": "generic", "before": "남자"}},
+                {"가람": {"mode": "generic", "before": "남자"}, "남자": {"mode": "name"}}):
+        d = people.display(lines, dec)
+        assert [d["labels"][x["id"]] for x in lines] == ["남자1", "남자2", "남자1", "남자"]
+
+
+def test_a_number_another_label_of_the_scene_shows_is_skipped():
+    # '남자1' is a role name of the script; two more people the writer labels '남자' in that scene
+    lines = [ln("L1", "남자1", "어서 오세요"), ln("L2", "가람", "안녕하세요"), ln("L3", "나래", "반가워요")]
+    dec = {n: {"mode": "generic", "before": "남자"} for n in ("가람", "나래")}
+    d = people.display(lines, dec)
+    assert [d["labels"][x["id"]] for x in lines] == ["남자1", "남자2", "남자3"]
+
+
 def test_two_people_speaking_together():
     d = people.display([ln("L1", "하늘/바다", "안녕하세요")], {"바다": {"mode": "generic", "before": "남자"}})
     assert d["labels"]["L1"] == "하늘/남자"
@@ -122,9 +163,9 @@ def test_two_people_speaking_together():
 
 # ------------------------------------------------------------------ scopes
 def scope_story():
-    return [ln("L1", "재식", "a", "SC001", voice=1), ln("L2", "용표", "b", "SC001", voice=2),
-            ln("L3", "재식", "c", "SC001", voice=1), ln("L4", "재식", "d", "SC002", voice=1),
-            ln("L5", "재식", "e", "SC002", voice=3)]
+    return [ln("L1", "가람", "a", "SC001", voice=1), ln("L2", "나래", "b", "SC001", voice=2),
+            ln("L3", "가람", "c", "SC001", voice=1), ln("L4", "가람", "d", "SC002", voice=1),
+            ln("L5", "가람", "e", "SC002", voice=3)]
 
 
 @pytest.mark.parametrize("which, want", [

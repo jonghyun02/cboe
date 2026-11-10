@@ -877,9 +877,9 @@ def test_two_lines_of_different_scenes_never_share_a_hyphen_cell():
 
 
 def test_one_person_under_two_labels_is_still_one_speaker():
-    # before and after the name is told: '[남자]' then '[재식]' are one person — no two-speaker cell
-    lines = [L("L1", "뭐?", 10.0, 10.2, speaker="재식", name="남자", show=True, person="재식"),
-             L("L2", "응", 10.45, 10.6, speaker="재식", name="재식", show=True, person="재식"),
+    # before and after the name is told: '[남자]' then '[가람]' are one person — no two-speaker cell
+    lines = [L("L1", "뭐?", 10.0, 10.2, speaker="가람", name="남자", show=True, person="가람"),
+             L("L2", "응", 10.45, 10.6, speaker="가람", name="가람", show=True, person="가람"),
              L("L3", "그래 가자", 11.1, 12.0, speaker="빌")]
     assert len(cells_of(run(lines), "L1")) == 1 and one(run(lines), "L1")["refs"] == ["L1"]
     two = [dict(lines[0], person="갑"), dict(lines[1], person="을", name="남자"), lines[2]]

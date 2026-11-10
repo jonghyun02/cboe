@@ -7,10 +7,12 @@ person of that name. Two people talking together ('에루/마야카') are the li
 
 When the name is told (``revealed_at``): the first line, in film order, in which **another**
 person says the name as a word — from the start of a word, followed by the end of the word or by
-a vocative, an honorific or a particle ('가온아', '가온 씨', '가온이가', '가온한테'); a name inside
-a longer word ('운전기사' for '기사') does not count — or in which the person says it of
-themselves ('가온입니다', '제 이름은 가온'). Only the lines given are read: the caller leaves
-out lines that are not in the film or that the writer took out.
+a vocative, an honorific, a particle or a copula ('가온아', '가온 씨', '가온이가', '가온한테',
+'가온이라는', '가온이었어', '가온보다'); a name inside a longer word ('운전기사' for '기사') does not
+count — or in which the person says it of themselves ('가온입니다', '제 이름은 가온'). A name of
+one letter is in too many words ('수' in '할 수 있어'): it counts only with a vocative or an
+honorific ('수야', '수 씨') or as a plain self-introduction ('수입니다'). Only the lines given are
+read: the caller leaves out lines that are not in the film or that the writer took out.
 
 The label shown (``display``): until the name is told, II.8 asks for a generic ID ('[남자]',
 '[여자]': "so as not to provide information that is not yet present in the narrative"). Whether
@@ -21,9 +23,11 @@ in a digit is a role name by default). ``reveal`` moves the line from which the 
 "auto" (the line after the one that tells it), "line" (``reveal_line``, from that line on: a name
 shown on screen), "never". A person the writer has not decided keeps the name, and when that name
 is shown before it is told the person is listed in ``early`` (for the review screen and the
-export check). Two people under the same generic label in one scene are numbered in the order they
-first speak there ('[남자1]', '[남자2]'; counting restarts with the scene; no '1' for one person);
-without scenes the count runs over the whole film. Labels are never stored: they are made again
+export check). Two people under the same label in one scene — a generic one, or a speaker the
+script itself calls '남자' next to a person the writer labels '남자' — are numbered in the order
+they first speak there ('[남자1]', '[남자2]'; counting restarts with the scene; no '1' for one
+person; a number another label of the scene already shows is skipped); without scenes the count
+runs over the whole film. Labels are never stored: they are made again
 every time from the lines and the decisions.
 
 ``scope_lines`` picks the lines a speaker change applies to — by person, never by the label text
@@ -44,9 +48,18 @@ PARTICLES = ("이한테", "이에게", "이랑은", "이라도", "이처럼", "�
              "이랑", "하고", "처럼", "까지", "부터", "이가", "이는", "이를", "이도", "이의", "이와", "이야",
              "이요", "이지", "이네", "이냐", "이니", "이만", "이고", "께서", "께", "아", "야", "이", "가", "은",
              "는", "을", "를", "도", "랑", "의", "와", "과", "요", "만", "고")
+# the name as a word in a sentence: '가온이라는 애', '가온이래', '가온이었어', '가온보다', '가온에게서',
+# '가온이나' (the forms after a final consonant start with 이)
+COPULA = (r"(?:이)?(?:었|였)[가-힣]{0,3}", r"(?:이)?라(?:는|고|서|면|니|도)?", r"(?:이)?란",
+          r"(?:이)?래(?:요)?", r"이에요", r"예요", r"이세요", r"세요")
+MORE = ("이한테서", "이에게서", "한테서", "에게서", "이보다", "보다", "이나", "나")
 # a person telling their own name: '가온입니다', '가온이에요', '가온이요', '가온이라고 해요'
 SELF = ("이라고", "이랍니다", "입니다", "이에요", "이예요", "인데요", "이고요", "라고", "랍니다", "예요",
         "이요", "이야", "이다", "인데", "요", "야", "다", "라")
+# a name of one letter ('수', '진') is in too many words: only called with a vocative or an
+# honorific ('수야', '진 선배'), or told as one's own name in so many words ('수입니다', '이름은 수')
+VOCATIVES = ("아", "야")
+SELF_ONE = ("이라고", "이랍니다", "입니다", "이에요", "이예요", "라고", "랍니다", "예요")
 SCOPES = ("line", "from_here", "before", "scene", "person", "voice")
 SCOPE_ALIASES = {"speaker": "person"}         # the review API's older word for '이 인물의 모든 줄'
 SCOPE_KO = {"line": "이 줄", "from_here": "이 줄부터 끝까지", "before": "이 줄 앞까지", "scene": "이 장면",
@@ -73,19 +86,24 @@ def keys(name) -> list[str]:
     """How the name is written in a line: as it is, and without its spaces ('김 경위', '김경위')."""
     name = " ".join(str(name or "").split())
     out = [k for k in dict.fromkeys((name, name.replace(" ", ""))) if k]
-    return [k for k in out if not re.fullmatch(r"[A-Za-z]{1,3}", k)]      # 'A', 'DJ': too short to find
+    return [k for k in out if not re.fullmatch(r"[A-Za-z]", k)]           # 'A', 'B': speaker letters, no names
 
 
 @lru_cache(maxsize=4096)
 def _called(key: str):
-    return re.compile(rf"(?<![{LETTER}]){re.escape(key)}(?:{_alt(HONORIFICS)})?(?:{_alt(PARTICLES)})?(?![{LETTER}])")
+    k, hon = re.escape(key), _alt(HONORIFICS)
+    if len(key) == 1:
+        return re.compile(rf"(?<![{LETTER}]){k}(?:\s?(?:{hon})(?:{_alt(PARTICLES)})?|{_alt(VOCATIVES)})(?![{LETTER}])")
+    tails = "|".join(list(COPULA) + [_alt(MORE), _alt(PARTICLES)])
+    return re.compile(rf"(?<![{LETTER}]){k}(?:{hon})?(?:{tails})?(?![{LETTER}])")
 
 
 @lru_cache(maxsize=4096)
 def _self(key: str):
     k = re.escape(key)
-    return re.compile(rf"(?<![{LETTER}]){k}(?:{_alt(SELF)})(?![{LETTER}])"
-                      rf"|이름[은이]\s*{k}(?![{LETTER}])|이름[은이]\s*{k}(?:{_alt(SELF)})(?![{LETTER}])")
+    own = _alt(SELF_ONE if len(key) == 1 else SELF)
+    return re.compile(rf"(?<![{LETTER}]){k}(?:{own})(?![{LETTER}])"
+                      rf"|이름[은이]\s*{k}(?![{LETTER}])|이름[은이]\s*{k}(?:{own})(?![{LETTER}])")
 
 
 def mentions(text, name) -> bool:
@@ -151,7 +169,7 @@ def display(lines, decisions=None, script_people=()) -> dict:
     ``{"id", "person" (name, 'A/B'), "scene_id", "show" (the label is shown), "text"}``.
     ``decisions``: {name: {"mode", "before", "reveal", "reveal_line"}} (module doc).
 
-    Returns ``{"labels": {line id: name to show ('남자1', '재식', '남자/영희')},
+    Returns ``{"labels": {line id: name to show ('남자1', '가람', '남자/영희')},
     "generic": {line id: True when the label is a generic one}, "people": {name: info}}`` where
     info = ``{"name", "role", "mode" (decided or None), "before", "reveal", "told": revealed_at(),
     "from_line": first line shown under the name (id or None), "early": {"line", "told"} or None}``."""
@@ -186,22 +204,32 @@ def display(lines, decisions=None, script_people=()) -> dict:
                 p["early"] = {"line": ln.get("id"), "told": (p["told"] or {}).get("line")}
         shown[ln.get("id")] = labs
         generic[ln.get("id")] = gen
-    # [남자1] [남자2]: people under one generic label in one scene, in the order they first show it
+    # [남자1] [남자2]: people under one label in one scene, in the order they first show it — by the
+    # label as it is shown, so a speaker called '남자' in the script and a person the writer labels
+    # '남자' are numbered too; a number another person's label already shows there is skipped
     order: dict = {}
     for i, ln in enumerate(lines):
         if not ln.get("show"):
             continue
         for n, lab in zip(parts(ln.get("person")), shown[ln.get("id")]):
-            if lab != n:
-                seen = order.setdefault((ln.get("scene_id"), lab), [])
-                if n not in seen:
-                    seen.append(n)
+            seen = order.setdefault((ln.get("scene_id"), lab), [])
+            if n not in seen:
+                seen.append(n)
+    number: dict = {}
+    for (scene, lab), who in order.items():
+        if len(who) < 2:
+            continue
+        taken = {lb for (sc, lb), w in order.items() if sc == scene and len(w) == 1}
+        k = 0
+        for n in who:
+            k += 1
+            while f"{lab}{k}" in taken:
+                k += 1
+            number[(scene, lab, n)] = f"{lab}{k}"
     labels = {}
     for ln in lines:
-        out = []
-        for n, lab in zip(parts(ln.get("person")), shown[ln.get("id")]):
-            who = order.get((ln.get("scene_id"), lab)) if lab != n else None
-            out.append(f"{lab}{who.index(n) + 1}" if who and len(who) > 1 and n in who else lab)
+        out = [number.get((ln.get("scene_id"), lab, n), lab)
+               for n, lab in zip(parts(ln.get("person")), shown[ln.get("id")])]
         labels[ln.get("id")] = SPLIT.join(out) if out else None
     for p in info.values():
         p.pop("switch")
