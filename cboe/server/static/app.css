@@ -123,6 +123,7 @@ kbd {
 /* ------------------------------------------------------------------- frame */
 .app {
   height: 100vh; display: grid; grid-template-rows: auto auto minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 1fr);       /* the column is the window: a wide top bar wraps, it does not widen the page */
   grid-template-areas: "top" "banner" "main" "timeline";
 }
 .topbar { grid-area: top; }
@@ -131,7 +132,9 @@ kbd {
 .timeline { grid-area: timeline; }
 
 .topbar {
-  position: relative; display: flex; align-items: center; gap: 20px; height: 60px; padding: 0 20px;
+  /* one row of 60 px; when the title, the progress and the save buttons do not fit the window
+     (a long title, 1024 px), they wrap to a second row instead of widening the page */
+  position: relative; display: flex; flex-wrap: wrap; align-items: center; gap: 8px 20px; min-height: 60px; padding: 6px 20px;
   background: #fff; border-bottom: 1px solid var(--line);
 }
 .brand { display: flex; align-items: center; gap: 10px; min-width: 0; }
@@ -215,6 +218,11 @@ kbd {
 .stage-msg {
   position: absolute; inset: 0; display: grid; place-items: center; padding: 20px; text-align: center;
   color: #D9DCEE; font-weight: 600; background: rgba(7, 8, 14, .7);
+}
+/* over a still: why there is no video (재생용 영상 being made, could not be made), the still stays visible */
+.stage-msg.is-note {
+  inset: 44px auto auto 12px; max-width: calc(100% - 24px); display: block; padding: 5px 11px; border-radius: 8px;
+  text-align: left; font-size: 13px; line-height: 1.45; color: #fff; background: rgba(8, 10, 20, .72);
 }
 
 /* ----------------------------------------------------------------- evidence */
@@ -622,6 +630,8 @@ kbd {
 .tag.t-script { background: var(--line-bg); color: var(--line-fg); }
 .tag.t-writer { background: var(--spk-bg); color: var(--spk-fg); }
 .tag.t-minor { background: transparent; color: var(--faint); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.tag.t-suspect { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line-strong); }
+.row.is-suspect .r-phrase { color: var(--muted); }
 .link { border: 0; background: transparent; padding: 0; color: var(--primary-700); font: inherit; font-weight: 650; cursor: pointer; text-decoration: underline; text-underline-offset: 2px; }
 .link.flag { color: var(--nor-fg); }
 
@@ -733,7 +743,7 @@ select.input-sm { width: auto; max-width: 220px; background: #fff; }
 }
 @media (max-height: 820px) {
   :root { --tl-ruler: 22px; --tl-band: 10px; --tl-lane: 22px; --tl-gap: 5px; --tl-pad: 4px; }
-  .topbar { height: 52px; }
+  .topbar { min-height: 52px; padding-top: 4px; padding-bottom: 4px; }
   .main { padding-top: 12px; padding-bottom: 10px; gap: 12px; }
   .left { gap: 10px; }
   .tl-bar { height: 28px; }
@@ -751,6 +761,7 @@ select.input-sm { width: auto; max-width: 220px; background: #fff; }
   .evidence { min-height: 260px; }
   .tl-legend { display: none; }
   .progress .prog-bar { display: none; }
+  .progress { flex-wrap: wrap; row-gap: 6px; }
 }
 @media (max-width: 720px) {
   .topbar { flex-wrap: wrap; height: auto; padding: 10px 16px; gap: 10px; }

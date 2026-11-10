@@ -1,6 +1,11 @@
 /* CBoE 검수 화면 (deck 3.1~3.5, 5.10). Vanilla JS, no build step.
    Every change is POSTed; list, evidence, timeline and the video overlay are all
-   re-rendered from the state the server answers with (placement recomputed). */
+   re-rendered from the state the server answers with (placement recomputed). A field the
+   writer is filling in and a value still on its way to the server survive that re-render; a
+   write the server refuses puts the panel back to what is stored.
+   The page works in film time. project.media says which file /media/video gives: the source
+   (film time = video time) or the 재생용 영상 of the processed part (film time = video time +
+   media.t0); while that copy is being made the stage shows stills (/api/frame, film time). */
 'use strict';
 (() => {
   // ------------------------------------------------------------------ helpers
@@ -107,7 +112,7 @@
   };
   const TODO_TITLE = {
     items: '정하지 않은 확인 필요 후보 (화자 포함)', lines: '대본과 들린 말이 다른데 고르지 않은 줄 + 자리 없는 줄',
-    extras: '정하지 않은 대본에 없는 말', people: '표시를 정하지 않은 인물 (자막 줄이 있는 사람 이름)', cells: '의무 조항에 걸린 칸',
+    extras: '정하지 않은 대본에 없는 말 (받아쓰기 헛소리 의심은 접어 두고 세지 않음)', people: '표시를 정하지 않은 인물 (자막 줄이 있는 사람 이름)', cells: '의무 조항에 걸린 칸',
   };
   /** A dialogue line's state on the list: [label, class]. */
   const LSTATE = {
@@ -119,7 +124,11 @@
   const PICKED = { script: '대본대로 고름', heard: '들린 대로 고름', writer: '작가가 고침' };
   const LINE_FILTERS = [['all', '전체'], ['differs', '다름'], ['unheard', '못 들음'], ['out', '영화에 없음·구간 밖'],
     ['spelling', '맞춤법 확인'], ['lang', '외국어·노래'], ['noroom', '자리 없음'], ['writer', '작가가 고침']];
-  const EXTRA_FILTERS = [['open', '정하지 않음'], ['overlap', '못 들은 줄과 겹침'], ['line', '대사로 넣음'], ['ignored', '무시'], ['all', '전체']];
+  const EXTRA_FILTERS = [['open', '정하지 않음'], ['overlap', '못 들은 줄과 겹침'], ['suspect', '헛소리 의심'], ['line', '대사로 넣음'], ['ignored', '무시'], ['all', '전체']];
+  /** 받아쓰기 헛소리 (align ``suspect``): what the ASR model writes where nobody speaks, and the
+      scores that tell nobody speaks there (``suspect_by``). */
+  const SUSPECT_KO = { greeting: '인사말만 들림', credit: '자막·구독 안내 같은 글', repeat: '같은 말이 되풀이됨' };
+  const SUSPECT_BY = { speech: '말소리(SED)', music: '음악(SED)', vad: '말소리 구간(VAD)', p: '낱말 확률(받아쓰기)' };
   const PEOPLE_FILTERS = [['all', '전체'], ['open', '정하지 않음'], ['early', '이름이 일찍 나감'], ['decided', '정함']];
   const CELL_FILTERS = [['all', '전체'], ['must', '의무 위반'], ['should', '권고'], ['estimated', '시각 추정'], ['overlap', '겹침']];
   const XSTATE = { open: ['정하지 않음', 'st-check'], line: ['대사로 넣음', 'st-inc-done'], ignored: ['무시', 'st-exc-done'] };
@@ -140,6 +149,10 @@
     // views: what is picked in each, its filter, scenes opened or closed by hand, the open editor
     view: 'items', lf: 'all', xf: 'open', pf: 'all', cf: 'all', line: null, extra: null, person: null, cell: null,
     cellAt: null, showMinor: false, sceneOpen: new Map(), limit: CHUNK, ed: null, env: null, envOn: true, envTried: false,
+    showSuspect: false,
+    // 재생용 영상: project.media as last seen, which file the stage has (state|t0), its ?v=, whether
+    // the server was asked to make the copy; canPlay: the <video> plays (with stills: its sound only)
+    media: null, mediaKey: null, mediaVer: 0, buildAsked: false, canPlay: true,
   };
   const D = {
     items: [], byId: new Map(), lines: new Map(), allLines: [], cells: [], cellById: new Map(), noRoom: new Map(),
@@ -152,18 +165,26 @@
 
   // ---------------------------------------------------------------------- api
   let chain = Promise.resolve();
+  /** What the toast says when a request fails: the server's own Korean sentence (``detail``), or a
+      Korean sentence of ours in front of what there is (no connection, a page of an error, 422 list). */
+  function failText(method, status, data) {
+    const d = data && data.detail;
+    if (typeof d === 'string' && d) return d;
+    const what = method === 'GET' ? '읽지 못했습니다' : '저장하지 못했습니다';
+    if (Array.isArray(d)) return `보낸 값이 맞지 않아 ${what} · 서버 답 ${status} · ${d.map((x) => x && x.msg).filter(Boolean).join(', ')}`;
+    return `서버 오류 ${status} · ${what}`;
+  }
+  const NO_SERVER = '서버에 연결할 수 없습니다 · 검수 서버가 켜져 있는지 확인하세요';
   /** Requests run one after another so responses are applied in order. */
   function api(method, url, body) {
     const run = async () => {
       const init = { method, headers: {} };
       if (body !== undefined) { init.headers['Content-Type'] = 'application/json'; init.body = JSON.stringify(body); }
-      const res = await fetch(url, init);
+      let res;
+      try { res = await fetch(url, init); } catch (_) { throw new Error(NO_SERVER); }
       let data = null;
       try { data = await res.json(); } catch (_) { data = null; }
-      if (!res.ok) {
-        const d = data && data.detail;
-        throw new Error(typeof d === 'string' ? d : Array.isArray(d) ? d.map((x) => x.msg).join(', ') : `${res.status} ${res.statusText}`);
-      }
+      if (!res.ok) throw new Error(failText(method, res.status, data));
       return data;
     };
     const p = chain.then(run, run);
@@ -186,10 +207,41 @@
       return st;
     } catch (e) {
       toast(e.message || String(e), 'error', 4500);
+      // the server kept nothing: the left panel is drawn again from the last state it sent, so a
+      // switch, a box or a cut the browser already changed goes back to what is stored
+      if (S.st) renderDetail();
       return null;
     } finally {
       setBusy(false);
     }
+  }
+  /** Line fields whose new value is on its way to the server ({line id|field: {v, n}}): the left
+      panel shows that value until the last request for it is answered, so the answer of an
+      earlier write does not take back a click the writer made after it (끊을 자리 clicked fast). */
+  const pend = new Map();
+  const PEND_FIELDS = ['breaks', 'keep', 'sung', 'language'];
+  function pendOf(ln, f) {
+    const p = pend.get(`${ln.id}|${f}`);
+    return p ? p.v : ln[f];
+  }
+  function pendStart(id, fields) {
+    const keys = PEND_FIELDS.filter((f) => f in fields).map((f) => `${id}|${f}`);
+    for (const k of keys) {
+      const p = pend.get(k) || { n: 0 };
+      p.v = fields[k.slice(id.length + 1)];
+      p.n += 1;
+      pend.set(k, p);
+    }
+    return keys;
+  }
+  /** One request for these fields is answered: when it was the last, the panel shows the server's value. */
+  function pendEnd(keys) {
+    let cleared = false;
+    for (const k of keys) {
+      const p = pend.get(k);
+      if (p && (p.n -= 1) <= 0) { pend.delete(k); cleared = true; }
+    }
+    if (cleared && S.st) renderDetail();
   }
   function toast(msg, kind = 'ok', ms = 2300) {
     const el = document.createElement('div');
@@ -307,6 +359,7 @@
     S.overlayKey = '';
     updateOverlay();
     if (S.modal && S.modal.type === 'export') renderExport();
+    syncMedia(mediaOf(S.P));
   }
 
   // ------------------------------------------------------------------- header
@@ -438,7 +491,7 @@
       if (reveal) row.scrollIntoView({ block: 'nearest' });
     }
     $('#rows').setAttribute('aria-activedescendant', row ? row.id : '');
-    renderEvidence();
+    renderDetail();
     markTimeline();
     if (seek) {
       clearRange(video);
@@ -827,11 +880,16 @@
   }
 
   // ------------------------------------------------------------------- player
+  // Film time is what the page works in (S.t, the cells, the lists). A <video> keeps the offset of
+  // the file it was given (vid._off): the 재생용 영상 (media "ready") starts at the film's t0, the
+  // source file at 0. Every read and write of currentTime goes through these two.
+  const toVid = (vid, t) => t - num(vid && vid._off);
+  const toFilm = (vid, v) => v + num(vid && vid._off);
   function seekVideo(vid, t) {
     const P = S.P;
     t = clamp(t, P.t0, Math.max(P.t0, P.t1 - 0.05));
-    if (vid.readyState >= 1) vid.currentTime = t;
-    else vid._pending = t;
+    if (vid.readyState >= 1) vid.currentTime = Math.max(0, toVid(vid, t));
+    else vid._pending = t;                                       // film time, set when the file is open
     if (vid === video) { S.t = t; onTimeUI(); }
     return t;
   }
@@ -869,11 +927,12 @@
   }
   function playRange(vid, a, b, rowEl) {
     if (!vid || !S.P.video) return;
-    if (vid === video && S.still) { seekTo(a); toast('이 브라우저에서는 영상을 재생할 수 없어 정지 화면만 보여 줍니다', 'error'); return; }
+    if (vid === video && !S.canPlay) { seekTo(a); toast(stillWhy(), 'error'); return; }
+    if (vid !== video && !vid.getAttribute('src')) { toast(stillWhy(), 'error'); return; }
     a = clamp(a, S.P.t0, S.P.t1 - 0.05);
     b = clamp(b, a + 0.2, S.P.t1);
     clearRange(vid);
-    vid._stopAt = b;
+    vid._stopAt = b;                                             // film time (loop compares toFilm)
     vid._row = rowEl || null;
     if (rowEl) rowEl.classList.add('is-playing');
     seekVideo(vid, a);
@@ -889,7 +948,7 @@
   }
   function togglePlay() {
     if (!S.P || !S.P.video) return;
-    if (S.still) { toast('이 브라우저에서는 영상을 재생할 수 없어 정지 화면만 보여 줍니다', 'error'); return; }
+    if (!S.canPlay) { toast(stillWhy(), 'error'); return; }
     if (video.paused) {
       clearRange(video);
       if (S.t >= S.P.t1 - 0.1) seekTo(S.P.t0);
@@ -906,7 +965,7 @@
     for (const vid of [video, pvVideo()]) {
       if (!vid || vid.paused) continue;
       again = true;
-      const t = vid.currentTime;
+      const t = toFilm(vid, vid.currentTime);
       if ((vid._stopAt != null && t >= vid._stopAt) || t >= S.P.t1 - 0.02) { vid.pause(); clearRange(vid); }
       if (vid === video) { S.t = clamp(t, S.P.t0, S.P.t1); onTimeUI(); followPlayhead(); }
       else updatePvTime(t);
@@ -914,31 +973,148 @@
     if (again) raf = requestAnimationFrame(loop);
   }
   function kick() { if (!raf) raf = requestAnimationFrame(loop); }
-  function showStageMsg(msg) { const el = $('#stage-msg'); el.hidden = !msg; el.textContent = msg || ''; }
+  /** A message over the stage; ``note``: a small bar over the still instead of a cover. */
+  function showStageMsg(msg, note = false) {
+    const el = $('#stage-msg');
+    el.hidden = !msg;
+    el.textContent = msg || '';
+    el.classList.toggle('is-note', !!note);
+  }
   let stillTimer = 0;
+  /** The still of the source at S.t: shortly after a seek, and every 0.7 s while the sound plays. */
   function scheduleStill() {
+    if (stillTimer && !video.paused) return;
     clearTimeout(stillTimer);
-    stillTimer = setTimeout(() => { $('#stage-still').src = `api/frame?t=${S.t.toFixed(2)}&w=960`; }, 120);
+    stillTimer = setTimeout(() => { stillTimer = 0; $('#stage-still').src = `api/frame?t=${S.t.toFixed(2)}&w=960`; }, video.paused ? 120 : 700);
+  }
+
+  // ------------------------------------------------------------ 재생용 영상
+  // project.media (the server): none (no video file) | source (the file as it is, t0 0) | building
+  // (the 재생용 영상 of the processed part is being made, progress 0~1) | ready (it is made: its 0 s
+  // is the film's t0) | failed (note says why). Until a file plays, the stage shows stills of the
+  // source (/api/frame, film time) and the bar over it says why.
+  function mediaOf(P) {
+    const m = P && P.media;
+    if (m && typeof m === 'object' && m.state) return m;
+    return { state: P && P.video ? 'source' : 'none', t0: 0, progress: null, note: null };    // an older server
+  }
+  const pctOf = (m) => (m && typeof m.progress === 'number' && Number.isFinite(m.progress) ? `${Math.round(clamp(m.progress, 0, 1) * 100)}%` : '');
+  /** What the toast says when the writer presses play and only stills can be shown. */
+  function stillWhy() {
+    const m = S.media || {};
+    if (m.state === 'building') return `재생용 영상을 만드는 중입니다${pctOf(m) ? ` · ${pctOf(m)}` : ''} · 다 되면 재생할 수 있습니다`;
+    if (m.state === 'failed') return `재생용 영상을 만들지 못해 정지 화면만 보여 줍니다${m.note ? ` · ${m.note}` : ''}`;
+    if (m.state === 'none' || !(S.P && S.P.video)) return '영상 파일이 없습니다';
+    return '이 브라우저에서는 영상을 재생할 수 없어 정지 화면만 보여 줍니다';
+  }
+  /** The stage shows stills; ``sound``: the file's sound still plays (only its picture would not open). */
+  function goStill(sound = false) {
+    S.still = true;
+    S.canPlay = !!sound;
+    $('#stage-still').hidden = false;
+    $('#stage-play').hidden = !sound;
+    if (!sound && !video.paused) video.pause();
+    scheduleStill();
+  }
+  function goLive() {
+    S.still = false;
+    S.canPlay = true;
+    $('#stage-still').hidden = true;
+    $('#stage-play').hidden = false;
+  }
+  /** Let go of a <video>'s file (while the 재생용 영상 is made again /media/video answers 409). */
+  function unload(vid) {
+    if (!vid || !vid.getAttribute('src')) return;
+    vid.pause();
+    clearRange(vid);
+    vid.removeAttribute('src');
+    vid.load();
+  }
+  /** Give a <video> the file the server gives now, with its offset; ``t``: the film time to show. */
+  function loadMedia(vid, t) {
+    const m = S.media;
+    vid._off = m.state === 'ready' ? num(m.t0) : 0;
+    vid._pending = t;
+    vid.src = m.state === 'ready' ? `${S.P.video_url}?v=${S.mediaVer}` : S.P.video_url;     // ?v=: not the old copy from the cache
+  }
+  let mediaTimer = 0;
+  function pollMedia(on) {
+    if (on && !mediaTimer) {
+      mediaTimer = setInterval(async () => {
+        try { const r = await fetch('api/media'); if (r.ok) syncMedia(await r.json()); } catch (_) { /* asked again in 2 s */ }
+      }, 2000);
+    } else if (!on && mediaTimer) { clearInterval(mediaTimer); mediaTimer = 0; }
+  }
+  async function refreshMedia() {
+    try { const r = await fetch('api/media'); if (r.ok) syncMedia(await r.json()); } catch (_) { /* the next state says it */ }
+  }
+  /** Follow project.media: with every state the server sends and, while the copy is being made,
+      every 2 s (GET api/media). A new file is opened only when what the server gives changes. */
+  function syncMedia(m) {
+    if (!S.P) return;
+    m = m || mediaOf(S.P);
+    S.media = m;
+    pollMedia(m.state === 'building');
+    if (!S.P.video || m.state === 'none') {
+      if (S.mediaKey !== 'none') { S.mediaKey = 'none'; unload(video); unload(pvVideo()); S.canPlay = false; }
+      showStageMsg(m.note && m.note !== '영상 파일이 없습니다' ? `영상 파일을 찾을 수 없습니다 · ${m.note}` : '영상 파일을 찾을 수 없습니다 · project.json 의 video 경로를 확인하세요');
+      return;
+    }
+    if (m.state === 'building' || m.state === 'failed') {
+      if (S.mediaKey !== m.state) { S.mediaKey = m.state; unload(video); unload(pvVideo()); goStill(false); }
+      showStageMsg(m.state === 'building'
+        ? `재생용 영상을 만드는 중 ${pctOf(m)}${m.note ? ` · ${m.note}` : ''} · 그동안 정지 화면으로 보여 줍니다`
+        : `재생용 영상을 만들지 못했습니다${m.note ? ` · ${m.note}` : ''} · 정지 화면으로 보여 줍니다`, true);
+      return;
+    }
+    const key = `${m.state}|${num(m.t0)}`;               // ready | source
+    if (S.mediaKey === key) {
+      // the same file: a source the browser could not open stays on stills (the note: why no copy)
+      if (S.still) showStageMsg(m.note ? `재생용 영상을 만들 수 없습니다 · ${m.note}` : '', true);
+      return;
+    }
+    const after = S.mediaKey === 'building';
+    S.mediaKey = key;
+    if (m.state === 'ready') S.mediaVer = Date.now();
+    showStageMsg('');
+    goLive();
+    loadMedia(video, S.t);
+    const pv = pvVideo();
+    if (pv && S.modal && S.modal.pv && pv._film != null) loadMedia(pv, pv._film);
+    if (after) toast('재생용 영상이 준비되었습니다 · 이제 재생할 수 있습니다');
+  }
+  /** The browser could not open the file (``sound`` false) or opened only its sound. The stage
+      shows stills (and plays the sound); for the source file the server is asked once to make the
+      재생용 영상 (POST api/media/build), and the page follows what it answers. */
+  function cannotOpen(sound) {
+    if (!S.P || !S.P.video || !video.getAttribute('src')) return;
+    if (S.still && (!S.canPlay || sound)) return;        // already on stills (with the sound, or without)
+    goStill(sound);
+    toast(sound ? '브라우저가 이 영상의 그림을 열지 못해 정지 화면과 소리로 보여 줍니다' : '브라우저가 이 영상을 재생하지 못해 정지 화면으로 보여 줍니다', 'error', 5000);
+    const m = S.media || {};
+    if (m.state === 'source' && !S.buildAsked) {
+      S.buildAsked = true;
+      api('POST', 'api/media/build').then((r) => { if (r && r.state) syncMedia(r); }).catch(() => { /* an older server: stills stay */ });
+    } else refreshMedia();
+  }
+  /** Opened, but no picture: a codec the browser does not decode (MPEG-4 Part 2 in an mkv), the sound plays. */
+  function checkPicture() {
+    if (S.P && S.P.width && S.P.height && video.readyState >= 1 && !video.videoWidth) cannotOpen(true);
   }
   function bindVideo() {
     video.addEventListener('loadedmetadata', () => {
-      if (video._pending != null) { video.currentTime = video._pending; video._pending = null; }
+      if (video._pending != null) { video.currentTime = Math.max(0, toVid(video, video._pending)); video._pending = null; }
       layoutStage();
+      checkPicture();
     });
-    video.addEventListener('seeked', () => { if (video.paused) { S.t = video.currentTime; onTimeUI(); } });
+    video.addEventListener('loadeddata', checkPicture);
+    video.addEventListener('seeked', () => { if (video.paused) { S.t = clamp(toFilm(video, video.currentTime), S.P.t0, S.P.t1); onTimeUI(); } });
     video.addEventListener('play', () => { $('#stage').classList.remove('is-paused'); $('#stage-play').setAttribute('aria-label', '일시 정지'); kick(); });
     video.addEventListener('pause', () => { $('#stage').classList.add('is-paused'); $('#stage-play').setAttribute('aria-label', '재생'); });
     video.addEventListener('timeupdate', () => {
-      if (S.P && video.currentTime > S.P.t1 + 0.05) { video.pause(); video.currentTime = S.P.t1 - 0.05; }
+      if (S.P && toFilm(video, video.currentTime) > S.P.t1 + 0.05) { video.pause(); video.currentTime = Math.max(0, toVid(video, S.P.t1 - 0.05)); }
     });
-    video.addEventListener('error', () => {
-      if (!S.P || !S.P.video || S.still) return;
-      S.still = true;
-      $('#stage-still').hidden = false;
-      $('#stage-play').hidden = true;
-      scheduleStill();
-      toast('브라우저가 이 영상을 재생하지 못해 정지 화면으로 보여 줍니다', 'error', 5000);
-    });
+    video.addEventListener('error', () => cannotOpen(false));
     video.addEventListener('click', togglePlay);
   }
   function fitLayer(box, layer, vid) {
@@ -996,7 +1172,7 @@
   }
   function openMoveForm(id, inModal) {
     S.moveOpen = id;
-    if (inModal) renderExport(); else renderEvidence();
+    if (inModal) renderExport(); else renderDetail();
     const root = inModal ? $('#modal-box') : $('#evidence');
     const inp = root.querySelector(`.nr-card[data-nr="${cssEsc(id)}"] .time-input`);
     if (inp) { inp.focus(); inp.select(); }
@@ -1043,17 +1219,18 @@
     const pv = pvVideo();
     if (!pv) return;
     S.modal.pv = true;
-    if (S.P.video && !S.still) {
-      pv._pending = clamp(t, S.P.t0, S.P.t1 - 0.05);
-      pv.addEventListener('loadedmetadata', () => {
-        if (pv._pending != null) { pv.currentTime = pv._pending; pv._pending = null; }
-        fitLayer($('#pv'), $('#pv-layer'), pv);
-      });
-      pv.addEventListener('seeked', () => updatePvTime(pv.currentTime));
-      pv.addEventListener('play', kick);
-      pv.addEventListener('click', () => { if (pv.paused) { clearRange(pv); playVideo(pv); } else { pv.pause(); clearRange(pv); } });
-      pv.src = S.P.video_url;
-    }
+    pv._film = clamp(t, S.P.t0, S.P.t1 - 0.05);          // film time; the file is given when the media plays
+    pv.addEventListener('loadedmetadata', () => {
+      if (pv._pending != null) { pv.currentTime = Math.max(0, toVid(pv, pv._pending)); pv._pending = null; }
+      fitLayer($('#pv'), $('#pv-layer'), pv);
+    });
+    pv.addEventListener('seeked', () => updatePvTime(toFilm(pv, pv.currentTime)));
+    pv.addEventListener('play', kick);
+    pv.addEventListener('click', () => {
+      if (!pv.getAttribute('src')) { toast(stillWhy(), 'error'); return; }
+      if (pv.paused) { clearRange(pv); playVideo(pv); } else { pv.pause(); clearRange(pv); }
+    });
+    if (S.P.video && !S.still) loadMedia(pv, pv._film);
     requestAnimationFrame(() => fitLayer($('#pv'), $('#pv-layer'), pv));
   }
   function updatePvTime(t) { const el = $('#pv-time'); if (el) el.textContent = fmtTime(t); }
@@ -1435,8 +1612,13 @@
       [n('differs_open') && go('lines', 'differs', '다른 줄 보기'), n('no_room') && go('lines', 'noroom', '자리 없는 줄')].filter(Boolean).join(''))];
     const out2 = [n('absent') && `영화에 없음 ${n('absent')}`, n('out_of_range') && `구간 밖 ${n('out_of_range')}`, n('writer_excluded') && `작가가 뺌 ${n('writer_excluded')}`].filter(Boolean);
     if (out2.length) out.push(xpRow('info', '빠진 줄', `${out2.join(' · ')} · 자막에 넣지 않음`, go('lines', 'out')));
-    const nx = (chk.extras_open || []).length;
-    if (nx) out.push(xpRow('info', '대본에 없는 말', `${nx}개 정하지 않음 · 자막에 넣지 않음`, go('extras', 'open')));
+    // the same numbers as the 대본에 없는 말 tab: the ones folded as 받아쓰기 헛소리 are told apart
+    const xo = chk.extras_open || [];
+    const ns = xo.filter((id) => (D.extraById.get(id) || {}).suspect).length, nx = xo.length - ns;
+    if (nx || ns) {
+      out.push(xpRow('info', '대본에 없는 말', `${[nx && `${nx}개 정하지 않음`, ns && `받아쓰기 헛소리 의심 ${ns}개 접힘`].filter(Boolean).join(' · ')} · 자막에 넣지 않음`,
+        go('extras', nx ? 'open' : 'suspect')));
+    }
     const ne = (chk.names_early || []).length;
     if (ne) out.push(xpRow('warn', '이름이 일찍 나감', `${ne}명 · 이름이 밝혀지기 전에 이름 표시가 나간다`, go('people', 'early')));
     return out.join('');
@@ -1585,7 +1767,7 @@
     const sm = (S.st && S.st.summary) || {};
     if (v === 'items') return num(sm.final && sm.final.check);
     if (v === 'lines') return num(sm.lines && sm.lines.differs_open) + num(sm.lines && sm.lines.no_room);
-    if (v === 'extras') return num(sm.extras && sm.extras.open);
+    if (v === 'extras') return Math.max(0, num(sm.extras && sm.extras.open) - suspectOpen());
     if (v === 'people') return peopleOpen().length;
     if (v === 'cells') return num(sm.guide && sm.guide.must);
     return 0;
@@ -1606,7 +1788,10 @@
       const out = num(ex.absent) + num(ex.out_of_range) + num(ex.writer) + num(ex.no_time);
       return `자막에 ${num(l.included)}줄 · 빠짐 ${out}줄${num(l.added) ? ` · 작가가 넣은 줄 ${l.added}` : ''}`;
     }
-    if (S.view === 'extras') { const x = sm.extras || {}; return `정하지 않음 ${num(x.open)} / ${num(x.total)}개 · 정하지 않으면 자막에 넣지 않음`; }
+    if (S.view === 'extras') {
+      const x = sm.extras || {}, ns = suspectOpen();
+      return `정하지 않음 ${Math.max(0, num(x.open) - ns)} / ${num(x.total)}개${ns ? ` · 받아쓰기 헛소리 의심 ${ns}개 접힘` : ''} · 정하지 않으면 자막에 넣지 않음`;
+    }
     if (S.view === 'people') return `정하지 않은 인물 ${peopleOpen().length}명 · 이름이 일찍 나가는 인물 ${num(sm.people && sm.people.early)}명`;
     if (S.view === 'cells') { const g = sm.guide || {}; return `의무 위반 ${num(g.must)}칸 · 권고 ${num(g.should)}칸`; }
     return '';
@@ -1672,12 +1857,68 @@
     if (view === 'cells') { const c = D.cellById.get(id); return c ? [c.start + 0.02, c.end] : null; }
     return null;
   }
+  /** What the left panel shows: the view, its picked row, the open editor. */
+  function detailSubject() {
+    const id = S.view === 'items' ? S.sel : S[SEL_KEY[S.view]];
+    return `${S.view}|${id == null ? '' : id}|${S.ed ? `${S.ed.id}:${S.ed.mode}` : ''}|${S.view === 'items' ? S.moveOpen || '' : ''}`;
+  }
+  /** A field of the left panel by where it is: its box (data-box, a no-room card) and its name. */
+  function fieldKey(el) {
+    const box = el.closest('[data-box]'), nr = el.closest('[data-nr]');
+    return `${box ? box.dataset.box : nr ? `nr:${nr.dataset.nr}` : ''}|${el.dataset.f || el.dataset.change || el.name || el.id || el.className}`;
+  }
+  const isText = (el) => el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit'].includes(el.type));
+  /** The fields the writer is filling in (typed, picked, ticked and not stored yet) and the one that
+      has the focus. A field that stores as soon as it changes (data-change) is kept only while the
+      writer is still typing in it: once sent, the server's value is what the panel shows. */
+  function grabFields(root) {
+    const out = new Map(), seen = new Map();
+    for (const el of root.querySelectorAll('input, textarea, select')) {
+      let k = fieldKey(el);
+      const n = seen.get(k) || 0;
+      seen.set(k, n + 1);
+      if (n) k += `#${n}`;
+      const focused = document.activeElement === el;
+      const dirty = el.tagName === 'SELECT' ? [...el.options].some((o) => o.selected !== o.defaultSelected)
+        : isText(el) ? el.value !== el.defaultValue : el.checked !== el.defaultChecked;
+      const keep = el.dataset.change ? focused && dirty && isText(el) && el.value !== el._sent : dirty;
+      if (keep || focused) {
+        out.set(k, { keep, focused, value: el.value, checked: el.checked,
+          s: isText(el) ? el.selectionStart : null, e: isText(el) ? el.selectionEnd : null });
+      }
+    }
+    return out;
+  }
+  function putFields(root, got) {
+    if (!got.size) return;
+    const seen = new Map();
+    for (const el of root.querySelectorAll('input, textarea, select')) {
+      let k = fieldKey(el);
+      const n = seen.get(k) || 0;
+      seen.set(k, n + 1);
+      if (n) k += `#${n}`;
+      const g = got.get(k);
+      if (!g) continue;
+      if (g.keep) { if (isText(el) || el.tagName === 'SELECT') el.value = g.value; else el.checked = g.checked; }
+      if (g.focused) {
+        el.focus({ preventScroll: true });
+        if (isText(el) && g.s != null) { try { el.setSelectionRange(g.s, g.e); } catch (_) { /* a type without a caret */ } }
+      }
+    }
+  }
+  /** Draw the left panel. When it shows the same thing again (an answer to an earlier write came
+      while the writer was typing), what the writer typed and where the caret was stay. */
   function renderDetail() {
-    if (S.view === 'lines') return renderLineDetail();
-    if (S.view === 'extras') return renderExtraDetail();
-    if (S.view === 'people') return renderPersonDetail();
-    if (S.view === 'cells') return renderCellDetail();
-    return renderEvidence();
+    const box = $('#evidence');
+    const subject = detailSubject();
+    const got = box.dataset.subject === subject ? grabFields(box) : new Map();
+    if (S.view === 'lines') renderLineDetail();
+    else if (S.view === 'extras') renderExtraDetail();
+    else if (S.view === 'people') renderPersonDetail();
+    else if (S.view === 'cells') renderCellDetail();
+    else renderEvidence();
+    box.dataset.subject = subject;
+    putFields(box, got);
   }
   const detailHead = (title, hint, actions) => `<div class="ev-head"><h2>${title}</h2>${hint ? `<span class="hint">${hint}</span>` : ''}<div class="ev-actions">${actions || ''}</div></div>`;
   /** A line's time from its text, for a line put back without a time: the reading speed and the
@@ -1689,14 +1930,16 @@
   }
   /** Store a change of a line: a script line through /api/lines, a line the writer added through /api/added. */
   function lineUpdate(ln, fields, msg) {
+    let url = `api/lines/${enc(ln.id)}`;
     if (D.added.has(ln.id)) {
-      const f = { ...fields };
-      delete f.include;
-      delete f.text_from;
-      if (!Object.keys(f).length) return Promise.resolve(null);
-      return mutate(`api/added/${enc(ln.id)}`, f, msg);
+      fields = { ...fields };
+      delete fields.include;
+      delete fields.text_from;
+      if (!Object.keys(fields).length) return Promise.resolve(null);
+      url = `api/added/${enc(ln.id)}`;
     }
-    return mutate(`api/lines/${enc(ln.id)}`, fields, msg);
+    const keys = pendStart(ln.id, fields);
+    return mutate(url, fields, msg).then((st) => { pendEnd(keys); return st; });
   }
   /** [start, end] typed in a time box (the nearest [data-box] around ``el``), or null. */
   function readSpan(el) {
@@ -1919,9 +2162,9 @@
   }
   function breaksHtml(ln) {
     const toks = String(ln.text || '').split(/\s+/).filter(Boolean);
-    const keep = `<label class="switch sm"><input type="checkbox" data-change="ln-keep"${ln.keep ? ' checked' : ''}><span>한 칸에 두기</span></label>`;
+    const keep = `<label class="switch sm"><input type="checkbox" data-change="ln-keep"${pendOf(ln, 'keep') ? ' checked' : ''}><span>한 칸에 두기</span></label>`;
     if (toks.length < 2) return `<div class="sec">칸 나누기</div><div class="ed-row">${keep}</div>`;
-    const set = new Set(ln.breaks || []);
+    const set = new Set(pendOf(ln, 'breaks') || []);
     return `<div class="sec">끊을 자리<span class="sub">어절 사이를 누르면 그 자리에서 다음 칸으로 넘긴다 · 비워 두면 저절로</span></div>
       <div class="toks">${toks.map((w, i) => `${i ? `<button type="button" class="gap${set.has(i) ? ' is-on' : ''}" data-act="ln-gap" data-k="${i}" aria-pressed="${set.has(i)}" aria-label="${i}번째 어절 뒤에서 끊기" title="${i}번째 어절 뒤에서 끊기"></button>` : ''}<span class="tok">${esc(w)}</span>`).join('')}</div>
       <div class="ed-row">${keep}${set.size ? '<button type="button" class="btn btn-sm btn-text" data-act="ln-breaks-clear">끊을 자리 지우기</button>' : ''}</div>`;
@@ -1930,8 +2173,8 @@
     const dec = ln.decision || {};
     const own = !D.added.has(ln.id) && ('language' in dec || 'sung' in dec);
     return `<div class="sec">말 표시<span class="sub">외국어는 [언어] 표시 · 노래는 ♪ 가사 ♪</span></div>
-      <div class="ed-row"><label>언어 <input class="input input-sm" list="lang-list" data-change="ln-lang" value="${esc(ln.language || '')}" placeholder="한국어" autocomplete="off"></label>
-        <label class="switch sm"><input type="checkbox" data-change="ln-sung"${ln.sung ? ' checked' : ''}><span>노래</span></label>
+      <div class="ed-row"><label>언어 <input class="input input-sm" list="lang-list" data-change="ln-lang" value="${esc(pendOf(ln, 'language') || '')}" placeholder="한국어" autocomplete="off"></label>
+        <label class="switch sm"><input type="checkbox" data-change="ln-sung"${pendOf(ln, 'sung') ? ' checked' : ''}><span>노래</span></label>
         ${own ? '<button type="button" class="btn btn-sm btn-text" data-act="ln-mark-reset">대본대로</button>' : ''}</div>`;
   }
   function overlapHtml(ln) {
@@ -1979,24 +2222,38 @@
   function extraIn(x, f) {
     if (f === 'all') return true;
     if (f === 'overlap') return !!(x.overlaps || []).length;
+    if (f === 'suspect') return !!x.suspect;
     return (x.state || 'open') === f;
   }
+  /** An undecided 대본에 없는 말 that looks like 받아쓰기 헛소리: folded (not deleted) until the writer
+      opens the fold, and not counted as left to do; once decided it is an ordinary row. */
+  const isSuspect = (x) => !!x.suspect && (x.state || 'open') === 'open';
+  const suspectFolded = (x) => isSuspect(x) && !S.showSuspect && x.id !== S.extra && S.xf !== 'suspect';
+  const suspectOpen = () => D.extras.filter(isSuspect).length;
+  const suspectKo = (x) => SUSPECT_KO[x.suspect] || String(x.suspect);
+  const suspectBy = (x) => Object.entries(x.suspect_by || {}).map(([k, v]) => `${SUSPECT_BY[k] || k} ${v}`).join(' · ');     // plain text
   function extraRowHtml(x) {
     const sel = x.id === S.extra;
     const ov = (x.overlaps || []).map((l) => D.lines.get(l)).filter(Boolean);
     const sub = [sceneName(x.scene_id), ov.length ? `못 들은 줄과 겹침: ${ov.map((l) => cut(l.text, 16)).join(', ')}` : '',
       x.short ? '짧은 말' : '', x.state === 'line' && x.added ? '대사로 넣음' : ''].filter(Boolean).join(' · ');
     const [lab, cls] = XSTATE[x.state] || XSTATE.open;
-    return `<div class="row${sel ? ' is-sel' : ''}${x.state === 'ignored' ? ' is-out' : ''}" role="option" id="extras-row-${esc(x.id)}" data-view="extras" data-id="${esc(x.id)}" aria-selected="${sel}">
+    const tag = x.suspect ? `<span class="tag t-suspect" title="${esc(suspectBy(x))}">헛소리 의심 · ${esc(suspectKo(x))}</span>` : '';
+    return `<div class="row${sel ? ' is-sel' : ''}${x.state === 'ignored' ? ' is-out' : ''}${isSuspect(x) ? ' is-suspect' : ''}" role="option" id="extras-row-${esc(x.id)}" data-view="extras" data-id="${esc(x.id)}" aria-selected="${sel}">
       <span class="r-time tnum">${fmtTime(x.start)}</span><span class="badge k-extra">말</span>
-      <span class="r-main"><span class="r-phrase">${esc(x.text)}</span><span class="r-sub">${esc(sub)}</span></span>
+      <span class="r-main"><span class="r-phrase">${esc(x.text)}</span><span class="r-sub">${tag}${esc(sub)}</span></span>
       <span class="pill ${cls}">${lab}</span></div>`;
   }
   function renderExtras(opts) {
     const box = $('#rows');
-    const list = (D.visibleExtras = D.extras.filter((x) => extraIn(x, S.xf)));
-    $('#list-count').textContent = `${list.length} / ${D.extras.length}개`;
-    renderRows(box, list.map(extraRowHtml), list.findIndex((x) => x.id === S.extra), '',
+    const list = D.extras.filter((x) => extraIn(x, S.xf));
+    const vis = (D.visibleExtras = list.filter((x) => !suspectFolded(x)));
+    const folded = list.length - vis.length, sus = list.filter(isSuspect).length;
+    const tail = folded || (S.showSuspect && sus && S.xf !== 'suspect')
+      ? `<button type="button" class="fold-row" data-act="toggle-suspect">${S.showSuspect ? `받아쓰기 헛소리 의심 ${sus}개 접기`
+        : `받아쓰기 헛소리로 의심되는 말 ${folded}개 접힘 · 그 자리에서 목소리가 거의 잡히지 않음 · 펼치기`}</button>` : '';
+    $('#list-count').textContent = `${vis.length} / ${D.extras.length}개`;
+    renderRows(box, vis.map(extraRowHtml), vis.findIndex((x) => x.id === S.extra), tail,
       D.extras.length ? '이 조건에 맞는 말이 없습니다' : '대본에 없는 들린 말이 없습니다 · 받아쓰기와 대본 정렬 뒤에 생긴다');
     finishList(opts, S.extra && `extras-row-${S.extra}`);
   }
@@ -2036,6 +2293,8 @@
       <div class="ev-subject"><span class="badge k-extra">말</span><span class="ev-time tnum">${fmtTime(x.start)}–${fmtTime(x.end)}</span>
         <span class="ev-phrase" title="${esc(x.text)}">${esc(x.text)}</span><span class="pill ${cls}">${lab}</span></div>
       <div class="ev-note">${note.join('<i>·</i>')}</div>
+      ${x.suspect ? `<div class="sec">받아쓰기 헛소리 의심<span class="sub">아무도 말하지 않는 곳(음악·조용한 곳)에 받아쓰기 모델이 흔히 쓰는 꼴 · 지우지 않고 접어 둔다 · 들어 보고 정한다</span></div>
+        <div class="ev-note x-suspect"><span class="flag">${esc(suspectKo(x))}</span>${x.suspect_by ? `<i>·</i>근거 점수 ${esc(suspectBy(x))}` : ''}</div>` : ''}
       ${ov.length ? `<div class="sec">같은 자리의 못 들은 대본 줄<span class="sub">이 말이 그 줄일 수 있다</span></div>
         <div class="x-rows">${ov.map((l) => `<div class="x-row"><span class="ev-t tnum">${fmtTime(l.start)}</span>
           <span class="ev-text" title="${esc(l.text)}">${l.label ? `<span class="nm">${esc(l.label)}</span> ` : ''}${esc(l.text)}</span>${linePill(l)}
@@ -2440,6 +2699,7 @@
       case 'scene': S.sceneOpen.set(el.dataset.sid, !el.classList.contains('is-open')); renderList({ keep: true }); break;
       case 'more': showMore(); break;
       case 'toggle-minor': S.showMinor = !S.showMinor; renderList({ keep: true }); break;
+      case 'toggle-suspect': S.showSuspect = !S.showSuspect; renderList({ keep: true }); break;
       case 'goto-line': if (S.modal) closeModal(); pick('lines', id); break;
       case 'goto-item': if (S.modal) closeModal(); pick('items', id); break;
       case 'goto-extra': pick('extras', id); break;
@@ -2501,14 +2761,15 @@
       case 'ln-gap': {
         if (!ln) break;
         const k = Number(el.dataset.k);
-        const set = new Set(ln.breaks || []);
+        // the next click before the answer builds on the cuts still on their way (pendOf), not on
+        // the state of an earlier answer; the line itself keeps what the server sent
+        const set = new Set(pendOf(ln, 'breaks') || []);
         if (set.has(k)) set.delete(k); else set.add(k);
-        ln.breaks = [...set].sort((a, b) => a - b);          // the next click before the answer builds on this one
-        el.classList.toggle('is-on', set.has(k));
-        lineUpdate(ln, { breaks: ln.breaks }, set.has(k) ? `${k}번째 어절 뒤에서 끊음` : `${k}번째 어절 뒤 끊기를 지움`);
+        lineUpdate(ln, { breaks: [...set].sort((a, b) => a - b) }, set.has(k) ? `${k}번째 어절 뒤에서 끊음` : `${k}번째 어절 뒤 끊기를 지움`);
+        renderDetail();
         break;
       }
-      case 'ln-breaks-clear': if (ln) lineUpdate(ln, { breaks: [] }, '끊을 자리를 모두 지움'); break;
+      case 'ln-breaks-clear': if (ln) { lineUpdate(ln, { breaks: [] }, '끊을 자리를 모두 지움'); renderDetail(); } break;
       case 'ln-mark-reset': if (ln) lineUpdate(ln, { language: null, sung: null }, '말 표시를 대본대로'); break;
       // 대본에 없는 말
       case 'x-play': { const x = D.extraById.get(id); if (x) playRange(video, x.start - 0.3, x.end + 0.3); break; }
@@ -2592,7 +2853,8 @@
     else if (act === 'ln-sung' && ln) lineUpdate(ln, { sung: t.checked }, t.checked ? '노래로 표시 (♪ … ♪)' : '노래 표시를 뺌');
     else if (act === 'ln-lang' && ln) {
       const v = t.value.trim().replace(/^\[\s*|\s*\]$/g, '');
-      if (v !== (ln.language || '')) lineUpdate(ln, { language: v }, v ? `${bracket(v)} 표시` : '한국어 (언어 표시 없음)');
+      t._sent = t.value;               // sent: drawing the panel again shows what the server keeps
+      if (v !== (pendOf(ln, 'language') || '')) lineUpdate(ln, { language: v }, v ? `${bracket(v)} 표시` : '한국어 (언어 표시 없음)');
     } else if (act === 'pp-reveal-line' && t.value) peopleSet({ reveal: 'line', reveal_line: t.value });
   });
   // Mouse clicks must not leave focus on toolbar buttons, so Space/Enter keep working as shortcuts.
@@ -2731,9 +2993,7 @@
       applyState(st);
       layoutStage();
       renderTimeline();
-      loadEnv();
-      if (S.P.video) video.src = S.P.video_url;
-      else showStageMsg('영상 파일을 찾을 수 없습니다 · project.json 의 video 경로를 확인하세요');
+      loadEnv();                    // applyState has given the video its file (syncMedia)
       const first = D.visible[0];
       if (first) select(first.id);
       else seekTo(S.P.t0);
