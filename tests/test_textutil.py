@@ -178,3 +178,16 @@ def test_kiwi_hints_cover_auxiliary_and_negation():
     assert hints.get(i, 0) > 0                     # 하지 | 않았다고 (auxiliary / negation)
     hints = textutil._hints("나는 안 돼 정말로")
     assert hints.get("나는 안 돼 정말로".index(" 돼"), 0) > 0   # 안 | 돼
+
+
+def test_hold_keeps_the_head_of_a_text_on_one_line():
+    # 4th review: placement used to mark the spaces that must not break with U+2027, a character a
+    # line can hold itself (남‧북); the position is passed instead
+    text = "[세바스찬/영어] 지금 남‧북 회담이 열렸어 오늘 아침"
+    head = len("[세바스찬/영어] 지금")
+    for kiwi in (False, True):
+        lines = wrap(text, kiwi=kiwi, hold=head)
+        assert lines[0].startswith("[세바스찬/영어] 지금") and " ".join(lines) == text
+    assert wrap("가나다라 " * 3 + "마바사아자차카타파하가나다라", hold=14) == ["가나다라 가나다라 가나다라", "마바사아자차카타파하가나다라"]
+    assert wrap("가나다라마바사아 자차 카타파하가나다라", kiwi=False) == ["가나다라마바사아", "자차 카타파하가나다라"]
+    assert wrap("가나다라마바사아 자차 카타파하가나다라", kiwi=False, hold=9) == ["가나다라마바사아 자차", "카타파하가나다라"]

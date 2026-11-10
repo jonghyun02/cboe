@@ -827,10 +827,21 @@ def test_the_last_cell_of_a_scene_does_not_run_over_the_scene_change():
     assert one(same, "L1")["end"] == one(plain, "L1")["end"]           # a shot change inside one scene: as before
     longer = L("L1", "그러니까 오늘은 여기까지만 하자", 10.0, 10.9, speaker="A", timing="asr")
     cut2 = 11.0
-    assert one(run([longer, b], cuts=[cut2]), "L1")["end"] > cut2      # without scenes it reads on over the cut
+    without = one(run([longer, b], cuts=[cut2]), "L1")
+    assert without["end"] > cut2                                       # without scenes it reads on over the cut
     d = run([dict(longer, scene_id="SC001"), dict(b, scene_id="SC002")], cuts=[cut2])
-    assert one(d, "L1")["end"] == sec(F(cut2) - 2)                     # TG 4: never over the scene change
-    assert "notes" not in one(d, "L1")["check"] and one(d, "L2") == one(run([longer, b], cuts=[cut2]), "L2")
+    # 4th review: this case used to end 2 frames before the scene change at 16.7 units a second with no
+    # note. Ending there breaks the reading speed (II.3, an obligation), which comes before the scene
+    # rule (TG 4, weighed against the others): it reads on as without scenes and says why
+    c = one(d, "L1")
+    assert (c["start"], c["end"]) == (without["start"], without["end"]) and c["check"]["violations"] == []
+    assert c["check"]["notes"] == ["장면이 바뀌는 화면 전환을 넘음 · 그 앞에서 끝내면 초당 14자를 넘음"]
+    assert one(d, "L2") == one(run([longer, b], cuts=[cut2]), "L2")
+    # a cell that can end 2 frames before the scene change and still be read does (TG 4)
+    short = L("L1", "그래 여기까지", 10.0, 10.9, speaker="A", timing="asr")
+    nxt = L("L2", "어서 와", 11.2, 12.0, speaker="B", timing="asr")
+    c = one(run([dict(short, scene_id="SC001"), dict(nxt, scene_id="SC002")], cuts=[cut2]), "L1")
+    assert c["end"] == sec(F(cut2) - 2) and "notes" not in c["check"] and c["check"]["violations"] == []
     # ending before the change would leave it under 5/6 s: it goes over as without scenes, and says so
     d = run([dict(a, scene_id="SC001"), dict(b, scene_id="SC002")], cuts=[cut])
     c = one(d, "L1")
@@ -1001,3 +1012,143 @@ def test_a_long_guessed_line_without_room_for_its_cells_goes_to_no_room_with_the
     gap = float(re.search(r"빈틈 ([\d.]+)초", nr["reason"]).group(1))
     assert nr["line"] == "L2" and k >= 3 and gap < k * 5 / 6
     assert gap >= 4.6 - 2.0 - 0.2                                       # the gap between L1 and L3, not between its own pieces
+
+
+# --------------------------------------------------------------------------- 4th review (made-up text)
+
+def W(text, times):
+    return [{"w": w, "s": s, "e": e} for w, (s, e) in zip(text.split(), times)]
+
+
+SPLIT13 = "가나다라 마바사아 자차카 타파하 그래서 내가 어제 분명히 말했잖아 거기는 가지 말라고 정말로"
+SPLIT13_T = [(10.00, 10.15), (10.15, 10.30), (10.30, 10.45), (10.45, 10.60), (10.60, 10.90), (10.90, 11.20),
+             (11.20, 11.50), (11.50, 11.90), (11.90, 12.40), (12.40, 12.80), (12.80, 13.10), (13.10, 13.50),
+             (13.50, 14.00)]
+
+
+def test_a_line_is_cut_where_every_piece_can_be_read():
+    # 4th review: the cut used to leave a first piece of half a second at 22 units a second although
+    # cutting it in two after '말했잖아' breaks no limit (2.3 s and 2.1 s)
+    d = run([L("L1", SPLIT13, 10.0, 14.0, words=W(SPLIT13, SPLIT13_T), timing="asr")])
+    cs = cells_of(d, "L1")
+    assert all(c["check"]["violations"] == [] for c in cs), [(c["lines"], c["check"]["violations"]) for c in cs]
+    assert bare(" ".join(" ".join(c["lines"]) for c in cs)) == bare(SPLIT13)
+    # '아…' of an eighth of a second ends a sentence, but a cell of it cannot be read: not cut there
+    toks = "아… 그러니까 내가 어제 시장에 가서 오랜만에 옛날 친구를 만났는데 말이야".split()
+    times = [(20.0, 20.125)] + [(round(20.25 + 0.32 * k, 3), round(20.55 + 0.32 * k, 3)) for k in range(len(toks) - 1)]
+    ln = L("L2", " ".join(toks), 20.0, times[-1][1], words=W(" ".join(toks), times), timing="asr",
+           name="경찰1", show=True, label_extra=["속마음"])
+    cs = cells_of(run([ln]), "L2")
+    assert len(cs) == 2 and cs[0]["lines"][0] == "[경찰1/속마음] 아…" and len(cs[0]["lines"]) == 2
+    assert all(c["check"]["violations"] == [] and "flash" not in c["flags"] for c in cs)
+
+
+def test_pieces_of_one_line_are_not_overlapping_lines():
+    # 4th review: the ASR's word ends run a little past the next word's start, and the pieces of one
+    # line were untangled as if two people spoke over each other ('overlap', the next piece late)
+    times = [(30.0, 30.4), (30.4, 30.8), (30.8, 31.3), (31.2, 31.5), (31.45, 31.9), (31.9, 32.4)]
+    text = "오늘은 정말 이상한 날 아니었어 그래서"
+    x = L("L1", text, 30.0, 32.4, words=W(text, times), timing="asr", breaks=[3, 4])
+    d = run([x, L("L2", "응", 40.0, 40.5, timing="asr")])
+    cs = cells_of(d, "L1")
+    assert [c["lines"] for c in cs] == [["오늘은 정말 이상한"], ["날"], ["아니었어 그래서"]]
+    assert all(c["flags"] == [] for c in cs)                           # no "overlap" among its own pieces
+    # the short middle piece is laid out again with the others in the time there is: 5/6 s each,
+    # never earlier than the line's first word (a cell of a few frames cannot be read)
+    assert cs[0]["start"] == sec(F(30.0)) and all(nframes(c["start"], c["end"]) >= MIN_F for c in cs)
+    assert all(c["check"]["violations"] == [] for c in cs)
+
+
+def test_a_heard_line_cut_by_the_writer_gets_its_pieces_laid_out_or_a_note():
+    # 4th review: three pieces of an ASR line within 0.6 s; nothing follows for 3 s, so each can have
+    # 5/6 s one after the other (before: a first cell of 4 frames, flagged overlap and flash)
+    words = [{"w": "빨리", "s": 9.903, "e": 10.19}, {"w": "아니야.", "s": 10.14, "e": 10.693},
+             {"w": "오늘", "s": 10.393, "e": 10.498}]
+    ln = L("L1", "빨리 아니야. 오늘", 9.903, 10.498, words=words, timing="asr", name="하늘", show=True, breaks=[1, 2])
+    nxt = L("L2", "그래 알았어", 13.5, 14.5, timing="asr", name="바다")
+    for cuts in ([], [10.158]):
+        cs = cells_of(run([ln, nxt], cuts=cuts), "L1")
+        assert [c["lines"] for c in cs] == [["[하늘] 빨리"], ["아니야"], ["오늘"]]
+        assert all(nframes(c["start"], c["end"]) >= MIN_F and c["flags"] == [] for c in cs), cs
+    # no time for three cells of 5/6 s before the next line: the cells stay, and the short one says why
+    tight = L("L2", "그래 알았어", 11.6, 12.5, timing="asr", name="바다")
+    cs = cells_of(run([ln, tight]), "L1")
+    short = [c for c in cs if nframes(c["start"], c["end"]) < MIN_F]
+    assert short and all("작가가 정한 끊을 자리로 나눈 칸이 5/6초가 안 됨" in c["check"]["notes"][0] for c in short)
+
+
+def test_dialogue_after_a_cut_starts_on_it_when_the_cell_before_ends_two_frames_before():
+    # 4th review: A's speech ends a frame before the cut, B's starts 2 frames after it. B used to start
+    # on its word and A was cut back to 2 frames before the cut all the same: a 4-frame gap with the
+    # cut inside. TG2 puts B on the cut, and the gap is 2 frames (TG5)
+    k = 240                                                            # the cut, a frame number
+    a_words = [{"w": "오늘은", "s": 7.0, "e": 7.5}, {"w": "정말", "s": 7.5, "e": 8.5},
+               {"w": "늦었어", "s": 8.5, "e": (k - 1) / FPS}]
+    b0 = (k + 2) / FPS
+    b_words = [{"w": "그래도", "s": b0, "e": b0 + 0.5}, {"w": "왔잖아", "s": b0 + 0.5, "e": b0 + 1.0},
+               {"w": "우리", "s": b0 + 1.0, "e": b0 + 1.5}]
+    a = L("L1", "오늘은 정말 늦었어", 7.0, (k - 1) / FPS, words=a_words, timing="asr")
+    b = L("L2", "그래도 왔잖아 우리", b0, b0 + 1.5, words=b_words, timing="asr")
+    d = run([a, b], cuts=[k / FPS])
+    ca, cb = one(d, "L1"), one(d, "L2")
+    assert F(ca["end"]) == k - 2 and F(cb["start"]) == k
+    from cboe import check
+    assert check.run(d, cuts=[k / FPS])["violations"] == [] and check.run(d)["violations"] == []
+
+
+# fz.gen scene 77 of the review (made-up words): a heard line, a guessed one in the middle of it
+SCENE77 = [
+    L("L0002", "이렇게나 모르겠어요 잠깐만요, 안 그래서 아... 안 우리 말이야", 6.643, 10.967, timing="asr",
+      speaker="바다", name="바다", show=True, label_extra=["속마음"], scene_id="SC001", breaks=[3, 7],
+      words=W("이렇게나 모르겠어요 잠깐만요, 안 그래서 아... 안 우리 말이야",
+              [(6.643, 6.864), (6.864, 7.553), (7.553, 7.686), (7.686, 8.503), (8.503, 8.663), (8.663, 9.232),
+               (9.232, 9.88), (9.88, 10.539), (10.539, 10.967)])),
+    L("L0003", "우리", 10.467, 10.767, timing="asr", speaker="경찰1", name="경찰1", scene_id="SC002", keep=True),
+    L("L0004", "다시는 3.5초 그래! 응 다시는 가자 있었어 왜", 10.267, 13.555, timing="even", status="unheard",
+      label_extra=["속마음"], language="영어", scene_id="SC002",
+      words=W("다시는 3.5초 그래! 응 다시는 가자 있었어 왜",
+              [(10.267, 10.726), (10.726, 11.365), (11.365, 11.735), (11.735, 12.514), (12.514, 12.764),
+               (12.764, 12.962), (12.962, 13.285), (13.285, 13.555)])),
+    L("L0005", "엄청나게 지금 가자 OK 왜 안 아... 다시는 돼 아... 같이", 13.455, 16.3, timing="asr", speaker="하늘",
+      name="하늘", label_extra=["전화"], language="영어", scene_id="SC002")]
+
+
+def test_a_guessed_line_never_moves_a_heard_one():
+    # 4th review: the heard L0003 was shown 1.25 s late, behind the guessed L0004 (② "the guessed one
+    # gives way" the other way round). Heard lines are untangled first; the guessed one fits in after
+    with_guess = run(SCENE77)
+    heard_only = run([ln for ln in SCENE77 if ln["id"] != "L0004"])
+    for lid in ("L0002", "L0003", "L0005"):
+        assert [c["start"] for c in cells_of(with_guess, lid)] == [c["start"] for c in cells_of(heard_only, lid)], lid
+    g = one(with_guess, "L0004")
+    assert "timing_estimated" in g["flags"]
+    assert one(with_guess, "L0003")["end"] < g["start"] < one(with_guess, "L0005")["start"]   # its place in the script
+
+
+def test_a_scene_end_that_would_break_the_reading_speed_says_so():
+    # 4th review (made-up 22 units): ending 2 frames before the scene change gave 18 units a second and
+    # no note; the reading speed comes first, and the cell says it crosses the scene change and why
+    a = L("L1", "그러니까 내가 어제 분명히 말했잖아 거기는 가지 말라고", 10.0, 11.2, timing="asr")
+    b = L("L2", "알았어 미안해", 16.0, 17.0, timing="asr")
+    plain = one(run([a, b], cuts=[11.5]), "L1")
+    c = one(run([dict(a, scene_id="SC001"), dict(b, scene_id="SC002")], cuts=[11.5]), "L1")
+    assert (c["start"], c["end"]) == (plain["start"], plain["end"]) and c["check"]["violations"] == []
+    assert c["check"]["notes"] == ["장면이 바뀌는 화면 전환을 넘음 · 그 앞에서 끝내면 초당 14자를 넘음"]
+
+
+def test_a_note_left_alone_by_one_long_word_is_a_violation_of_the_cell():
+    # 4th review: the checker reports lyric_notes for this cell; placement said nothing about it
+    ln = L("L1", "가나다라마바사아자차카타파하", 10.0, 12.0, timing="asr", name="영수", show=True, sung=True)
+    c = one(run([ln]), "L1")
+    assert c["lines"] == ["[영수] ♪", "가나다라마바사아자차카타파하 ♪"]
+    assert c["check"]["violations"] == ["음표가 가사와 다른 줄"]
+
+
+def test_a_dialogue_character_like_the_old_marker_does_not_change_the_line_breaks():
+    # 4th review: U+2027 in the text was taken for the placement's own "no break here" marker
+    from cboe.placement import _P
+    P = _P(24.0, {"kiwi": False})
+    for text in ("[세바스찬/영어] 지금 남{}북 열렸어", "[세바스찬] 잠깐만요, 남{}북 지금 잠깐만요"):
+        a, b = P.wrap(text.format("‧")), P.wrap(text.format("·"))
+        assert [x.replace("‧", "·") for x in a] == b
+        assert not re.fullmatch(r"\[[^\]]*\]", a[0])                     # the label is not alone either way

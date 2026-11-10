@@ -218,11 +218,16 @@ def _cut(word: str, room: float) -> tuple[str, str]:
     return word, ""
 
 
-def _greedy(text: str, max_units: float) -> list[str]:
-    """Fill lines word by word; a word longer than a line is cut (only then)."""
+def _greedy(text: str, max_units: float, hold: int = 0) -> list[str]:
+    """Fill lines word by word; a word longer than a line is cut (only then). The text up to
+    ``hold`` is one word (``wrap``)."""
     lines: list[str] = []
     cur = ""
-    for word in text.split(" "):
+    words = text.split(" ")
+    if hold > 0:
+        k = text[:hold].count(" ") + 1
+        words = [" ".join(words[:k])] + words[k:]
+    for word in words:
         cand = f"{cur} {word}" if cur else word
         if units(cand) <= max_units + EPS:
             cur = cand
@@ -248,9 +253,12 @@ def _greedy(text: str, max_units: float) -> list[str]:
 
 
 def wrap(text, max_units: float = style.MAX_UNITS, max_lines: int = style.MAX_LINES, kiwi: bool = True,
-         tidy=None) -> list[str]:
+         tidy=None, hold: int = 0) -> list[str]:
     """Lines of ``text`` (module doc). ``kiwi=False`` skips the Kiwi hints (same feasibility);
-    ``tidy`` makes each line as it is displayed (lines that become empty are dropped)."""
+    ``tidy`` makes each line as it is displayed (lines that become empty are dropped); ``hold``:
+    no break at a space before that position of the text with its white space collapsed (a
+    speaker label kept with the first word; the position is passed, not a marker character, so
+    no character of the dialogue can take its place)."""
     text = norm(text)
     if not text:
         return []
@@ -262,6 +270,8 @@ def wrap(text, max_units: float = style.MAX_UNITS, max_lines: int = style.MAX_LI
         hints = _hints(text) if kiwi else {}
         best = None
         for i, cost in _spaces(text):
+            if i < hold:
+                continue
             a, b = shown(text[:i]), shown(text[i + 1:])
             ua, ub = units(a), units(b)
             if ua > max_units + EPS or ub > max_units + EPS:
@@ -272,7 +282,7 @@ def wrap(text, max_units: float = style.MAX_UNITS, max_lines: int = style.MAX_LI
                 best = (key, a, b)
         if best is not None:
             return [x for x in best[1:] if x]
-    return [x for x in (shown(y) for y in _greedy(text, max_units)) if x]
+    return [x for x in (shown(y) for y in _greedy(text, max_units, hold)) if x]
 
 
 def fits(text, max_units: float = style.MAX_UNITS, max_lines: int = style.MAX_LINES, tidy=None) -> bool:
