@@ -800,3 +800,130 @@ def test_sample_work_folder_recompute(tmp_path):
     named = [c for c in d["cells"] if c["lines"][0].startswith("[BJ 옴뫄]")]
     assert [c["refs"] for c in named] == [[f"L000{k}"] for k in range(1, 7)]
     assert not any("♬" in x or x.startswith("(") for c in d["cells"] for x in c["lines"])   # today's notation
+
+
+# --------------------------------------------------------------------------- review layer (2026-11 audit, round C)
+
+def test_a_sound_whose_onset_is_a_guess_is_flagged():
+    # a sound the script writes down that the detector did not find (origin 'script', estimated)
+    est = dict(S("C0001", 20.0, "[쾅]"), estimated=True)
+    d = run([], [est, S("S2", 30.0, "[쿵]")])
+    assert one(d, "C0001")["flags"] == ["timing_estimated"] and one(d, "S2")["flags"] == []
+    assert d["summary"]["timing_estimated"] == 1
+    moved = dict(est, move_to=21.0)                                    # the writer put it there: no guess any more
+    assert one(run([], [moved]), "C0001")["flags"] == []
+    d = run([L("L1", "가자", 40.0, 40.6, timing="asr")], [dict(S("C0002", 40.1, "[쾅]"), estimated=True)])
+    c = one(d, "C0002")
+    assert c["refs"] == ["L1", "C0002"] and c["flags"] == ["timing_estimated"]   # the shared cell says so too
+
+
+def test_the_last_cell_of_a_scene_does_not_run_over_the_scene_change():
+    cut = 10.5
+    a = L("L1", "가자", 10.0, 10.3, speaker="A", timing="asr")
+    b = L("L2", "어서 와 기다렸어", 13.0, 14.5, speaker="B", timing="asr")
+    plain = run([a, b], cuts=[cut])
+    assert one(plain, "L1")["end"] >= sec(F(cut) + 12)                # no scenes: half a second into the next shot
+    same = run([dict(a, scene_id="SC001"), dict(b, scene_id="SC001")], cuts=[cut])
+    assert one(same, "L1")["end"] == one(plain, "L1")["end"]           # a shot change inside one scene: as before
+    d = run([dict(a, scene_id="SC001"), dict(b, scene_id="SC002")], cuts=[cut])
+    assert one(d, "L1")["end"] == sec(F(cut) - 2)                      # TG 4: never over the scene change
+    assert one(d, "L2") == one(plain, "L2")
+    # the speech goes on over the cut (it starts before it and belongs to the next scene): allowed
+    over = L("L1", "가자 어서 가자", 10.0, 10.9, speaker="A", timing="asr", scene_id="SC001")
+    d = run([over, dict(b, scene_id="SC002")], cuts=[cut])
+    assert one(d, "L1")["end"] > cut
+
+
+def test_closing_a_small_gap_stops_at_the_scene_change():
+    a = L("L1", "그럼 내일 보자", 10.0, 11.5, speaker="A", timing="asr")
+    b = L("L2", "응 잘 가", 12.3, 13.0, speaker="B", timing="asr")
+    cut = 12.0
+    plain = run([a, b], cuts=[cut])
+    d = run([dict(a, scene_id="SC001"), dict(b, scene_id="SC002")], cuts=[cut])
+    assert one(d, "L1")["end"] <= sec(F(cut) - 2) and one(d, "L1")["end"] <= one(plain, "L1")["end"]
+
+
+def test_two_lines_of_different_scenes_never_share_a_hyphen_cell():
+    lines = [L("L1", "뭐?", 10.0, 10.2, speaker="빌", name="빌", show=True, scene_id="SC001"),
+             L("L2", "응", 10.45, 10.6, speaker="세바스찬", name="세바스찬", show=True, scene_id="SC002"),
+             L("L3", "그래 가자", 11.1, 12.0, speaker="빌", scene_id="SC002")]
+    d = run(lines)
+    assert one(d, "L1")["refs"] == ["L1"] and one(d, "L2")["refs"] == ["L2"]
+    together = run([dict(ln, scene_id="SC001") for ln in lines])
+    assert one(together, "L1")["refs"] == ["L1", "L2"]
+
+
+def test_one_person_under_two_labels_is_still_one_speaker():
+    # before and after the name is told: '[남자]' then '[재식]' are one person — no two-speaker cell
+    lines = [L("L1", "뭐?", 10.0, 10.2, speaker="재식", name="남자", show=True, person="재식"),
+             L("L2", "응", 10.45, 10.6, speaker="재식", name="재식", show=True, person="재식"),
+             L("L3", "그래 가자", 11.1, 12.0, speaker="빌")]
+    assert len(cells_of(run(lines), "L1")) == 1 and one(run(lines), "L1")["refs"] == ["L1"]
+    two = [dict(lines[0], person="갑"), dict(lines[1], person="을", name="남자"), lines[2]]
+    assert one(run(two), "L1")["refs"] == ["L1", "L2"]                 # two people: the label text does not decide
+
+
+TEXT7 = "오늘은 여기까지 하자 내일 다시 오면 돼"          # made up; 19 units, 7 eojeols: one cell of two lines
+
+
+def test_writer_breaks_cut_the_line_where_the_writer_said():
+    line = L("L1", TEXT7, 10.0, 13.0, timing="asr")
+    assert len(cells_of(run([line]), "L1")) == 1
+    d = run([dict(line, breaks=[3])])
+    cs = cells_of(d, "L1")
+    assert [c["lines"] for c in cs] == [["오늘은 여기까지 하자"], ["내일 다시 오면 돼"]]
+    assert cs[1]["start"] == sec(F(10.0 + 3 * 3.0 / 7)) and "notes" not in cs[0]["check"]
+    assert cells_of(run([dict(line, breaks=[0, 7, 99, "x"])]), "L1")[0]["lines"] == run([line])["cells"][0]["lines"]
+    # a piece the writer asked for that does not fit is cut further, and the cell says so
+    long_ = L("L2", LONG + " " + TEXT7, 20.0, 26.0, timing="asr")
+    d = run([dict(long_, breaks=[len(LONG.split()) + 7 - 1])])
+    cs = cells_of(d, "L2")
+    assert len(cs) >= 3 and cs[-1]["lines"] == ["돼"]
+    assert any("작가가 정한 칸이 한도를 넘어 더 나눔" in c["check"].get("notes", []) for c in cs)
+
+
+def test_keep_holds_the_line_against_a_sound_and_says_when_it_cannot():
+    line = L("L1", TEXT7, 10.0, 13.0, timing="asr")
+    snd = S("S1", 11.6, "[쾅]")
+    assert len(cells_of(run([line], [snd]), "L1")) == 2                 # ④ the sound splits the cell
+    d = run([dict(line, keep=True)], [snd])
+    assert len(cells_of(d, "L1")) == 1 and "S1" not in one(d, "L1")["refs"]
+    nr = next(e for e in d["no_room"] if e["item"] == "S1")
+    assert "작가가 한 칸에 두기로 정한 대사" in nr["reason"]
+    too_long = dict(L("L2", LONG + " " + LONG, 20.0, 26.0, timing="asr"), keep=True)   # over 2 x 16 units
+    cs = cells_of(run([too_long]), "L2")
+    assert len(cs) >= 2 and all(any(n.startswith("한 칸에 두기") for n in c["check"]["notes"]) for c in cs)
+
+
+def test_a_speaker_label_is_not_left_alone_on_the_first_line():
+    long_name = L("L1", "오늘은 정말 고마웠어", 10.0, 12.0, name="가나다라마바", show=True)
+    c = one(run([long_name]), "L1")
+    assert c["lines"] == ["[가나다라마바] 오늘은", "정말 고마웠어"]
+    noted = L("L1", "오늘은 정말 고마웠어", 10.0, 12.0, name="가나다라마바", show=True)
+    d = run([noted], [S("S1", 10.0, "[한숨]", src="L1")])                 # ③ the speaker's own sound in front
+    assert not re.fullmatch(r"(\[[^\]]*\]\s?)+", one(d, "L1")["lines"][0])
+    # only when the 16 units leave no other way: a label of 11 units and a first word of 5
+    longer = L("L1", "고마웠어요 정말로", 10.0, 12.0, name="가나다라마바사아자차", show=True)
+    assert one(run([longer]), "L1")["lines"] == ["[가나다라마바사아자차]", "고마웠어요 정말로"]
+
+
+def test_a_guessed_line_squeezed_between_two_heard_lines_gets_no_cell():
+    a = L("L1", "그래서 내가 말했잖아", 10.0, 11.6, speaker="A", timing="asr")
+    g = L("L2", "그게 무슨 소리야 지금 당장 설명해 봐", 11.75, 11.9, speaker="B", timing="voice", status="unheard")
+    b = L("L3", "됐어 그만해", 12.2, 13.2, speaker="A", timing="asr")
+    d = place([a, g, b], [], [], FPS)
+    assert [c["refs"] for c in d["cells"]] == [["L1"], ["L3"]]
+    nr = d["no_room"]
+    assert len(nr) == 1 and (nr[0]["item"], nr[0]["line"], nr[0]["kind"]) == ("L2", "L2", "dialogue")
+    assert nr[0]["reason"].startswith("시각 추정 대사") and "0.46초" in nr[0]["reason"]   # 11 frames
+    assert d["summary"]["lines_no_room"] == 1 and d["summary"]["flash"] == 0
+    heard = place([a, dict(g, timing="asr", status="ok"), b], [], [], FPS)   # a line the ASR matched: as before
+    assert len(heard["cells"]) == 3 and heard["no_room"] == []
+    # room in the gap: the guessed line moves inside it instead
+    g2 = L("L2", "그게 무슨 소리야", 12.9, 13.0, speaker="B", timing="even")
+    a2 = L("L1", "그래서 내가 말했잖아", 10.0, 11.0, speaker="A", timing="asr")
+    b2 = L("L3", "됐어 그만해", 13.2, 14.2, speaker="A", timing="asr")
+    d = place([a2, g2, b2], [], [], FPS)
+    c = one(d, "L2")
+    assert c["start"] < 12.9 and nframes(c["start"], c["end"]) >= MIN_F and c["flags"] == ["timing_estimated"]
+    assert nframes(c["end"], one(d, "L3")["start"]) >= 2 and d["no_room"] == []

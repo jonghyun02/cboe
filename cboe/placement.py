@@ -9,15 +9,21 @@ lines  : DialogueLine dicts (id, speaker, text, start, end, words[{w,s,e}]) plus
          ``show_name`` (bool) and ``name`` (str | None), and optionally ``label_extra`` (source or
          manner of speech shown after the name: ["속마음"]), ``language`` ("영어"), ``sung`` (bool),
          ``timing`` ("asr" | "script" | "voice" | "even"), ``status`` ("absent" and "out_of_range"
-         lines have no time and are skipped; "unheard" = time is a guess) and ``pos`` ("top").
+         lines have no time and are skipped; "unheard" = time is a guess) and ``pos`` ("top"),
+         ``scene_id`` (the script scene), ``person`` (who speaks: two lines of one person never
+         share a hyphen cell, whatever label they show; default ``name`` or ``speaker``),
+         ``breaks`` (the writer's cuts: eojeol numbers 1..n-1 a new cell starts at) and ``keep``
+         (the writer's "one cell": no sound splits it; ignored, and said in ``check.notes``, when
+         the line does not fit one cell).
 sounds : included sound items only: {id, kind: "sfx"|"music", onset, t1 (sound end),
          phrase, short, source_line (line id whose speaker made the sound, or None),
-         move_to (writer-forced start time, or None)}.
+         move_to (writer-forced start time, or None), estimated (the onset is a guess: a sound
+         the script writes down that was not detected; its cell gets "timing_estimated")}.
 cuts   : shot-change times (s).
 returns: {"cells": [{"id", "start", "end", "lines": [str], "refs": [ids], "kind",
                      "pos": "bottom" | "top", "flags": ["timing_estimated", "overlap", "flash"],
                      "check": {"chars": [..], "n_lines", "cps", "dur", "gap_next", "violations": [..]}}],
-          "no_room": [{"item", "t", "text", "reason"}],
+          "no_room": [{"item", "t", "text", "reason"}]  (a dialogue line: also "line" and kind "dialogue"),
           "summary": {"cells", "violations", "no_room", "timing_estimated", "overlap", "flash", ...},
           "fps": fps, "profile": "adult" | "children", "notation": style.NOTATION}
 
@@ -58,8 +64,21 @@ a hyphen cell; ② else, when the time of one of them is only a guess (``timing`
 one gives way: to the side it has in the script when there is room there, else to the other side,
 else right behind the reading time of the other; ③ else the later one waits until the earlier one
 has had 5/6 s (when it still gets 5/6 s itself) and both cells carry the flag "overlap".
-A cell from a line whose time is a guess carries "timing_estimated"; a cell shorter than a quarter
-of a second carries "flash", so that it never goes out unnoticed.
+A cell from a line whose time is a guess carries "timing_estimated" (so does a cell of a sound whose
+onset is a guess); a cell shorter than a quarter of a second carries "flash", so that it never goes
+out unnoticed. A line whose time is a guess (not one matched by the ASR) that is left less than
+5/6 s between the lines around it is first moved inside that gap; when the gap is shorter than
+5/6 s it gets no cell and goes to ``no_room`` (the writer decides: a guessed line is no reason to
+show a few frames of text, 감사 2-m1).
+
+Scenes (TG 4 "Subtitles may not cross scene changes"): two lines of different ``scene_id`` never
+share a hyphen cell, and the last cell of a scene never runs (longer out-time, closed gap) over a
+shot change between it and the first line of the next scene — unless its speech goes on over that
+cut. Lines without ``scene_id`` are not affected.
+Writer's cuts: ``breaks`` replaces the automatic cut points of the line (a piece that does not fit
+is cut further and the cell says so in ``check.notes``). A line wrapped right after its label
+("[김철수]" alone on the first line) is wrapped again with the first word kept next to the label,
+unless the 16 units leave no other way.
 
 Sound cells (memo 5.2). sfx: start = onset frame, never earlier, even near a cut (BBC 5.5);
 length = units / 14 + 1 s (BBC 4.3.3) within [5/6, 7] s, whatever the sound's own length.
@@ -98,6 +117,7 @@ from __future__ import annotations
 
 import itertools
 import math
+import re
 
 from . import style
 from .textutil import EPS, end_bonus, fits, units, wrap
@@ -105,6 +125,9 @@ from .textutil import EPS, end_bonus, fits, units, wrap
 INF = float("inf")
 ESTIMATED = ("voice", "even")               # dialogue.json ``timing`` of a line whose time is a guess
 NO_TIME = ("absent", "out_of_range")        # dialogue.json ``status`` of a line that has no time in the video
+_LABELS_ONLY = re.compile(r"(?:-\s)?(?:\[[^\[\]]*\]\s?)+")     # "[김철수]", "- [지수] [재채기]"
+_LABELS_HEAD = re.compile(r"(?:-\s)?(?:\[[^\[\]]*\]\s)+")
+_JOIN = "‧"     # stands for a space that must not break while wrapping (counted like a space: 0.5)
 
 # the numbers of cboe.style (adult profile) and whether textutil.wrap uses the Kiwi phrase hints;
 # ``place(settings=...)`` overrides them, e.g. with style.get("children").settings()
@@ -158,8 +181,29 @@ class _P:
         return fits(lines, self.max_units, self.max_lines)
 
     def wrap(self, text) -> list[str]:
-        """The displayed lines of ``text``: broken on the text as written, punctuation tidied."""
-        return wrap(text, self.max_units, self.max_lines, kiwi=self.kiwi, tidy=style.tidy_line)
+        """The displayed lines of ``text``: broken on the text as written, punctuation tidied. A
+        first line that would hold the speaker label alone ("[김철수]" / "대사…") is avoided by
+        keeping the first word next to the label, when that still fits the limits."""
+        lines = wrap(text, self.max_units, self.max_lines, kiwi=self.kiwi, tidy=style.tidy_line)
+        if len(lines) > 1 and _LABELS_ONLY.fullmatch(lines[0].strip()):
+            alt = self._label_kept(text)
+            if alt and " ".join(alt).split() == " ".join(lines).split():     # no word cut in two
+                return alt
+        return lines
+
+    def _label_kept(self, text):
+        t = " ".join(str(text or "").split())
+        m = _LABELS_HEAD.match(t)
+        if not m or m.end() >= len(t):
+            return None
+        rest = t[m.end():].split(" ", 1)
+        glued = (t[:m.end()] + rest[0]).replace(" ", _JOIN) + (" " + rest[1] if len(rest) > 1 else "")
+        lines = wrap(glued, self.max_units, self.max_lines, kiwi=self.kiwi,
+                     tidy=lambda s: style.tidy_line(s.replace(_JOIN, " ")))
+        lines = [x.replace(_JOIN, " ") for x in lines]
+        ok = (lines and len(lines) <= self.max_lines and all(units(x) <= self.max_units + EPS for x in lines)
+              and not _LABELS_ONLY.fullmatch(lines[0].strip()))
+        return lines if ok else None
 
     def fits(self, text: str) -> bool:
         """Whether ``text`` as displayed stays within the line and line-count limits."""
@@ -332,7 +376,23 @@ def _dialogue_parts(ln: dict, P: _P, order: int = 0) -> list[dict]:
         return []
     head, cont = style.line_labels(ln)               # "[이름/출처·말투/언어] " and "[언어] "
     sung = bool(ln.get("sung"))
-    ranges = _split(toks, times, lambda i, j: (head if i == 0 else cont) + _body(toks[i:j], sung), P)
+    n = len(toks)
+    cuts = sorted({int(b) for b in ln.get("breaks") or () if isinstance(b, (int, float)) and 0 < int(b) < n})
+    notes = []
+    if cuts:                                         # the writer's cut points; a piece that does not fit is cut further
+        ranges = []
+        for a, b in zip([0] + cuts, cuts + [n]):
+            sub = _split(toks[a:b], times[a:b],
+                         lambda i, j, a=a: (head if a + i == 0 else cont) + _body(toks[a + i:a + j], sung), P)
+            if len(sub) > 1:
+                notes.append("작가가 정한 칸이 한도를 넘어 더 나눔")
+            ranges += [(a + i, a + j) for i, j in sub]
+    else:
+        ranges = _split(toks, times, lambda i, j: (head if i == 0 else cont) + _body(toks[i:j], sung), P)
+    keep = bool(ln.get("keep")) and not cuts
+    if keep and len(ranges) > 1:
+        notes.append(f"한 칸에 두기: {P.max_lines}줄 {P.max_units:g}자·{P.max_dur:g}초를 넘어 나눔")
+        keep = False
     guess = ln.get("timing") in ESTIMATED or ln.get("status") == "unheard"
     parts = []
     for i, j in ranges:
@@ -343,8 +403,10 @@ def _dialogue_parts(ln: dict, P: _P, order: int = 0) -> list[dict]:
         words = [(toks[x], P.fr(times[x][0]), P.fr(times[x][1])) for x in range(i, j)]
         parts.append({"kind": "dialogue", "id": ln.get("id"), "prefix": pre, "body": body, "text": pre + body,
                       "t": words[0][1], "e": max(w[2] for w in words), "words": words,
-                      "speaker": ln.get("name") or ln.get("speaker"), "whole": len(ranges) == 1,
-                      "cont": cont, "sung": sung, "guess": guess, "order": order, "pos": ln.get("pos")})
+                      "speaker": ln.get("person") or ln.get("name") or ln.get("speaker"), "whole": len(ranges) == 1,
+                      "cont": cont, "sung": sung, "guess": guess, "order": order, "pos": ln.get("pos"),
+                      "scene": ln.get("scene_id"), "timing": ln.get("timing"), "keep": keep,
+                      "notes": list(dict.fromkeys(notes))})
     return parts
 
 
@@ -394,6 +456,8 @@ def _two_speakers(a: _Cell, b: _Cell, P: _P) -> bool:
         return False
     if not pa.get("speaker") or not pb.get("speaker") or pa["speaker"] == pb["speaker"]:
         return False
+    if pa.get("scene") and pb.get("scene") and pa["scene"] != pb["scene"]:
+        return False                                 # one cell never spans a scene change (TG 4)
     if any(units(_hyphen_line(p)) > P.max_units + EPS for p in (pa, pb)):
         return False
     return max(pa["e"], pb["e"]) - a.start <= P.max_f
@@ -504,12 +568,12 @@ def _untangle(cells: list[_Cell], P: _P, w0: int, w1) -> list[_Cell]:
     return cells
 
 
-def _dialogue_outs(cells: list[_Cell], P: _P, w1) -> None:
+def _dialogue_outs(cells: list[_Cell], P: _P, w1, caps=None) -> None:
     """Out-times: last word + 0.5 s, raised to 5/6 s and 14 units/s, at most 7 s and 2 frames
-    before the next cell (TG1, TG3, TG5)."""
+    before the next cell (TG1, TG3, TG5) and never over a scene change (``caps``)."""
     for i, c in enumerate(cells):
         out = max(c.speech_end() + P.tail, c.start + P.min_f, c.start + P.need(c.units))
-        out = min(out, c.start + P.max_f)
+        out = min(out, c.start + P.max_f, (caps or {}).get(id(c), INF))
         if i + 1 < len(cells):
             out = min(out, cells[i + 1].start - P.gap)
         if w1 is not None:
@@ -517,7 +581,74 @@ def _dialogue_outs(cells: list[_Cell], P: _P, w1) -> None:
         c.end = max(out, c.start + 1)
 
 
-def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> list[_Cell]:
+def _scene_of(c: _Cell):
+    scenes = {p.get("scene") for p in c.dialogue()}
+    return scenes.pop() if len(scenes) == 1 else None
+
+
+def _scene_caps(cells: list[_Cell], cuts: list[int], P: _P) -> dict:
+    """The latest out-time of the last cell of a scene (module doc "Scenes"): 2 frames before the
+    first shot change after its speech that comes before the next scene's first cell. Keyed by
+    ``id(cell)``; only for lines that carry a ``scene_id``."""
+    import bisect
+    caps = {}
+    dl = sorted((c for c in cells if c.dialogue()), key=lambda c: (c.start, c.seq))
+    for a, b in zip(dl, dl[1:]):
+        sa, sb = _scene_of(a), _scene_of(b)
+        if not sa or not sb or sa == sb:
+            continue
+        k = bisect.bisect_right(cuts, a.speech_end())        # a cut the speech goes over is no limit
+        if k < len(cuts) and cuts[k] <= b.start:
+            caps[id(a)] = max(cuts[k] - P.gap, a.start + 1)
+    return caps
+
+
+def _guess_only(c: _Cell) -> bool:
+    """One piece of one line whose time is a guess (not matched by the ASR)."""
+    d = c.dialogue()
+    return (c.mode == "plain" and len(c.parts) == 1 and len(d) == 1 and bool(d[0].get("guess"))
+            and d[0].get("timing") != "asr")
+
+
+def _make_room(cells: list[_Cell], P: _P, w0: int, w1) -> list[dict]:
+    """A guessed line left under 5/6 s between the cells around it (module doc): moved inside the
+    gap (the cell before may shrink to its floor), or — when the gap is shorter than 5/6 s — no
+    cell at all; returned as ``no_room`` entries. Ends are set again by the caller."""
+    dropped = []
+    _sorted(cells)
+    i = 0
+    while i < len(cells):
+        c = cells[i]
+        if c.end - c.start >= P.min_f or not _guess_only(c):
+            i += 1
+            continue
+        prev = cells[i - 1] if i > 0 else None
+        nxt = cells[i + 1] if i + 1 < len(cells) else None
+        lo = max(w0, _floor(prev, P) + P.gap) if prev is not None else w0
+        hi = min(nxt.start - P.gap if nxt is not None else INF, w1 if w1 is not None else INF)
+        if hi - lo >= P.min_f:
+            _shift(c, min(max(c.start, lo), hi - P.min_f) - c.start)
+            if prev is not None and prev.end > c.start - P.gap:
+                prev.end = c.start - P.gap
+            i += 1
+            continue
+        lid = c.dialogue()[0]["id"]
+        mine = [x for x in cells if any(p["kind"] == "dialogue" and p["id"] == lid for p in x.parts)]
+        if not all(_guess_only(x) for x in mine):    # a piece shares a cell with another line: leave it
+            i += 1
+            continue
+        first = min(x.parts[0]["t"] for x in mine)
+        dropped.append({"item": lid, "line": lid, "t": P.sec(first), "kind": "dialogue",
+                        "text": " ".join(x.parts[0]["text"] for x in sorted(mine, key=lambda x: x.start)),
+                        "reason": f"시각 추정 대사 · 앞뒤 칸 사이 빈틈 {max(0, hi - lo) / P.fps:.2f}초 "
+                                  f"({P.min_text}초 미만)"})
+        for x in mine:
+            cells.remove(x)
+        i = max(0, i - 1)
+    return dropped
+
+
+def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> tuple[list[_Cell], list[dict]]:
     parts = []
     for k, ln in enumerate(lines or []):
         if isinstance(ln, dict):
@@ -537,8 +668,12 @@ def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> list[_Ce
         prev = c
     cells = _untangle(cells, P, w0, w1)                  # overlapping lines: never a one-frame cell
     cells = _pair_short(cells, P)
-    _dialogue_outs(cells, P, w1)
-    return cells
+    _dialogue_outs(cells, P, w1, _scene_caps(cells, cuts, P))
+    dropped = _make_room(cells, P, w0, w1)               # a guessed line squeezed between two others
+    if any(c.end - c.start < P.min_f for c in cells) or dropped:
+        _sorted(cells)
+        _dialogue_outs(cells, P, w1, _scene_caps(cells, cuts, P))
+    return cells, dropped
 
 
 # --------------------------------------------------------------------------- sounds
@@ -559,7 +694,8 @@ def _sound_part(s: dict, P: _P):
     if t1 is not None:
         e = max(t, P.fr(t1 + (at - onset if onset is not None else 0.0)))
     return {"kind": kind, "id": s.get("id"), "text": long_, "long": long_, "short": short, "t": t, "e": e,
-            "src": s.get("source_line"), "forced": move is not None, "at": at, "pos": s.get("pos")}
+            "src": s.get("source_line"), "forced": move is not None, "at": at, "pos": s.get("pos"),
+            "guess": bool(s.get("estimated")) and move is None}
 
 
 def _sound_len(sp: dict, text: str, start: int, P: _P) -> int:
@@ -665,6 +801,8 @@ def _plan_split(x: _Cell, t: int, sp: dict, text: str, ext: bool, cells: list[_C
         return None, "대사 칸 중간 (나눌 수 없는 칸)"
     d = x.parts[0]
     words = d["words"]
+    if d.get("keep"):
+        return None, "작가가 한 칸에 두기로 정한 대사"
     if len(words) < 2:
         return None, "대사 중간, 나눌 어절 경계 없음"
     k = min(range(1, len(words)), key=lambda q: (abs(words[q][1] - t), q))
@@ -813,11 +951,13 @@ def _cut_rules(c: _Cell, cuts: list[int], cap: int, P: _P) -> None:
 
 def _adjust_ends(cells: list[_Cell], cuts: list[int], P: _P, w1) -> None:
     _sorted(cells)
+    caps = _scene_caps(cells, cuts, P)
     for i, c in enumerate(cells):
         nxt = cells[i + 1].start if i + 1 < len(cells) else None
         limit = nxt - P.gap if nxt is not None else INF
         if w1 is not None:
             limit = min(limit, w1)
+        limit = min(limit, caps.get(id(c), INF))       # never over a scene change (TG 4)
         cap = min(limit, c.start + P.max_f)
         if nxt is not None and P.gap < nxt - c.end < P.half_exact - 1e-9 and nxt - P.gap <= cap:
             c.end = nxt - P.gap                      # ① close a gap under half a second (TG5)
@@ -869,17 +1009,20 @@ def _out(cells: list[_Cell], cuts: list[int], P: _P) -> list[dict]:
         for p in c.parts:
             if p["id"] not in refs:
                 refs.append(p["id"])
-        flags = ["timing_estimated"] if any(p.get("guess") for p in c.dialogue()) else []
+        flags = ["timing_estimated"] if any(p.get("guess") for p in c.parts) else []
         flags += sorted(c.marks)
         if dur_f < P.flash_f:
             flags.append("flash")                    # a cell of a few frames never goes out unmarked
+        check = {"chars": chars, "n_lines": len(c.lines), "cps": round(cps, 2) if cps < INF else None,
+                 "dur": round(dur_f / P.fps, 3), "gap_next": round(gap_f / P.fps, 3) if gap_f is not None else None,
+                 "violations": viol}
+        notes = list(dict.fromkeys(n for p in c.parts for n in p.get("notes") or ()))
+        if notes:                                    # what became of a writer's choice (breaks, keep)
+            check["notes"] = notes
         out.append({"id": f"C{i + 1:04d}", "start": P.sec(c.start), "end": P.sec(c.end), "lines": list(c.lines),
                     "refs": refs, "kind": c.kind(),
                     "pos": "top" if any(p.get("pos") == "top" for p in c.parts) else "bottom", "flags": flags,
-                    "check": {"chars": chars, "n_lines": len(c.lines), "cps": round(cps, 2) if cps < INF else None,
-                              "dur": round(dur_f / P.fps, 3),
-                              "gap_next": round(gap_f / P.fps, 3) if gap_f is not None else None,
-                              "violations": viol}})
+                    "check": check})
     return out
 
 
@@ -891,8 +1034,7 @@ def place(lines, sounds, cuts, fps, window=(0.0, None), settings=None) -> dict:
     w1 = P.fr(_num(t1)) if _num(t1) is not None else None
     cut_f = sorted({P.fr(c) for c in (cuts or []) if _num(c) is not None})
     seq = itertools.count()
-    cells = _dialogue_cells(lines, cut_f, P, w0, w1, seq)
-    no_room = []
+    cells, no_room = _dialogue_cells(lines, cut_f, P, w0, w1, seq)
     parts = []
     for s in sounds or []:
         if not isinstance(s, dict):
@@ -933,5 +1075,6 @@ def place(lines, sounds, cuts, fps, window=(0.0, None), settings=None) -> dict:
             "summary": {"cells": len(out), "violations": n_viol, "no_room": len(no_room),
                         "dialogue_cells": sum(1 for c in cells if c.dialogue()), "sounds_placed": placed,
                         "timing_estimated": flagged("timing_estimated"), "overlap": flagged("overlap"),
-                        "flash": flagged("flash")},
+                        "flash": flagged("flash"),
+                        "lines_no_room": sum(1 for e in no_room if e.get("kind") == "dialogue")},
             "fps": P.fps, "profile": P.profile, "notation": style.NOTATION}
