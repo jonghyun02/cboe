@@ -2,6 +2,10 @@
 """Start the review screen for one work folder.
 
     python -m cboe.server <work_dir> [--port 8765] [--host 127.0.0.1] [--no-browser]
+
+When the browser cannot play the video, the server makes the 재생용 영상 (``review.mp4`` in the
+work folder, ``cboe.proxy``) in the background and logs which encoder it took; stopping the
+server ends that ffmpeg.
 """
 from __future__ import annotations
 
@@ -53,7 +57,14 @@ def main(argv=None) -> int:
         loop.set_exception_handler(handler)
         await server.serve()
 
-    asyncio.run(serve())
+    try:
+        asyncio.run(serve())
+    except KeyboardInterrupt:
+        pass
+    finally:
+        # the lifespan already did this on a normal stop; a second Ctrl+C skips it, and the
+        # ffmpeg making the 재생용 영상 (review.mp4) must not go on after the server
+        app.state.review.close()
     return 0
 
 

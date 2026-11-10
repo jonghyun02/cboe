@@ -26,6 +26,14 @@ remove), ``/api/people``. Unknown ids are 404, values that cannot be used 400, c
 Video and frames are limited to the project window [t0, t1): the page never seeks
 outside it and ``/api/frame`` clamps into it, so sealed parts of a test video are
 not shown (same rule as ``media.Media``).
+
+재생용 영상 (``cboe.proxy``): when the browser cannot play the source (mkv, MPEG-4 Part 2, HEVC,
+AC3 ...), a background worker started with the app makes ``review.mp4`` of the window only
+(H.264 + AAC, GPU encoder first) and ``/media/video`` gives that file; its 0 s is the film's t0.
+``project.media`` in the state and ``GET /api/media`` say which: ``{"state": none | source |
+building | ready | failed, "t0", "progress", "note"}`` (film time = video time + ``t0``).
+``POST /api/media/build`` makes the copy when the page could not open the source. While it is
+being made ``/media/video`` is 409. Stills (``/api/frame``) are still read from the source.
 """
 from __future__ import annotations
 
@@ -47,7 +55,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from .. import export as export_mod
-from .. import style
+from .. import proxy, style
 from ..state import EXCLUDED_KO, LINE_STATUSES, ORIGIN_KO, Conflict, Project, ReviewError
 from ..textutil import units
 from ..util import log, read_json
@@ -417,7 +425,7 @@ class FrameGrabber:
 class ReviewService:
     """One work folder behind one lock: decisions, placement, screen state."""
 
-    def __init__(self, work):
+    def __init__(self, work, media=None):
         self.project = Project(work)
         self.lock = threading.RLock()
         self.version = 0
@@ -427,6 +435,17 @@ class ReviewService:
         self._comp: dict | None = None
         self._sig = None
         self._grabber: FrameGrabber | None = None
+        # 재생용 영상: what /media/video gives (proxy.Worker, or a stand-in with the same methods)
+        self.media = media if media is not None else proxy.Worker(self.project.work, lambda: self.project.meta)
+
+    def close(self) -> None:
+        """Server stops: end the playback-video worker (and its ffmpeg) and the frame reader."""
+        try:
+            self.media.close()
+        except Exception:
+            log.exception("재생용 영상 일꾼을 끝내지 못했습니다")
+        if self._grabber is not None:
+            self._grabber.close()
 
     # ---------------------------------------------------------------- draft
     def _signature(self):
@@ -589,7 +608,8 @@ class ReviewService:
                        "video": bool(video and Path(video).is_file()), "video_url": "media/video",
                        "video_name": Path(video).name if video else None, "sample": bool(meta.get("sample")),
                        "work": str(p.work), "profile": st.profile,
-                       "envelope": p.path("env.npz").is_file()}     # /api/envelope has the level curves
+                       "envelope": p.path("env.npz").is_file(),     # /api/envelope has the level curves
+                       "media": self.media.status()}                # 재생용 영상 (proxy.Worker.status)
             added_cells = {r: [c["id"] for c in cells if r in (c.get("refs") or [])]
                            for r in (a["id"] for a in comp["added"])}
             return {"version": self.version, "project": project,
@@ -608,18 +628,20 @@ class ReviewService:
 
 
 # ---------------------------------------------------------------------- app
-def create_app(work) -> FastAPI:
-    """FastAPI app for one work folder (``project.json`` must exist)."""
+def create_app(work, media=None) -> FastAPI:
+    """FastAPI app for one work folder (``project.json`` must exist). ``media`` replaces the
+    playback-video worker (``proxy.Worker``: start, status, file, request_build, close), which
+    starts deciding — and making ``review.mp4`` when needed — in the background right away."""
     work = Path(work)
     if not (work / "project.json").is_file():
         raise FileNotFoundError(f"{work}: project.json not found")
-    svc = ReviewService(work)
+    svc = ReviewService(work, media=media)
+    svc.media.start()
 
     @asynccontextmanager
     async def lifespan(_app):
         yield
-        if svc._grabber is not None:
-            svc._grabber.close()
+        svc.close()
 
     app = FastAPI(title="CBoE 검수 화면", default_response_class=SafeJSONResponse, lifespan=lifespan,
                   docs_url="/api/docs", redoc_url=None, openapi_url="/api/openapi.json")
@@ -832,10 +854,26 @@ def create_app(work) -> FastAPI:
     # ---------------------------------------------------------------- media
     @app.get("/media/video", include_in_schema=False)
     def video():
-        path = svc.project.meta.get("video")
-        if not path or not Path(path).is_file():
-            raise HTTPException(404, "영상 파일이 없습니다")
-        return FileResponse(path, media_type=mimetypes.guess_type(path)[0] or "video/mp4")
+        """ready: review.mp4 (0 s = film t0) · source: the source file · building: 409 · else 404."""
+        m = svc.media.status()
+        if m["state"] == "building":
+            raise HTTPException(409, "재생용 영상을 만드는 중입니다")
+        path = svc.media.file() if m["state"] in ("ready", "source") else None
+        if path is None or not Path(path).is_file():
+            raise HTTPException(404, m.get("note") if m["state"] == "failed" and m.get("note") else "영상 파일이 없습니다")
+        if m["state"] == "ready":
+            return FileResponse(path, media_type="video/mp4")
+        return FileResponse(path, media_type=mimetypes.guess_type(str(path))[0] or "video/mp4")
+
+    @app.get("/api/media")
+    def media_state():
+        """The 재생용 영상 state (as ``project.media``); the page asks every 2 s while building."""
+        return svc.media.status()
+
+    @app.post("/api/media/build")
+    def media_build():
+        """Make review.mp4 (the page could not open the source); nothing when it is there or being made."""
+        return svc.media.request_build()
 
     @app.get("/api/frame")
     def frame(t: float = Query(...), w: int = Query(640, ge=32, le=3840)):
