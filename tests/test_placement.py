@@ -2,6 +2,7 @@
 """끼워 넣기 (cboe.placement): limits, timing, positions ①-⑤, no_room, the sample work folder."""
 import json
 import math
+import re
 import shutil
 from pathlib import Path
 
@@ -28,14 +29,19 @@ def nframes(a, b):
     return round((b - a) * FPS)
 
 
-def L(lid, text, start, end, speaker=None, name=None, show=False, words="even"):
+def L(lid, text, start, end, speaker=None, name=None, show=False, words="even", **more):
     toks = text.split()
     if words == "even":
         step = (end - start) / len(toks)
         words = [{"w": w, "s": round(start + i * step, 3), "e": round(start + (i + 1) * step, 3)}
                  for i, w in enumerate(toks)]
     return {"id": lid, "speaker": speaker, "text": text, "start": start, "end": end, "words": words,
-            "show_name": show, "name": name}
+            "show_name": show, "name": name, **more}
+
+
+def bare(text):
+    """The words of a text without the punctuation that is tidied for display (. , …)."""
+    return re.sub(r"[.,…]", "", text).split()
 
 
 def S(sid, onset, phrase, short=None, t1=None, kind="sfx", src=None, move=None):
@@ -66,6 +72,9 @@ def check_invariants(d, sounds=()):
     for c in cells:
         assert c["end"] > c["start"], c
         assert c["lines"] and c["kind"] in ("dialogue", "sfx", "music", "mixed")
+        assert c["pos"] in ("bottom", "top") and isinstance(c["flags"], list)
+        for line in c["lines"]:                     # I.13, I.4: tidied for display
+            assert not line.endswith((".", ",")) and ".." not in line, c
         for t in (c["start"], c["end"]):            # on the frame grid (ms rounding)
             assert abs(t * FPS - round(t * FPS)) < 0.03, (t, c)
         chk = c["check"]
@@ -116,7 +125,7 @@ def test_name_pushing_reading_speed_extends_the_end():
     plain = one(run([L("L1", text, 20.0, 21.0)]), "L1")
     assert plain["end"] == sec(F(21.0) + 12)
     named = one(run([L("L1", text, 20.0, 21.0, name="세바스찬", show=True)]), "L1")
-    assert named["lines"][0].startswith("(세바스찬) ")
+    assert named["lines"][0].startswith("[세바스찬] ")           # II.8: [ ] around a speaker ID
     u = sum(named["check"]["chars"])
     assert u == 23.5                                # the space at the line break is not shown
     assert nframes(named["start"], named["end"]) == math.ceil(u / 14 * FPS - 1e-6)   # 1.68 s
@@ -212,16 +221,16 @@ def test_long_line_is_split_at_sentence_ends_with_the_name_once():
     d = run([L("L1", text, 10.0, 18.0, name="양희", show=True)])
     cs = cells_of(d, "L1")
     assert len(cs) >= 2
-    assert cs[0]["lines"][0].startswith("(양희) ")
-    assert all("(양희)" not in " ".join(c["lines"]) for c in cs[1:])
-    bodies = " ".join(" ".join(c["lines"]) for c in cs).replace("(양희) ", "", 1)
-    assert bodies == text                                              # text never changed
-    assert " ".join(cs[0]["lines"]).endswith(".")
+    assert cs[0]["lines"][0].startswith("[양희] ")
+    assert all("[양희]" not in " ".join(c["lines"]) for c in cs[1:])
+    bodies = " ".join(" ".join(c["lines"]) for c in cs).replace("[양희] ", "", 1)
+    assert bare(bodies) == bare(text)                                  # the words are never changed
+    assert " ".join(cs[0]["lines"]).endswith("날이었어")                # cut at the sentence end; its period is not shown
     for c in cs:
         assert c["check"]["n_lines"] <= 2 and max(c["check"]["chars"]) <= 16
     words = text.split()
     step = 8.0 / len(words)
-    k = len(" ".join(cs[0]["lines"]).replace("(양희) ", "").split())
+    k = len(" ".join(cs[0]["lines"]).replace("[양희] ", "").split())
     assert cs[1]["start"] == sec(F(round(10.0 + k * step, 3)))         # starts at its first word
 
 
@@ -242,13 +251,20 @@ def test_missing_or_degenerate_word_times_fall_back_to_even_spacing():
 
 
 def test_overlapping_lines_keep_order_and_gaps():
+    # the scenario is the one this test always had; what is expected changed on 2026-11-10 (audit
+    # 2-04, 7-09): before, L1 was cut to 10 frames ("5/6초 미만") and L3 to one frame. Now two
+    # speakers who talk over each other share a hyphen cell (I.6), in the order they start.
     d = run([L("L1", "가나다라마바사 아자차카타", 10.0, 12.0, speaker="A"),
              L("L2", "파하가나다라 마바사아", 10.5, 11.5, speaker="B"),
              L("L3", "하나", 13.0, 13.4, speaker="A"), L("L4", "둘", 13.0, 13.4, speaker="B")])
-    a, b = one(d, "L1"), one(d, "L2")
-    assert nframes(a["end"], b["start"]) == 2
-    assert "5/6초 미만" in a["check"]["violations"]
-    assert len(d["cells"]) >= 3
+    a, b = one(d, "L1"), one(d, "L3")
+    assert a["refs"] == ["L1", "L2"] and a["lines"] == ["- 가나다라마바사 아자차카타", "- 파하가나다라 마바사아"]
+    assert b["refs"] == ["L3", "L4"] and b["lines"] == ["- 하나", "- 둘"]
+    assert a["start"] == sec(F(10.0)) and a["end"] >= sec(F(12.0))     # both speeches are covered
+    assert nframes(a["end"], b["start"]) >= 2
+    assert a["check"]["violations"] == [] and b["check"]["violations"] == []
+    assert a["flags"] == [] and len(d["cells"]) == 2
+    assert all(nframes(c["start"], c["end"]) >= MIN_F for c in d["cells"])
 
 
 def test_two_short_lines_of_different_speakers_share_a_hyphen_cell():
@@ -257,7 +273,7 @@ def test_two_short_lines_of_different_speakers_share_a_hyphen_cell():
              L("L3", "그래 가자", 11.1, 12.0, speaker="빌")]
     d = run(lines)
     c = one(d, "L1")
-    assert c["refs"] == ["L1", "L2"] and c["lines"] == ["- (빌) 뭐?", "- (세바스찬) 응"]
+    assert c["refs"] == ["L1", "L2"] and c["lines"] == ["- [빌] 뭐?", "- [세바스찬] 응"]
     assert c["kind"] == "dialogue" and c["check"]["violations"] == []
     same = [dict(lines[0]), dict(lines[1], speaker="빌", name="빌")]
     assert len(run(same)["cells"]) == 2                                # same speaker: no
@@ -293,19 +309,29 @@ def test_sfx_length_has_bounds():
 
 def test_music_start_and_length():
     m = dict(kind="music", t1=70.0)
-    c = one(run(sounds=[S("M1", 60.0, "♬ 무서운 음악", **m)], cuts=[59.7]), "M1")
+    c = one(run(sounds=[S("M1", 60.0, "[무서운 음악]", **m)], cuts=[59.7]), "M1")
     assert c["start"] == sec(F(59.7)) and c["kind"] == "music"            # cut in the half second before
+    assert c["lines"] == ["[무서운 음악]"]                                 # II.7: a music label is in brackets
     assert nframes(c["start"], c["end"]) == round(3 * FPS)
-    c = one(run(sounds=[S("M1", 60.0, "♬ 무서운 음악", **m)], cuts=[59.3]), "M1")
+    c = one(run(sounds=[S("M1", 60.0, "[무서운 음악]", **m)], cuts=[59.3]), "M1")
     assert c["start"] == sec(F(60.0))
-    c = one(run(sounds=[S("M1", 60.0, "♬ 음악", kind="music", t1=61.5)]), "M1")
+    c = one(run(sounds=[S("M1", 60.0, "[음악]", kind="music", t1=61.5)]), "M1")
     assert c["end"] == sec(F(61.5) + 12)                                 # shorter music: its end + 0.5 s
-    c = one(run(sounds=[S("M1", 60.0, "♬ 음악", kind="music", t1=60.1)]), "M1")
+    c = one(run(sounds=[S("M1", 60.0, "[음악]", kind="music", t1=60.1)]), "M1")
     assert nframes(c["start"], c["end"]) == MIN_F
 
 
+def test_music_phrase_of_an_older_work_folder_is_written_in_brackets():
+    # items.json and review.json of older runs hold '♬ …' phrases: they come out as labels
+    c = one(run(sounds=[S("M1", 60.0, "♬ 무서운 음악", short="♬ 음악", kind="music", t1=70.0)]), "M1")
+    assert c["lines"] == ["[무서운 음악]"]
+    d = run([L("L1", "응", 60.0, 60.4)], [S("M1", 60.1, "♬ 고조되는 아주 무서운 음악 소리", short="♬", kind="music", t1=70.0)])
+    assert one(d, "L1")["lines"] == ["- 응", "- [음악]"]                  # the short phrase, modernised too
+    assert not any("♬" in x for c in d["cells"] for x in c["lines"])
+
+
 def test_music_snap_never_takes_the_previous_speech():
-    d = run([L("L1", "가나다라", 58.0, 59.68)], [S("M1", 60.0, "♬ 음악", kind="music", t1=70.0)], cuts=[59.7])
+    d = run([L("L1", "가나다라", 58.0, 59.68)], [S("M1", 60.0, "[음악]", kind="music", t1=70.0)], cuts=[59.7])
     assert one(d, "M1")["start"] == sec(F(60.0))
 
 
@@ -333,7 +359,7 @@ def test_sound_cell_ends_before_a_cut_when_its_sound_is_over():
     assert c["end"] == sec(F(51.2) - 2)
     c = one(run(sounds=[S("S1", 50.0, "[책 떨어지는 소리]", t1=50.3)], cuts=[50.5]), "S1")
     assert c["end"] == sec(F(50.0) + 39)                               # less than 5/6 s would be left
-    c = one(run(sounds=[S("M1", 60.0, "♬ 무서운 음악", kind="music", t1=66.0)], cuts=[61.0]), "M1")
+    c = one(run(sounds=[S("M1", 60.0, "[무서운 음악]", kind="music", t1=66.0)], cuts=[61.0]), "M1")
     assert c["end"] == sec(F(60.0) + 72)                               # music goes on: may cross
 
 
@@ -357,11 +383,11 @@ def test_position_2_deck_scream_and_thunder():
     d = run([ln], [S("S0008", 230.4, "[천둥 소리]", short="[천둥]", t1=232.2)], cuts=[230.35])
     c = one(d, "L0049")
     assert c["refs"] == ["L0049", "S0008"] and c["kind"] == "mixed"
-    assert c["lines"] == ["- (BJ 옴뫄) 으아아아아", "- [천둥 소리]"]          # heard order
+    assert c["lines"] == ["- [BJ 옴뫄] 으아아아아", "- [천둥 소리]"]          # heard order
     assert c["start"] == sec(F(230.357)) and c["check"]["violations"] == []
     d = run([ln], [S("S0008", 230.0, "[천둥 소리]", t1=231.0)])
     c = one(d, "L0049")
-    assert c["lines"] == ["- [천둥 소리]", "- (BJ 옴뫄) 으아아아아"]          # the sound heard first
+    assert c["lines"] == ["- [천둥 소리]", "- [BJ 옴뫄] 으아아아아"]          # the sound heard first
     assert c["start"] == sec(F(230.0))
 
 
@@ -370,11 +396,11 @@ def test_position_3_sound_of_the_speaker_on_one_line():
     c = one(run([ln], [S("S1", 40.0, "[재채기]", src="L1")]), "L1")
     assert c["lines"] == ["[재채기] 나도야!"] and c["refs"] == ["L1", "S1"] and c["kind"] == "mixed"
     c = one(run([dict(ln, name="지수", show_name=True)], [S("S1", 40.1, "[재채기]", src="L1")]), "L1")
-    assert c["lines"] == ["(지수) [재채기] 나도야!"]
+    assert c["lines"] == ["[지수] [재채기] 나도야!"]                      # the guide's own example (II.5)
     longer = L("L1", "그러니까 나도 같이 가자고", 40.0, 41.5, speaker="지수", name="지수", show=True)
     c = one(run([longer], [S("S1", 40.0, "[재채기]", src="L1")]), "L1")
     assert len(c["lines"]) == 2 and not any(x.startswith("- ") for x in c["lines"])
-    assert " ".join(c["lines"]) == "(지수) [재채기] 그러니까 나도 같이 가자고"
+    assert " ".join(c["lines"]) == "[지수] [재채기] 그러니까 나도 같이 가자고"
     other = one(run([ln], [S("S1", 40.0, "[재채기]", src="L9")]), "L1")    # someone else: hyphens
     assert other["lines"] == ["- [재채기]", "- 나도야!"]
 
@@ -400,9 +426,10 @@ def test_position_4_not_when_a_part_would_be_too_short():
     assert r["reason"].startswith("나누면 앞 칸 5/6초 미만")
 
 
-def test_dialogue_text_is_never_changed_by_sounds():
-    lines = [L("L1", ROW, 70.0, 74.0, name="양희", show=True), L("L2", "나도야!", 75.0, 75.8),
-             L("L3", "응", 77.0, 77.3)]
+def test_dialogue_words_are_never_changed_by_sounds():
+    # only the display punctuation is tidied (I.13, I.4); the words stay as the script has them
+    lines = [L("L1", ROW + ".", 70.0, 74.0, name="양희", show=True), L("L2", "나도야!", 75.0, 75.8),
+             L("L3", "응...", 77.0, 77.3)]
     sounds = [S("S1", 72.3, "[첨벙]"), S("S2", 75.0, "[재채기]", src="L2"), S("S3", 77.1, "[쿵]")]
     d = run(lines, sounds)
     phrases = [s["phrase"] for s in sounds]
@@ -410,8 +437,10 @@ def test_dialogue_text_is_never_changed_by_sounds():
         text = " ".join(" ".join(c["lines"]) for c in cells_of(d, ln["id"]))
         for p in phrases:
             text = text.replace(p, "")
-        text = text.replace("- ", "").replace("(양희) ", "")
-        assert text.split() == ln["text"].split()
+        text = text.replace("- ", "").replace("[양희] ", "")
+        assert bare(text) == bare(ln["text"])
+    assert one(d, "L2")["lines"] == ["[재채기] 나도야!"]                  # ! and ? are kept
+    assert one(d, "L3")["lines"] == ["- 응…", "- [쿵]"]                   # ... becomes … (I.4)
 
 
 # --------------------------------------------------------------------------- over the limits (memo 5.3 ⑤)
@@ -479,7 +508,7 @@ def test_one_sound_per_dialogue_cell():
 def test_two_sounds_close_together_share_a_cell():
     c = one(run(sounds=[S("S1", 140.0, "[쿵]"), S("S2", 140.2, "[쨍그랑]")]), "S1")
     assert c["refs"] == ["S1", "S2"] and c["lines"] == ["- [쿵]", "- [쨍그랑]"] and c["kind"] == "sfx"
-    c = one(run(sounds=[S("S1", 140.0, "[쿵]"), S("M1", 140.2, "♬ 음악", kind="music", t1=150.0)]), "S1")
+    c = one(run(sounds=[S("S1", 140.0, "[쿵]"), S("M1", 140.2, "[음악]", kind="music", t1=150.0)]), "S1")
     assert c["kind"] == "mixed"
 
 
@@ -518,6 +547,235 @@ def test_other_frame_rates_keep_two_frames_and_half_seconds():
         assert abs(a["start"] * fps - round(a["start"] * fps)) < 0.06
 
 
+# --------------------------------------------------------------------------- labels and notes (II.6-II.8, II.10)
+
+def test_speaker_label_is_name_then_extra_then_language():
+    def first(**kw):
+        return one(run([L("L1", kw.pop("text", "나도 갈래"), 10.0, 11.0, **kw)]), "L1")["lines"]
+
+    assert first(name="영희", show=True, language="중국어") == ["[영희/중국어] 나도 갈래"]       # II.6 example
+    extra = first(name="영희", show=True, label_extra=["속마음"], language="영어")
+    assert extra == ["[영희/속마음/영어] 나도 갈래"]                                         # II.8: the language last
+    assert first(name="철수", show=False, language="영어", text="아니다, 취소") == ["[영어] 아니다, 취소"]
+    assert first(name="영희", show=True, language="한국어") == ["[영희] 나도 갈래"]              # the original language: no label
+    assert first(name="영희", show=False, label_extra=["속삭임"]) == ["[속삭임] 나도 갈래"]
+    assert first(name=None, show=True) == ["나도 갈래"]
+
+
+def test_two_people_speaking_together():
+    def first(name):
+        return one(run([L("L1", "설마!", 10.0, 11.0, name=name, show=True)]), "L1")["lines"]
+
+    assert first("영희/철수") == ["[영희, 철수] 설마!"]              # II.10 (O); '[영희와 철수]' is the (X) form
+    assert first("영희/철수/민수") == ["[함께] 설마!"]               # a long joint label
+    assert first("영희") == ["[영희] 설마!"]
+
+
+def test_language_label_on_every_piece_and_counted_in_the_width():
+    text = "어제 박물관에서 무슨 일이 있었는지 아무도 몰라 그래서 내가 직접 가 보려는 거야"      # a made-up line
+    d = run([L("L1", text, 10.0, 16.0, name="피터", show=True, language="영어")])
+    cs = cells_of(d, "L1")
+    assert len(cs) >= 2
+    assert cs[0]["lines"][0].startswith("[피터/영어] ")
+    assert all(c["lines"][0].startswith("[영어] ") for c in cs[1:])       # II.6: "in each event"
+    assert all(max(c["check"]["chars"]) <= 16 and c["check"]["n_lines"] <= 2 for c in cs)
+    body = " ".join(" ".join(c["lines"]) for c in cs).replace("[피터/영어] ", "").replace("[영어] ", "")
+    assert body.split() == text.split()
+    plain = cells_of(run([L("L1", text, 10.0, 16.0, name="피터", show=True)]), "L1")
+    assert all(not c["lines"][0].startswith("[") for c in plain[1:])      # without a language: the name once
+
+
+def test_language_label_stays_when_a_sound_splits_the_line():
+    d = run([L("L1", ROW, 70.0, 74.0, name="피터", show=True, language="영어")], [S("S1", 72.3, "[첨벙]")])
+    a, b = cells_of(d, "L1")
+    assert a["lines"][0].startswith("[피터/영어] ")
+    assert b["lines"][0] == "- [첨벙]" and b["lines"][1].startswith("- [영어] ")
+
+
+def test_sung_line_has_notes_on_every_cell():
+    assert one(run([L("L1", "달빛 아래", 20.0, 21.0, sung=True)]), "L1")["lines"] == ["♪ 달빛 아래 ♪"]
+    text = "달빛 아래 걷던 그 길을 오늘도 혼자서 다시 걸어 보네 바람만 불어오네"
+    cs = cells_of(run([L("L1", text, 20.0, 27.0, name="영수", show=True, sung=True)]), "L1")
+    assert len(cs) >= 2
+    for k, c in enumerate(cs):
+        joined = " ".join(c["lines"])
+        assert joined.startswith("[영수] ♪ " if k == 0 else "♪ ")        # II.7: at the beginning ...
+        assert joined.endswith(" ♪") and joined.count("♪") == 2          # ... and end of each subtitle
+        assert max(c["check"]["chars"]) <= 16 and c["check"]["n_lines"] <= 2
+        assert not any(x in ("♪", "[영수] ♪") for x in c["lines"])        # a note is never left alone on a line
+    sung = " ".join(" ".join(c["lines"]) for c in cs).replace("[영수] ", "").replace("♪", "")
+    assert sung.split() == text.split()
+
+
+def test_duet_has_notes_on_each_line_of_the_hyphen_cell():
+    d = run([L("L1", "별이 뜨면", 30.0, 32.0, name="영희", show=True, sung=True),
+             L("L2", "나는 노래해", 30.4, 32.0, name="철수", show=True, sung=True)])
+    c = one(d, "L1")
+    assert c["lines"] == ["- [영희] ♪ 별이 뜨면 ♪", "- [철수] ♪ 나는 노래해 ♪"]      # II.7: both are singing
+
+
+# --------------------------------------------------------------------------- display punctuation (I.13, I.4)
+
+@pytest.mark.parametrize("text, lines", [
+    ("사랑해. 그게 내가 하고 싶은 말이었어.", ["사랑해, 그게 내가", "하고 싶은 말이었어"]),      # the guide's (O) form
+    ("사랑해,", ["사랑해"]),
+    ("이.. 일단 제가 여기...", ["이… 일단 제가 여기…"]),
+    ("오늘 날씨는 아주…", ["오늘 날씨는 아주…"]),
+    ("3.5 킬로미터 남았어.", ["3.5 킬로미터 남았어"]),
+    ("뭐?! 진짜야?", ["뭐?! 진짜야?"]),
+    ("가나다라마바사아자차카타파하가나.", ["가나다라마바사아자차카타파하가나"]),          # 16 units once the period is gone
+])
+def test_display_punctuation_is_tidied_after_wrapping(text, lines):
+    c = one(run([L("L1", text, 10.0, 13.0)]), "L1")
+    assert c["lines"] == lines
+    assert bare(" ".join(c["lines"])) == bare(text)                    # the words stay
+
+
+def test_text_that_is_only_punctuation_makes_no_empty_cell():
+    lines = [L("L1", ".", 10.0, 10.5), L("L2", "...", 12.0, 12.5), L("L3", "응 .", 14.0, 14.5),
+             L("L4", ", ,", 16.0, 16.5)]
+    d = run(lines, [S("S1", 20.0, "."), S("S2", 22.0, "[쿵]."), S("S3", 14.1, "[쾅]")])
+    assert {c["refs"][0]: c["lines"] for c in d["cells"]} == {"L2": ["…"], "L3": ["- 응", "- [쾅]"], "S2": ["[쿵]"]}
+    assert {r["item"]: r["reason"] for r in d["no_room"]} == {"S1": "문구 없음"}
+
+
+def test_sentence_ends_still_decide_where_a_line_is_cut():
+    # the period is used to choose the cut and only then taken away
+    text = "오늘은 정말 이상한 날이었어. 아침부터 계속 이상한 소리가 들렸거든. 그래서 나는 도서관에 가 보기로 했어."
+    cs = cells_of(run([L("L1", text, 10.0, 18.0)]), "L1")
+    assert [" ".join(c["lines"]).split()[-1] for c in cs] == ["날이었어", "들렸거든", "했어"]
+
+
+# --------------------------------------------------------------------------- lines that overlap (audit 2-04, 7-09)
+
+LONG = "어째서 나를 여기까지 데리고 온 건지 알고 싶은 거야"      # made up; 25 units: two lines, no hyphen cell
+
+
+def test_guessed_line_gives_way_to_the_aligned_line_it_lands_in():
+    # audit 7-09: a short line with a guessed time (timing voice) was put inside a long aligned line,
+    # which then showed for one frame. Neither side has room, so it follows the reading time of the
+    # long line.
+    lines = [L("L1", "그래서 말인데", 6.0, 8.0, speaker="A", timing="asr"),
+             L("L2", "네?", 8.03, 8.34, speaker="B", timing="voice"),
+             L("L3", LONG, 8.0, 11.46, speaker="A", timing="asr"),
+             L("L4", "아니 그게", 11.6, 12.4, speaker="B", timing="asr")]
+    d = run(lines)
+    long_, guess = one(d, "L3"), one(d, "L2")
+    assert long_["start"] == sec(F(8.0)) and long_["check"]["violations"] == []
+    assert nframes(long_["start"], long_["end"]) >= math.ceil(sum(long_["check"]["chars"]) / 14 * FPS - 1e-6)
+    assert guess["start"] > long_["end"] and nframes(guess["start"], guess["end"]) >= MIN_F
+    assert guess["flags"] == ["timing_estimated"] and long_["flags"] == []
+    assert all(nframes(c["start"], c["end"]) >= MIN_F and not c["check"]["violations"] for c in d["cells"])
+    assert d["summary"]["timing_estimated"] == 1 and d["summary"]["overlap"] == 0
+
+
+def test_guessed_line_moves_to_its_side_of_the_script_when_there_is_room():
+    long_ = dict(speaker="A", timing="asr")
+    d = run([L("L1", "네?", 10.3, 10.6, speaker="B", timing="voice"), L("L2", LONG, 10.0, 13.5, **long_)])
+    g, a = one(d, "L1"), one(d, "L2")
+    assert g["end"] < a["start"] == sec(F(10.0)) and nframes(g["end"], a["start"]) == 2     # in front, as in the script
+    assert nframes(g["start"], g["end"]) == MIN_F and a["end"] >= sec(F(13.5))
+    d = run([L("L1", LONG, 10.0, 13.5, **long_), L("L2", "네?", 10.3, 10.6, speaker="B", timing="even")])
+    a, g = one(d, "L1"), one(d, "L2")
+    assert g["start"] >= sec(F(13.5) + 2) and a["end"] >= sec(F(13.5))                       # behind the whole speech
+    assert g["flags"] == ["timing_estimated"] and d["summary"]["violations"] == 0
+
+
+def test_overlap_that_cannot_be_solved_is_marked_and_never_one_frame():
+    other = "그건 내가 어제 분명히 말했던 것 같은데 기억 안 나"     # too long for a hyphen line as well
+    d = run([L("L1", LONG, 10.0, 13.5, speaker="A", timing="asr"),
+             L("L2", other, 10.04, 13.0, speaker="B", timing="asr")])
+    a, b = one(d, "L1"), one(d, "L2")
+    assert nframes(a["start"], a["end"]) == MIN_F                      # the later line waits: 5/6 s, not 1 frame
+    assert nframes(a["end"], b["start"]) == 2 and nframes(b["start"], b["end"]) >= MIN_F
+    assert a["flags"] == ["overlap"] and b["flags"] == ["overlap"]
+    assert d["summary"]["overlap"] == 2 and d["summary"]["flash"] == 0
+    assert "초당 14자 초과" in a["check"]["violations"]                 # still reported: the writer decides
+
+
+def test_a_pile_of_overlapping_lines_is_shown_one_after_the_other():
+    # three long lines of one speaker that start within three frames: no hyphen cell, no guess
+    k = F(10.0)
+    d = run([L(f"L{n}", LONG, (k + n) / FPS, 13.0, speaker="A", timing="asr") for n in range(3)])
+    assert [c["refs"] for c in d["cells"]] == [["L0"], ["L1"], ["L2"]]
+    assert all(nframes(c["start"], c["end"]) >= MIN_F for c in d["cells"])       # nobody is cut to a frame
+    assert all(c["flags"] == ["overlap"] for c in d["cells"]) and d["summary"]["flash"] == 0
+    assert d["cells"][2]["start"] < 13.0                               # the last one still starts while it is spoken
+
+
+def test_a_cell_of_a_few_frames_never_goes_out_unmarked():
+    # a one-syllable line and the next line of the same speaker three frames later: nothing to
+    # join, nothing to move. The cell is as short as it always was, but it now carries a flag.
+    k = F(10.0)
+    d = run([L("L1", "아", k / FPS, (k + 1) / FPS, speaker="A"),
+             L("L2", "그게 아니라니까", (k + 3) / FPS, 12.0, speaker="A")])
+    tiny = one(d, "L1")
+    assert nframes(tiny["start"], tiny["end"]) < 6 and tiny["flags"] == ["flash"]
+    assert "5/6초 미만" in tiny["check"]["violations"] and d["summary"]["flash"] == 1
+    assert one(d, "L2")["flags"] == []
+
+
+# --------------------------------------------------------------------------- shot changes again (audit 2-m3, 2-12)
+
+def test_in_time_uses_the_cut_ahead_when_the_cut_before_is_taken():
+    k = F(20.0)
+    line = L("L2", "안녕하세요 여러분", (k - 7) / FPS, (k + 30) / FPS)
+    cuts = [(k - 15) / FPS, k / FPS]                                   # two cuts within half a second
+    assert one(run([line], cuts=cuts), "L2")["start"] == sec(k - 15)   # alone: back to the cut before (TG2)
+    prev = L("L1", "가나다라", (k - 60) / FPS, (k - 10) / FPS)          # its speech takes the cut before
+    d = run([prev, line], cuts=cuts)
+    assert one(d, "L2")["start"] == sec(k)                             # so: on the cut ahead (TG4), not 7 frames early
+    assert one(d, "L1")["end"] >= sec(k - 10)
+
+
+def test_start_before_a_cut_follows_the_same_rule_at_every_frame_rate():
+    for fps in (24.0, 30.0, 60.0):                                     # 0.417 s before the cut = 10 frames at 24 fps
+        d = place([L("L1", "안녕하세요 여러분", 20.0 - 0.417, 21.0)], [], [20.0], fps)
+        assert d["cells"][0]["start"] == pytest.approx(19.5, abs=1e-3), fps   # TG4: half a second before the cut
+
+
+# --------------------------------------------------------------------------- flags, position, lines without a time
+
+def test_cells_of_guessed_lines_are_flagged_and_counted():
+    d = run([L("L1", "하나", 10.0, 10.5, timing="asr"), L("L2", "둘", 12.0, 12.5, timing="voice"),
+             L("L3", "셋", 14.0, 14.5, timing="even"), L("L4", "넷", 16.0, 16.5, timing="script"),
+             L("L5", "다섯", 18.0, 18.5, status="unheard"), L("L6", "여섯", 20.0, 20.5)])
+    guess = ["timing_estimated"]
+    assert {c["refs"][0]: c["flags"] for c in d["cells"]} == {
+        "L1": [], "L2": guess, "L3": guess, "L4": [], "L5": guess, "L6": []}
+    assert d["summary"]["timing_estimated"] == 3
+
+
+def test_cells_carry_their_position():
+    d = run([L("L1", "아래", 10.0, 10.5), L("L2", "위", 12.0, 12.5, pos="top")],
+            [dict(S("S1", 14.0, "[쿵]"), pos="top"), S("S2", 16.0, "[쾅]")])
+    assert {c["refs"][0]: c["pos"] for c in d["cells"]} == {"L1": "bottom", "L2": "top", "S1": "top", "S2": "bottom"}
+
+
+def test_lines_without_a_time_are_skipped():
+    gone = {"id": "L2", "text": "영상에 없는 장면의 대사", "start": None, "end": None, "words": [],
+            "status": "absent", "guess": [11.0, 12.0], "show_name": True, "name": "영희"}
+    words = [{"w": "처리", "s": 30.0, "e": 30.3}, {"w": "구간", "s": 30.3, "e": 30.6}, {"w": "밖", "s": 30.6, "e": 31.0}]
+    outside = {"id": "L3", "text": "처리 구간 밖", "start": None, "end": None, "status": "out_of_range", "words": words}
+    d = run([L("L1", "안녕", 10.0, 10.5), gone, outside])
+    assert [c["refs"] for c in d["cells"]] == [["L1"]]
+
+
+def test_children_profile_reads_eleven_units_a_second():
+    from cboe import style
+    text = "가나다라마 바사아자차 카타파하가 나다"                       # 18 units on two lines
+    child = style.get("children").settings()
+    d = place([L("L1", text, 20.0, 21.0)], [], [], FPS, settings=child)
+    c = d["cells"][0]
+    adult = run([L("L1", text, 20.0, 21.0)])
+    assert d["profile"] == "children" and adult["profile"] == "adult"
+    assert sum(c["check"]["chars"]) == 18.0
+    assert nframes(c["start"], c["end"]) == math.ceil(18 / 11 * FPS - 1e-6) == 40  # 1.67 s to read at 11 units/s
+    assert adult["cells"][0]["end"] == sec(F(21.0) + 12) < c["end"]                # adults: speech + 0.5 s is enough
+    tight = place([L("L1", text, 20.0, 21.0), L("L2", "응", 21.6, 22.0)], [], [], FPS, settings=child)
+    assert "초당 11자 초과" in tight["cells"][0]["check"]["violations"]
+
+
 # --------------------------------------------------------------------------- the sample work folder
 
 def test_sample_work_folder_recompute(tmp_path):
@@ -539,5 +797,6 @@ def test_sample_work_folder_recompute(tmp_path):
     assert nframes(book["end"], thunder["start"]) == 2
     assert thunder["refs"] == ["L0007", "S0004"] and thunder["lines"] == ["- 으아아아아", "- [천둥 소리]"]
     assert bang["refs"] == ["S0005", "L0008"] and bang["lines"] == ["- [쿵]", "- 으아아아아"]
-    named = [c for c in d["cells"] if c["lines"][0].startswith("(BJ 옴뫄)")]
+    named = [c for c in d["cells"] if c["lines"][0].startswith("[BJ 옴뫄]")]
     assert [c["refs"] for c in named] == [[f"L000{k}"] for k in range(1, 7)]
+    assert not any("♬" in x or x.startswith("(") for c in d["cells"] for x in c["lines"])   # today's notation

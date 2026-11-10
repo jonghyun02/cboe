@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
 """CBoE command line.
 
-    python -m cboe init <work> --video V [--script S] [--start 0] [--end 290] [--title T]
+    python -m cboe init <work> --video V [--script S] [--start 0] [--end 290] [--title T] [--children]
     python -m cboe run <work> [--stages a,b] [--force a,b|all] [--no-llm] [--agent-limit N]
     python -m cboe serve <work> [--port 8765]
-    python -m cboe export <work> [--format srt|vtt]
+    python -m cboe export <work> [--format srt|vtt|ttml]
+    python -m cboe check <file.srt|.vtt|.ttml|draft.json> [--fps F] [--cuts cuts.json] [--children]
     python -m cboe doctor
+
+``init --children`` marks the work folder as a children's programme (project.json "profile":
+"children", 11 characters a second instead of 14). ``check`` runs the independent guide check
+(cboe.check) on a finished file: clause by clause, obligations and recommendations apart; the exit
+code is 1 when an obligation is broken.
 """
 from __future__ import annotations
 
@@ -27,6 +33,8 @@ def main(argv=None):
     a.add_argument("--start", type=float, default=0.0)
     a.add_argument("--end", type=float)
     a.add_argument("--title")
+    a.add_argument("--children", action="store_true", help="어린이 프로그램 (읽기 속도 초당 11자)")
+    a.add_argument("--profile", choices=["adult", "children"], help="프로그램 종류 (적지 않으면 그대로, 처음엔 adult)")
     r = sub.add_parser("run")
     r.add_argument("work")
     r.add_argument("--stages", default="")
@@ -41,7 +49,14 @@ def main(argv=None):
     s.add_argument("--no-browser", action="store_true")
     e = sub.add_parser("export")
     e.add_argument("work")
-    e.add_argument("--format", default="srt", choices=["srt", "vtt"])
+    e.add_argument("--format", default="srt", choices=["srt", "vtt", "ttml"])
+    c = sub.add_parser("check", help="자막 파일을 넷플릭스 한국어 SDH 지침에 대어 본다")
+    c.add_argument("file", help="srt · vtt · ttml 자막 파일이나 draft.json")
+    c.add_argument("--fps", type=float, help="영상의 초당 프레임 수 (draft.json·ttml 은 파일 안의 값을 쓴다)")
+    c.add_argument("--cuts", help="장면 전환 시각 파일 (cuts.json): 주면 전환 규칙도 본다")
+    c.add_argument("--children", action="store_true", help="어린이 프로그램 (읽기 속도 초당 11자)")
+    c.add_argument("--json", action="store_true", help="결과를 JSON 으로")
+    c.add_argument("--all", action="store_true", help="조항마다 걸린 칸을 모두 적는다")
     sub.add_parser("doctor")
     g = sub.add_parser("gui", help="데스크톱 창 (작업 목록 · 분석 · 검수)")
     g.add_argument("--workspace")
@@ -57,8 +72,16 @@ def main(argv=None):
                         (["--no-open"] if args.no_open else []))
 
     if args.cmd == "init":
+        from pathlib import Path
+
+        from . import style
         from .stages.ingest import init
+        from .util import write_json
         meta = init(args.work, args.video, args.script, args.start, args.end, args.title)
+        # the profile is this command's own entry in project.json: init() keeps what was there
+        profile = "children" if args.children else args.profile
+        meta["profile"] = style.profile_name(profile if profile else meta.get("profile"))
+        write_json(Path(args.work) / "project.json", meta)
         print(json.dumps(meta, ensure_ascii=False, indent=1))
     elif args.cmd == "run":
         from . import pipeline
@@ -73,7 +96,15 @@ def main(argv=None):
         serve_main([args.work, "--port", str(args.port)] + (["--no-browser"] if args.no_browser else []))
     elif args.cmd == "export":
         from .state import Project
-        print(Project(args.work).export(args.format))
+        res = Project(args.work).export(args.format, report=True)
+        print(res["path"])
+        sm = res["check"]["summary"]
+        print(f"지침 검사: 의무 {sm['must']}건 ({sm['cells_must']}칸) · 권고 {sm['should']}건 ({sm['cells_should']}칸)"
+              f" · 자세히: python -m cboe check \"{res['path']}\" --fps {res['check']['fps']:g}", file=sys.stderr)
+    elif args.cmd == "check":
+        from . import check
+        return check.main(args.file, fps=args.fps, cuts=args.cuts, profile="children" if args.children else None,
+                          as_json=args.json, show_all=args.all)
     elif args.cmd == "doctor":
         from . import paths
         from .util import device, device_name

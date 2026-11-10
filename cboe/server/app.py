@@ -7,6 +7,11 @@ then re-runs placement (끼워 넣기) and answers with the whole screen state, 
 list, timeline and video overlay are always drawn from one fresh draft —
 "고칠 때마다 배치를 다시 계산".
 
+The state also carries ``style`` (the limits and the notation of ``cboe.style`` for this work
+folder's profile: the page keeps no copy of them) and, in ``export_check.guide`` and
+``summary.guide``, the result of the independent guide check (``cboe.check``) on the draft.
+Sound phrases stored in an older notation ('♬ …') are shown in today's ('[…]').
+
 Video and frames are limited to the project window [t0, t1): the page never seeks
 outside it and ``/api/frame`` clamps into it, so sealed parts of a test video are
 not shown (same rule as ``media.Media``).
@@ -30,13 +35,16 @@ from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from .. import export as export_mod
+from .. import style
 from ..state import Project
+from ..textutil import units
 from ..util import log, read_json
 
 STATIC = Path(__file__).resolve().with_name("static")
 FINALS = ("include", "exclude", "check")
 KINDS = ("sfx", "music", "speaker")
-MIN_DUR = 5 / 6                       # shortest cell (DESIGN §6)
+ExportFormat = Literal["srt", "vtt", "ttml"]      # export_mod.FORMATS
 INPUT_FILES = ("project.json", "items.json", "dialogue.json", "review.json", "cuts.json", "script.json")
 
 
@@ -60,7 +68,7 @@ class PlacementFix(BaseModel):
 
 
 class ExportRequest(BaseModel):
-    format: Literal["srt", "vtt"] = "srt"
+    format: ExportFormat = "srt"
 
 
 # ---------------------------------------------------------------- utilities
@@ -125,23 +133,20 @@ class SafeJSONResponse(JSONResponse):
         return text.encode("utf-8")
 
 
-def text_width(text: str) -> float:
-    """Reading width (II.2 셈법): Hangul 1, everything else 0.5."""
-    return sum(1.0 if "가" <= ch <= "힣" else 0.5 for ch in text or "")
-
-
 class PlacementError(ValueError):
     """A placement fix that cannot be applied (answered as 409 with a Korean message)."""
 
 
-def swap_prev_time(draft: dict, item: dict, fps: float, t_min: float = 0.0) -> float:
+def swap_prev_time(draft: dict, item: dict, fps: float, t_min: float = 0.0, st: style.Style | None = None) -> float:
     """Start time for '앞 칸과 바꾸기': the sound goes into the gap right before the
     cell that precedes it, as late as possible so it stays close to the real sound.
 
     Raises PlacementError when there is no previous cell or the gap is shorter
-    than the shortest cell (5/6 s) plus the 2-frame margins.
+    than the shortest cell (5/6 s) plus the 2-frame margins. The numbers are those of
+    ``st`` (cboe.style; the adult profile when not given).
     """
-    fr2 = 2.0 / (fps or 25.0)
+    st = st or style.get((draft or {}).get("profile"))
+    fr2 = st.gap_frames / (fps or 25.0)
     iid = item["id"]
     nr = next((e for e in draft.get("no_room") or [] if e.get("item") == iid), None)
     t = nr.get("t") if nr else None
@@ -154,8 +159,8 @@ def swap_prev_time(draft: dict, item: dict, fps: float, t_min: float = 0.0) -> f
     gap_end = float(pc["start"])
     gap_start = max([float(c["end"]) for c in cells if c is not pc and float(c["start"]) < gap_end] + [t_min])
     text = (nr or {}).get("text") or item.get("short") or item.get("phrase") or ""
-    want = min(7.0, max(MIN_DUR, text_width(text) / 14 + 1.0))
-    if gap_end - gap_start - 2 * fr2 < MIN_DUR - 1e-6:
+    want = min(st.max_dur, max(st.min_dur, units(text) / st.cps + st.label_extra))   # as placement shows a sound
+    if gap_end - gap_start - 2 * fr2 < st.min_dur - 1e-6:
         raise PlacementError(f"앞 칸 앞의 빈틈이 {max(0.0, gap_end - gap_start):.2f}초뿐이라 옮길 자리가 없습니다")
     early, late = gap_start + fr2, gap_end - fr2 - want
     # millisecond grid without crossing either 2-frame margin
@@ -176,7 +181,40 @@ def export_warnings(chk: dict) -> list[str]:
         out.append(f"문구가 [소리] 그대로인 효과음 {len(chk['unnamed'])}개")
     if chk.get("violations"):
         out.append(f"가독성 한도를 넘는 칸 {len(chk['violations'])}개")
+    flags = chk.get("flags") or {}
+    if flags.get("flash"):
+        out.append(f"몇 프레임만 보이는 칸 {len(flags['flash'])}개 (읽을 수 없음)")
+    if flags.get("overlap"):
+        out.append(f"겹친 대사에 눌린 칸 {len(flags['overlap'])}개")
+    if flags.get("timing_estimated"):
+        out.append(f"대사 시각을 추정한 칸 {len(flags['timing_estimated'])}개 (받아쓰기로 못 맞춘 줄)")
+    sm = (chk.get("guide") or {}).get("summary") or {}
+    if sm.get("must"):
+        out.append(f"지침 검사: 의무 조항에 걸린 칸 {sm['cells_must']}개 ({sm['must']}건)")
+    if sm.get("should"):
+        out.append(f"지침 검사: 권고 조항에 걸린 칸 {sm['cells_should']}개 ({sm['should']}건)")
     return out
+
+
+def show_item(it: dict, lines: dict) -> dict:
+    """An item as the page shows it: a sound phrase stored by an older version ('♬ 무서운 음악')
+    in today's notation, and for a speaker item the label placement writes in front of the line
+    (``speaker.label`` '[영희/영어]', ``speaker.label_tail`` '/영어')."""
+    if it.get("kind") == "speaker":
+        sp = it.get("speaker") or {}
+        ln = dict(lines.get(sp.get("line_id")) or {}, name=sp.get("name"))
+        head, _cont = style.line_labels(ln, show_name=True)
+        bare, _ = style.line_labels(dict(ln, name=None), show_name=True)
+        sp["label"] = head.strip()
+        sp["label_tail"] = (style.LABEL_SEP + bare.strip()[1:-1]) if bare.strip() else ""
+        return it
+    for key in ("phrase", "short"):
+        if it.get(key):
+            it[key] = style.modernize_phrase(it[key])
+    if it.get("phrases"):
+        it["phrases"] = [dict(p, **{k: style.modernize_phrase(p[k]) for k in ("text", "short") if p.get(k)})
+                         for p in it["phrases"] if isinstance(p, dict)]
+    return it
 
 
 class FrameGrabber:
@@ -280,6 +318,9 @@ class ReviewService:
             self.error = f"배치 계산 오류 · {type(exc).__name__}: {exc}"
             if self._draft is None:
                 self._draft = read_json(self.project.path("draft.json")) or {}
+                if self._draft.get("notation") != style.NOTATION:      # a draft of an older version:
+                    for c in self._draft.get("cells") or []:           # show '(이름)' and '♬ …' as '[…]'
+                        c["lines"] = [style.modernize_line(x) for x in c.get("lines") or []]
         self._draft.setdefault("cells", [])
         self._draft.setdefault("no_room", [])
         self._sig = self._signature()
@@ -339,8 +380,13 @@ class ReviewService:
             p = self.project
             meta = p.meta
             t0, t1, fps = self.window()
-            eff = p.effective_items()
+            try:
+                st, st_error = style.for_project(meta), None
+            except ValueError as exc:                     # project.json "profile" is not adult / children
+                st, st_error = style.get(), f"project.json · {exc}"
             lines = p.dialogue()
+            by_id = {ln.get("id"): ln for ln in lines}
+            eff = [show_item(it, by_id) for it in p.effective_items()]
             cells = draft.get("cells", [])
             no_room = {e.get("item"): e for e in draft.get("no_room", [])}
 
@@ -357,15 +403,23 @@ class ReviewService:
                 it["no_room"] = no_room.get(it["id"])
                 if it["no_room"] is not None and it["kind"] in ("sfx", "music"):
                     try:                                  # can '앞 칸과 바꾸기' work? the page says why not
-                        it["swap_prev"] = {"t": swap_prev_time(draft, it, fps, t0)}
+                        it["swap_prev"] = {"t": swap_prev_time(draft, it, fps, t0, st)}
                     except PlacementError as exc:
                         it["swap_prev"] = {"error": str(exc)}
 
+            chk, chk_error = self.export_check()
+            guide = ((chk or {}).get("guide") or {}).get("summary") or {}
             summary = {"total": len(eff), "decided": sum(1 for it in eff if it["decided"]),
                        "final": {f: 0 for f in FINALS}, "rec": {f: 0 for f in FINALS},
                        "kind": {k: 0 for k in KINDS}, "by_kind": {k: {f: 0 for f in FINALS} for k in KINDS},
                        "no_room": len(no_room), "cells": len(cells),
-                       "violations": sum(1 for c in cells if (c.get("check") or {}).get("violations"))}
+                       # cells over a limit by placement's own count, then the independent guide check:
+                       # cells that break an obligation (must) or a recommendation (should), and its items
+                       "violations": sum(1 for c in cells if (c.get("check") or {}).get("violations")),
+                       "guide": {"must": guide.get("cells_must", 0), "should": guide.get("cells_should", 0),
+                                 "must_items": guide.get("must", 0), "should_items": guide.get("should", 0)},
+                       "flags": {name: sum(1 for c in cells if name in (c.get("flags") or []))
+                                 for name in ("timing_estimated", "overlap", "flash")}}
             for it in eff:
                 k, f = it.get("kind"), it.get("final", "check")
                 r = it.get("rec") if it.get("rec") in FINALS else "check"
@@ -379,12 +433,13 @@ class ReviewService:
                        "duration": meta.get("duration"), "width": meta.get("width"), "height": meta.get("height"),
                        "video": bool(video and Path(video).is_file()), "video_url": "media/video",
                        "video_name": Path(video).name if video else None, "sample": bool(meta.get("sample")),
-                       "work": str(p.work)}
-            chk, chk_error = self.export_check()
+                       "work": str(p.work), "profile": st.profile}
             return {"version": self.version, "project": project,
                     "dialogue": [{k: v for k, v in ln.items() if k != "words"} for ln in lines],
                     "items": eff, "draft": draft, "cuts": p.cuts(), "characters": p.characters(),
-                    "summary": summary, "export_check": chk, "error": self.error or chk_error}
+                    # the limits and the notation the page shows and composes with (cboe.style)
+                    "style": dict(st.public(), formats=list(export_mod.FORMATS)),
+                    "summary": summary, "export_check": chk, "error": self.error or st_error or chk_error}
 
 
 # ---------------------------------------------------------------------- app
@@ -492,28 +547,29 @@ def create_app(work) -> FastAPI:
     def export(body: ExportRequest):
         with svc.lock:
             try:
-                path = Path(svc.project.export(body.format))
+                res = svc.project.export(body.format, report=True)
             except Exception as exc:
                 log.exception("export failed")
                 raise HTTPException(500, f"내보내기 실패 · {type(exc).__name__}: {exc}") from None
+            path = Path(res["path"])
             svc.exports[body.format] = path
             svc.reload_draft()
             st = svc.state()
             chk = st["export_check"]
+            # "check" = the guide check of the file just written (clause by clause, must / should)
             return {"path": str(path), "name": path.name, "format": body.format,
-                    "url": f"api/export/{body.format}", "cells": len(st["draft"].get("cells", [])),
+                    "url": f"api/export/{body.format}", "cells": res["cells"], "check": res["check"],
                     "warnings": export_warnings(chk), "export_check": chk, "state": st}
 
     @app.get("/api/export/{fmt}")
-    def download(fmt: Literal["srt", "vtt"]):
+    def download(fmt: ExportFormat):
         with svc.lock:
             path = svc.exports.get(fmt)
             if path is None or not path.is_file():
                 path = Path(svc.project.export(fmt))
                 svc.exports[fmt] = path
                 svc.reload_draft()
-        media = "application/x-subrip" if fmt == "srt" else "text/vtt; charset=utf-8"
-        return FileResponse(path, media_type=media, filename=path.name)
+        return FileResponse(path, media_type=export_mod.MEDIA_TYPES[fmt], filename=path.name)
 
     # ---------------------------------------------------------------- media
     @app.get("/media/video", include_in_schema=False)

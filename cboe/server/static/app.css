@@ -98,6 +98,9 @@ kbd {
 .st-noroom { background: var(--nor-bg); color: var(--nor-fg); }
 .st-inc-done { background: var(--inc-bg); color: var(--inc-fg); box-shadow: inset 0 0 0 1.5px var(--inc-line); }
 .st-exc-done { background: #fff; color: var(--exc-fg); box-shadow: inset 0 0 0 1.5px var(--exc-line); }
+/* 지침 위반 칸 수 (머리 줄): 의무 조항에 걸린 칸이 있으면 붉게, 없으면 흐리게 */
+.st-viol { background: var(--nor-bg); color: var(--nor-fg); box-shadow: inset 0 0 0 1.5px var(--nor-line); }
+.st-clean { background: transparent; color: var(--muted); box-shadow: inset 0 0 0 1px var(--line); font-weight: 600; }
 
 .badge {
   display: inline-flex; align-items: center; justify-content: center; height: 24px; padding: 0 8px;
@@ -174,6 +177,7 @@ kbd {
   font-weight: 650; line-height: 1.34; letter-spacing: -0.01em;
   text-shadow: 0 0 2px #000, 0 0 3px #000, 0 1px 4px rgba(0, 0, 0, .95), 0 0 10px rgba(0, 0, 0, .55);
 }
+.subs-top { bottom: auto; top: 6%; }      /* cells with pos "top" (the top region of the TTML export) */
 .sub-line { white-space: pre-wrap; }
 .sub-name { pointer-events: auto; cursor: pointer; border-radius: .25em; transition: box-shadow .15s; }
 .sub-name:hover { box-shadow: 0 0 0 2px #F5C542; }
@@ -533,6 +537,19 @@ kbd {
 .saved .warns { margin: 6px 0 0; padding-left: 18px; color: var(--muted); font-size: 12.5px; }
 .saved .ac { display: flex; gap: 6px; }
 .xp-note { color: var(--muted); font-size: 12.5px; }
+/* 지침 검사 (조항별): 의무 · 권고, 조항 번호, 걸린 칸 */
+.guide { display: flex; flex-direction: column; gap: 2px; padding: 8px 10px; border-radius: 12px; background: #FAFBFF; border: 1px solid var(--line); }
+.g-rule { display: grid; grid-template-columns: 40px 46px minmax(0, 1fr) auto; gap: 4px 10px; align-items: center; padding: 6px 4px; font-size: 13px; border-top: 1px solid var(--line-2); }
+.g-rule:first-child { border-top: 0; }
+.g-lv { display: inline-flex; justify-content: center; height: 20px; align-items: center; border-radius: 999px; font-size: 11.5px; font-weight: 800; }
+.g-lv.must { background: var(--nor-bg); color: var(--nor-fg); }
+.g-lv.should { background: var(--chk-bg); color: var(--chk-fg); }
+.g-cl { color: var(--muted); font-weight: 700; }
+.g-tt { font-weight: 650; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.g-n { color: var(--muted); }
+.g-cells { grid-column: 3 / -1; display: flex; flex-wrap: wrap; gap: 4px; align-items: center; font-size: 12px; }
+.g-cell { border: 1px solid var(--line); background: #fff; border-radius: 7px; padding: 1px 7px; font-size: 12px; cursor: pointer; font-variant-numeric: tabular-nums; }
+.g-cell:hover { border-color: var(--primary); color: var(--primary-700); }
 
 /* toasts */
 .toasts {

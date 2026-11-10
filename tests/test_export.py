@@ -17,25 +17,52 @@ def cell(cid, start, end, lines):
 
 
 def test_srt_and_vtt_text():
-    cells = [cell("C0002", 12.0, 13.5, ["둘째 <줄>"]), cell("C0001", 10.01, 11.512, ["- (빌) 뭐?", "- [쿵]"])]
+    cells = [cell("C0002", 12.0, 13.5, ["둘째 <줄>"]), cell("C0001", 10.01, 11.512, ["- [빌] 뭐?", "- [쿵]"])]
     srt = export.to_srt(cells)
-    assert srt == ("1\n00:00:10,010 --> 00:00:11,512\n- (빌) 뭐?\n- [쿵]\n\n"
+    assert srt == ("1\n00:00:10,010 --> 00:00:11,512\n- [빌] 뭐?\n- [쿵]\n\n"
                    "2\n00:00:12,000 --> 00:00:13,500\n둘째 <줄>\n")
     vtt = export.to_vtt(cells)
-    assert vtt.startswith("WEBVTT\n\n00:00:10.010 --> 00:00:11.512\n- (빌) 뭐?\n- [쿵]\n")
+    assert vtt.startswith("WEBVTT\n\n00:00:10.010 --> 00:00:11.512\n- [빌] 뭐?\n- [쿵]\n")
     assert "둘째 &lt;줄&gt;" in vtt                    # cue text is escaped in VTT
     assert export._ts(3723.4567, ",") == "01:02:03,457"
+    top = export.to_vtt([dict(cells[0], pos="top")])
+    assert "00:00:12.000 --> 00:00:13.500 line:10%\n" in top and "line:" not in vtt   # a cell at the top
 
 
 def test_write_utf8_and_formats(tmp_path):
-    cells = [cell("C0001", 1.0, 2.0, ["(BJ 옴뫄) 으아아아아"])]
-    p = export.write(cells, tmp_path / "out" / "a.srt", "srt")
+    cells = [cell("C0001", 1.0, 2.0, ["[BJ 옴뫄] 으아아아아"])]
+    res = export.write(cells, tmp_path / "out" / "a.srt", "srt", fps=FPS)
+    p = res["path"]
     assert p.read_bytes().decode("utf-8") == export.to_srt(cells)
     assert b"\r\n" not in p.read_bytes()
-    p = export.write(cells, tmp_path / "a.vtt", "VTT")
+    assert (res["format"], res["cells"]) == ("srt", 1)
+    p = export.write(cells, tmp_path / "a.vtt", "VTT")["path"]
     assert p.read_text(encoding="utf-8").startswith("WEBVTT")
     with pytest.raises(ValueError):
         export.write(cells, tmp_path / "a.txt", "txt")
+    assert set(export.FORMATS) == {"srt", "vtt", "ttml"} == set(export.MEDIA_TYPES)
+
+
+def test_write_returns_the_guide_check_with_the_drafts_frame_rate(tmp_path):
+    # audit 2-07, 6-04: the check used to run without fps (30 assumed) and its result was thrown away.
+    # At 60 fps two frames are 33 ms: fine at 60, "간격 2프레임 미만" when 24 or 30 is assumed.
+    two = [cell("C0001", 1.0, 2.0, ["하나"]), cell("C0002", round(2.0 + 2 / 60, 3), 3.5, ["둘"])]
+    res = export.write(two, tmp_path / "a.srt", "srt", fps=60.0)
+    chk = res["check"]
+    assert chk["ok"] and chk["fps"] == 60.0 and not chk["fps_assumed"] and chk["violations"] == []
+    assumed = export.write(two, tmp_path / "b.srt", "srt")["check"]
+    assert assumed["fps_assumed"] and assumed["fps"] == 24.0
+    assert [v["code"] for v in assumed["violations"]] == ["frame_gap"]
+    # what the old check never looked at: notation and punctuation, clause by clause
+    bad = [cell("C0001", 1.0, 2.5, ["(빌) 사랑해."]), cell("C0002", 3.0, 5.0, ["♬ 슬픈 음악"])]
+    chk = export.write(bad, tmp_path / "c.srt", "srt", fps=FPS)["check"]
+    assert not chk["ok"]
+    assert {(v["cell"], v["clause"], v["code"]) for v in chk["violations"]} == {
+        ("C0001", "II.8", "label_parens"), ("C0001", "I.13", "line_end_punct"), ("C0002", "II.7", "note_glyph")}
+    assert (tmp_path / "c.srt").is_file()             # reported, not refused: the writer decides
+    kids = export.write([cell("C0001", 1.0, 2.0, ["가나다라마바사아자차카타파"])], tmp_path / "d.srt", fps=FPS,
+                        profile="children")["check"]
+    assert kids["profile"] == "children" and [v["message"] for v in kids["violations"]] == ["초당 11자 초과"]
 
 
 def test_write_refuses_cells_that_cannot_be_written(tmp_path):
@@ -93,5 +120,8 @@ def test_project_export_on_the_sample(tmp_path):
     out = proj.export("srt")
     text = out.read_text(encoding="utf-8")
     assert "- 으아아아아\n- [천둥 소리]" in text and "[쿵, 책 떨어지는 소리]" in text
+    assert "[BJ 옴뫄] " in text and "(BJ 옴뫄)" not in text and "♬" not in text      # today's notation
     assert export.final_check(proj.draft())["ok"]
     assert proj.export("vtt").read_text(encoding="utf-8").startswith("WEBVTT")
+    res = proj.export("ttml", report=True)
+    assert res["path"].suffix == ".ttml" and res["check"]["fps"] == proj.draft()["fps"]

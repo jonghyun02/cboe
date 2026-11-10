@@ -12,6 +12,24 @@
   const cssEsc = (s) => (window.CSS && CSS.escape ? CSS.escape(s) : String(s).replace(/["\\]/g, '\\$&'));
   const cut = (s, n = 34) => { s = String(s ?? ''); return s.length > n ? `${s.slice(0, n - 1)}…` : s; };
   const unbracket = (s) => String(s ?? '').trim().replace(/^\[\s*/, '').replace(/\s*\]$/, '');
+  /** Limits and notation of the guide (16 units, [ ], ♪ ...). They are written in one place only,
+      cboe/style.py: the server sends them with every state and the page keeps no copy. */
+  const STYLE = () => (S.st && S.st.style) || { formats: [] };
+  /** "[글]" — a sound or music label; an old '♬ 글' or a label that already has brackets too. */
+  const bracket = (s) => { const t = unbracket(String(s ?? '').trim().replace(/^[♬♫♩]\s*/, '')); return t ? `${STYLE().open}${t}${STYLE().close}` : ''; };
+  /** II.2 width of a short text (Hangul and CJK 1, the rest 0.5). Only for the name preview below;
+      every cell text and every check comes from the server. */
+  const wide = (ch) => { const c = ch.codePointAt(0); return (c >= 0x1100 && c <= 0x11ff) || (c >= 0x3130 && c <= 0x318f) || (c >= 0xac00 && c <= 0xd7a3) || (c >= 0x4e00 && c <= 0x9fff); };
+  const width = (s) => Array.from(String(s)).reduce((n, ch) => n + (wide(ch) ? 1 : 0.5), 0);
+  /** The speaker label for a name the writer is choosing: "[이름/출처/언어]"; "A/B" = both speak. */
+  function nameLabel(name, tail = '') {
+    const st = STYLE();
+    const names = String(name || '').split(st.name_split).map((x) => x.trim()).filter(Boolean);
+    let who = names.join(st.joint_sep);
+    if (names.length > 1 && width(`${st.open}${who}${st.close}`) > st.joint_max_units) who = st.joint_all;
+    const inner = who ? `${who}${tail}` : tail.slice(st.label_sep.length);
+    return inner ? `${st.open}${inner}${st.close}` : '';
+  }
   /** Where the project list lives ('/' under the studio GUI, '' when served alone). */
   const HOME = document.body.dataset.home || '';
 
@@ -49,6 +67,7 @@
   const FILTERS = [['all', '전체'], ['include', '포함 추천'], ['exclude', '제외 추천'], ['check', '확인 필요'], ['noroom', '배치 확인 필요']];
   const TOOLS = { look_frames: '프레임 보기', describe_sound: '소리 설명', rescan_sound: '다시 검출', search_dialogue: '대사 찾기', scene_context: '앞뒤 장면' };
   const FLAGS = { label_uncertain: '종류 불확실', unknown: '목록 밖 소리', conflict: '근거 어긋남' };
+  const CELL_FLAGS = { timing_estimated: '시각 추정', overlap: '겹친 대사', flash: '몇 프레임짜리 칸' };
   const SOURCE_NOTE = { caption: '소리 설명 모델 제안', detected: '검출 종류', parent: '상위 종류', agent: '에이전트 제안', mood: '분위기' };
   const FACE = { visible: '말하는 얼굴 보임', not_visible: '말하는 얼굴 안 보임', unclear: '얼굴 판정 애매' };
   const CHANGES = ['고조되는', '잦아드는', '음악 끝'];
@@ -153,15 +172,17 @@
   }
   const lineOf = (it) => (it.speaker && D.lines.get(it.speaker.line_id)) || null;
   const speakerText = (it) => { const ln = lineOf(it); return ln ? ln.text : it.phrase || ''; };
+  /** The label placement writes in front of this speaker's line, "[이름/출처/언어]" (from the server). */
+  const spkLabel = (it) => (it && it.speaker && it.speaker.label) || '';
   function phraseText(it) {
     if (it.kind !== 'speaker') return it.phrase || it.short || '';
-    const name = it.speaker && it.speaker.name;
-    return it.final === 'include' && name ? `(${name}) ${speakerText(it)}` : speakerText(it);
+    const lab = spkLabel(it);
+    return it.final === 'include' && lab ? `${lab} ${speakerText(it)}` : speakerText(it);
   }
   function phraseHtml(it) {
     if (it.kind !== 'speaker') return esc(it.phrase || it.short || '');
-    const name = it.speaker && it.speaker.name;
-    return it.final === 'include' && name ? `<span class="nm">(${esc(name)})</span> ${esc(speakerText(it))}` : esc(speakerText(it));
+    const lab = spkLabel(it);
+    return it.final === 'include' && lab ? `<span class="nm">${esc(lab)}</span> ${esc(speakerText(it))}` : esc(speakerText(it));
   }
   function summaryOf(it) {
     const nr = D.noRoom.get(it.id);
@@ -202,11 +223,19 @@
     const nCheck = chk ? chk.check.length : num(sm.final && sm.final.check);
     const nNo = num(sm.no_room);
     const pct = sm.total ? Math.round((100 * num(sm.decided)) / sm.total) : 0;
+    // cells that break the guide: obligations by the independent check (it covers the limits too);
+    // when that check could not run, the cells placement itself marked
+    const guide = sm.guide || null;
+    const nViol = guide && chk ? num(guide.must) : num(sm.violations);
+    const nShould = guide && chk ? num(guide.should) : 0;
+    const violTitle = `지침 검사에서 의무 조항에 걸린 자막 칸${nShould ? ` · 권고 조항은 ${nShould}칸` : ''} (누르면 조항별 목록)`;
     $('#progress').innerHTML = `
       <span class="prog" title="작가가 직접 정한 후보 수">작가 결정 <b class="tnum">${num(sm.decided)}</b> / ${num(sm.total)}
         <span class="prog-bar"><i style="width:${pct}%"></i></span></span>
       ${nCheck ? `<button type="button" class="pill pill-btn st-check" data-act="filter" data-filter="check" title="아직 정하지 않은 확인 필요 항목">확인 필요 ${nCheck}</button>` : ''}
-      ${nNo ? `<button type="button" class="pill pill-btn st-noroom" data-act="filter" data-filter="noroom">배치 확인 필요 ${nNo}</button>` : ''}`;
+      ${nNo ? `<button type="button" class="pill pill-btn st-noroom" data-act="filter" data-filter="noroom">배치 확인 필요 ${nNo}</button>` : ''}
+      ${nViol ? `<button type="button" class="pill pill-btn st-viol" data-act="open-export" data-fmt="srt" title="${esc(violTitle)}">지침 위반 ${nViol}칸</button>`
+        : `<span class="pill st-clean" title="지침 검사의 의무 조항에 걸린 자막 칸이 없다${nShould ? ` · 권고 조항은 ${nShould}칸` : ''}">지침 위반 0칸</span>`}`;
     const ban = $('#banner');
     ban.hidden = !S.st.error;
     ban.textContent = S.st.error || '';
@@ -439,14 +468,15 @@
     flush();
   }
   function blkLabel(it) {
-    if (it.kind === 'speaker') { const n = (it.speaker && it.speaker.name) || '이름 없음'; return it.final === 'include' ? `(${n})` : n; }
-    if (it.kind === 'music') return it.phrase || '♬ 음악';
+    if (it.kind === 'speaker') { const n = (it.speaker && it.speaker.name) || '이름 없음'; return it.final === 'include' ? (spkLabel(it) || bracket(n)) : n; }
+    if (it.kind === 'music') return it.phrase || bracket(STYLE().music);
     return unbracket(it.phrase || it.short || '');
   }
   function cellTitle(c) {
     const ch = c.check || {};
     const v = (ch.violations || []).map(violText).join(', ');
-    return `${fmtTime(c.start)}–${fmtTime(c.end)}\n${(c.lines || []).join('\n')}\n초당 ${num(ch.cps).toFixed(1)}자${v ? ` · ${v}` : ''}`;
+    const fl = (c.flags || []).map((f) => CELL_FLAGS[f] || f).join(', ');      // what placement marked on the cell
+    return `${fmtTime(c.start)}–${fmtTime(c.end)}\n${(c.lines || []).join('\n')}\n초당 ${num(ch.cps).toFixed(1)}자${v ? ` · ${v}` : ''}${fl ? ` · ${fl}` : ''}`;
   }
   function renderTimeline() {
     const P = S.P;
@@ -546,15 +576,14 @@
     const refs = (c.refs || []).filter((r) => D.lines.has(r));
     const used = new Set();
     return `<div class="sub-cell">${(c.lines || []).map((ln) => {
-      const m = /^(-\s*)?\(([^)]+)\)(\s*)([\s\S]*)$/.exec(ln);
-      if (!m) return `<div class="sub-line">${esc(ln)}</div>`;
-      // the line whose speaker carries this name, else the next unused dialogue line of the cell
-      let lid = refs.find((r) => !used.has(r) && ((D.spkByLine.get(r) || {}).speaker || {}).name === m[2]);
-      if (!lid) lid = refs.find((r) => !used.has(r));
-      if (lid) used.add(lid);
-      const sp = lid && D.spkByLine.get(lid);
-      const attrs = sp ? ` data-act="name" data-id="${esc(sp.id)}" title="화자 고치기"` : '';
-      return `<div class="sub-line">${esc(m[1] || '')}<span class="sub-name"${attrs}>(${esc(m[2])})</span>${esc(m[3])}${esc(m[4])}</div>`;
+      const m = /^(-\s*)?(\[[^\]]+\])(\s*)([\s\S]*)$/.exec(ln);
+      // a leading [ ] is a speaker label only when it is the label of one of this cell's lines;
+      // any other one is a sound ([재채기] 나도야!) or the language of a later piece ([영어] …)
+      const lid = m && refs.find((r) => !used.has(r) && spkLabel(D.spkByLine.get(r)) === m[2]);
+      if (!lid) return `<div class="sub-line">${esc(ln)}</div>`;
+      used.add(lid);
+      const sp = D.spkByLine.get(lid);
+      return `<div class="sub-line">${esc(m[1] || '')}<span class="sub-name" data-act="name" data-id="${esc(sp.id)}" title="화자 고치기">${esc(m[2])}</span>${esc(m[3])}${esc(m[4])}</div>`;
     }).join('')}</div>`;
   }
   function updateOverlay() {
@@ -563,14 +592,17 @@
     // the selected sound that is not in any cell is shown as a ghost, so the writer sees what is left out
     const it = D.byId.get(S.sel);
     const ghost = it && it.kind !== 'speaker' && !(it.cells || []).length && t >= num(it.onset) - 0.6 && t < num(it.onset) + 3 ? it : null;
-    const key = act.map((c) => `${c.id}|${(c.lines || []).join('\n')}`).join('||') + (ghost ? `#${ghost.id}|${ghost.phrase}|${stateOf(ghost)}` : '');
+    const key = act.map((c) => `${c.id}|${c.pos || ''}|${(c.lines || []).join('\n')}`).join('||') + (ghost ? `#${ghost.id}|${ghost.phrase}|${stateOf(ghost)}` : '');
     if (key === S.overlayKey) return;
     S.overlayKey = key;
-    let html = act.map(cellHtml).join('');
+    // a cell with pos "top" is drawn at the top of the picture, as the TTML export places it
+    let html = act.filter((c) => c.pos !== 'top').map(cellHtml).join('');
     if (ghost) {
       html += `<div class="sub-ghost"><span class="ghost-tag st-${stateOf(ghost)}">${esc(stateLabel(ghost))} · 자막에 없음</span><div class="sub-line">${esc(ghost.phrase || '')}</div></div>`;
     }
     $('#subs').innerHTML = html;
+    const top = $('#subs-top');
+    if (top) top.innerHTML = act.filter((c) => c.pos === 'top').map(cellHtml).join('');
   }
 
   // ------------------------------------------------------------------- player
@@ -698,8 +730,8 @@
   // -------------------------------------------------------------------- edits
   function decisionMsg(it, d) {
     if (it.kind === 'speaker') {
-      const name = it.speaker && it.speaker.name;
-      if (d === 'include') return `이름 표시 · ${cut(name ? `(${name}) ${speakerText(it)}` : speakerText(it), 34)}`;
+      const lab = spkLabel(it);
+      if (d === 'include') return `이름 표시 · ${cut(lab ? `${lab} ${speakerText(it)}` : speakerText(it), 34)}`;
       if (d === 'exclude') return `이름 생략 · ${cut(speakerText(it), 30)}`;
       return `추천대로 되돌림 · ${cut(speakerText(it), 30)}`;
     }
@@ -816,8 +848,10 @@
     return `<div class="mdl-actions"><button type="button" class="btn btn-primary btn-lg" data-act="m-confirm">확정</button><button type="button" class="btn btn-lg" data-act="close">취소</button>
       <span class="result">확정하면 <span class="pill st-inc-done">${ICON.check}${resultLabel}</span></span></div>`;
   }
-  const normSfx = (s) => { s = String(s || '').trim(); return !s || /^[[(♪♬]/.test(s) ? s : `[${s}]`; };
-  const normMusic = (s) => { s = String(s || '').trim(); return !s || /^[♪♬[(]/.test(s) ? s : `♬ ${s}`; };
+  // what the writer types becomes a label in the guide's notation: "[…]" for a sound and for music
+  // (an old "♬ …" too); a line that starts with ( or ♪ is left as typed
+  const normSfx = (s) => { s = String(s || '').trim(); return !s || /^[(♪]/.test(s) ? s : bracket(s); };
+  const normMusic = (s) => { s = String(s || '').trim(); return !s || /^♪/.test(s) ? s : bracket(s); };
 
   // 효과음 (3.2)
   function sfxOptions(it) {
@@ -871,7 +905,7 @@
             const label = core && core !== o.text ? `<b>${esc(core)}</b><span class="arrow">→</span><span class="out">${esc(o.text)}</span>` : `<b>${esc(o.text)}</b>`;
             return optHtml(String(i), label, o.note);
           }).join('')}
-          ${customOptHtml('예: 책 떨어지는 소리 (괄호는 저절로)', S.modal.custom)}
+          ${customOptHtml('예: 쿵 · 달칵 - 문 (괄호는 저절로)', S.modal.custom)}
         </div>
         <div class="field"><label for="f-short">짧은 문구</label><input class="input" id="f-short" value="" autocomplete="off">
           <span class="field-hint">넣을 자리가 좁을 때 이 문구로 줄여 넣는다</span></div>
@@ -891,13 +925,13 @@
   }
 
   // 음악 (3.3)
-  function composeMusic(m) {
-    const noun = m.inst || '음악';
+  function composeMusic(m) {                 // "[고조되는 무서운 음악]" (II.7: a label in brackets)
+    const noun = m.inst || STYLE().music;
     const mood = m.mood ? `${m.mood} ` : '';
-    if (m.change === '음악 끝') return `♬ ${mood}${noun} 끝`;
-    return `♬ ${m.change ? `${m.change} ` : ''}${mood}${noun}`;
+    if (m.change === '음악 끝') return bracket(`${mood}${noun} 끝`);
+    return bracket(`${m.change ? `${m.change} ` : ''}${mood}${noun}`);
   }
-  const composeShort = (m) => `♬ ${m.mood ? `${m.mood} ` : ''}${m.inst || '음악'}${m.change === '음악 끝' ? ' 끝' : ''}`;
+  const composeShort = (m) => bracket(`${m.mood ? `${m.mood} ` : ''}${m.inst || STYLE().music}${m.change === '음악 끝' ? ' 끝' : ''}`);
   function composeNote(m) {
     const p = [m.change && '변화', m.mood && '분위기', m.inst && '악기'].filter(Boolean);
     return !p.length ? '재료 없이' : p.length === 1 ? `${p[0]}만` : p.join(' + ');
@@ -922,7 +956,7 @@
     const comp = composeMusic(m);
     const rows = [optHtml('composed', `<b>${esc(comp)}</b>`, composeNote(m))];
     (it.phrases || []).forEach((p, i) => { if (p.text && p.text !== comp) rows.push(optHtml(`p${i}`, `<b>${esc(p.text)}</b>`, p.note || '')); });
-    rows.push(customOptHtml('예: 잔잔한 피아노 연주 (♬ 는 저절로)', m.custom));
+    rows.push(customOptHtml('예: 잔잔한 피아노 연주 (괄호는 저절로)', m.custom));
     return rows.join('');
   }
   function syncMusic(rebuild) {
@@ -953,7 +987,7 @@
     const m = (S.modal = {
       type: 'music', id: it.id, moods, insts, detected: mu.change || null,
       mood: (moods.find((x) => cur.includes(x.ko)) || {}).ko || null,
-      change: CHANGES.find((c) => (c === '음악 끝' ? /끝\s*$/.test(cur) : cur.includes(c))) || null,
+      change: CHANGES.find((c) => (c === '음악 끝' ? /끝\s*\]?\s*$/.test(cur) : cur.includes(c))) || null,
       inst: (insts.find((x) => cur.includes(x.ko)) || {}).ko || null,
       choice: 'composed', custom: '', short: '', shortTouched: false,
     });
@@ -1009,7 +1043,8 @@
     const n = (S.st.dialogue || []).filter((l) => l.speaker === name).length;
     return n ? `대본 ${n}줄` : '대본에 없는 이름';
   }
-  function chosenName(m) { return String(m.who === 'new' ? m.newName : m.chars[Number(m.who)] || '').trim(); }
+  /** The chosen name without brackets: a writer who types "[빌]" or "(빌)" means the name 빌 (the label adds [ ]). */
+  function chosenName(m) { return String(m.who === 'new' ? m.newName : m.chars[Number(m.who)] || '').trim().replace(/^[[(]\s*|\s*[\])]$/g, ''); }
   function syncSpeaker() {
     const m = S.modal, it = D.byId.get(m.id);
     for (const el of $$('#modal-box .opt[data-who]')) {
@@ -1020,17 +1055,24 @@
     $('#f-show-label').textContent = m.show ? '표시' : '생략';
     const name = chosenName(m);
     const text = speakerText(it);
-    const mine = (dash, body) => `${esc(dash)}${m.show && name ? `<span class="sub-name is-hl">(${esc(name)})</span> ` : ''}${esc(body)}`;
+    // the label as placement will write it for the chosen name: "[이름/출처/언어]"; without a name
+    // what is left of it ("[영어]") still stands in front of the line
+    const tail = (it.speaker && it.speaker.label_tail) || '';
+    const label = nameLabel(m.show ? name : '', tail);
+    const mine = (dash, body) => `${esc(dash)}${label ? `<span class="sub-name${m.show && name ? ' is-hl' : ''}">${esc(label)}</span> ` : ''}${esc(body)}`;
     // the line's first cell as placed (long lines are split, two speakers share a hyphen cell):
     // the name goes on the first piece of this line, after its "- "
     const cell = (it.cells || []).map((c) => D.cellById.get(c)).find(Boolean);
     const first = text.trim().split(/\s+/)[0] || '';
+    const labels = [spkLabel(it), nameLabel('', tail)].filter(Boolean);     // what this line carries now
     let lines = null;
     if (cell && first) {
       let used = false;
       lines = (cell.lines || []).map((l) => {
-        const p = /^(-\s*)?(\([^)]*\)\s*)?([\s\S]*)$/.exec(l);
-        if (!used && p[3].startsWith(first)) { used = true; return mine(p[1] || '', p[3]); }
+        const p = /^(-\s*)?([\s\S]*)$/.exec(l);
+        const lab = labels.find((x) => p[2].startsWith(`${x} `));
+        const body = lab ? p[2].slice(lab.length + 1) : p[2];
+        if (!used && body.startsWith(first)) { used = true; return mine(p[1] || '', body); }
         return esc(l);
       });
       if (!used) lines = null;
@@ -1095,7 +1137,7 @@
     if (name !== ((it.speaker && it.speaker.name) || '') || scope !== 'line') { body.name = name; body.scope = scope; }
     const msg = scope !== 'line'
       ? `같은 화자 ${m.same}줄의 이름을 ${name}${ro(name)} 바꿈 · 이 줄은 ${m.show ? '이름 표시' : '이름 생략'}`
-      : `${m.show ? '이름 표시' : '이름 생략'} · ${cut(m.show ? `(${name}) ${speakerText(it)}` : speakerText(it), 34)}`;
+      : `${m.show ? '이름 표시' : '이름 생략'} · ${cut(m.show ? `${nameLabel(name, (it.speaker && it.speaker.label_tail) || '')} ${speakerText(it)}` : speakerText(it), 34)}`;
     const st = await mutate(`api/items/${encodeURIComponent(m.id)}`, body, msg);
     if (st) closeModal();
   }
@@ -1118,14 +1160,34 @@
       ${(r.warnings || []).length ? `<ul class="warns">${r.warnings.map((w) => `<li>${esc(w)}</li>`).join('')}</ul>` : ''}</div>
       <div class="ac">${HOME ? '<button type="button" class="btn btn-sm" data-act="open-folder">폴더 열기</button>' : ''}<a class="btn btn-sm" href="${esc(r.url)}" download>파일 받기</a><button type="button" class="btn btn-sm" data-act="copy-path">경로 복사</button></div></div>`;
   }
+  /** 지침 검사 (cboe/check.py): the rules that were broken, obligations first, each with its cells. */
+  function guideHtml(gd) {
+    if (!gd || !(gd.rules || []).length) return '';
+    const rules = gd.rules.slice().sort((a, b) => (a.level === 'must' ? 0 : 1) - (b.level === 'must' ? 0 : 1));
+    return `<div class="sec">지침 검사<span class="sub">조항별 · 칸을 누르면 그 자리로</span></div>
+      <div class="guide">${rules.map((r) => {
+        const cells = (r.cells || []).slice(0, 12).map((cid) => {
+          const c = D.cellById.get(cid);
+          return `<button type="button" class="g-cell" data-act="goto-cell" data-cell="${esc(cid)}" title="${esc(c ? (c.lines || []).join(' / ') : cid)}">${c ? fmtTime(c.start) : esc(cid)}</button>`;
+        }).join('');
+        const more = (r.cells || []).length > 12 ? `<span class="muted">외 ${r.cells.length - 12}칸</span>` : '';
+        return `<div class="g-rule"><span class="g-lv ${r.level === 'must' ? 'must' : 'should'}">${r.level === 'must' ? '의무' : '권고'}</span>
+          <span class="g-cl tnum">${esc(r.clause)}</span><span class="g-tt">${esc(r.title)}</span><span class="g-n tnum">${num(r.count)}건</span>
+          <span class="g-cells">${cells}${more}</span></div>`;
+      }).join('')}</div>`;
+  }
   function renderExport() {
     const box = $('#modal-box');
     const scroll = $('#modal-box').scrollTop;
     const chk = S.st.export_check;
+    const st = STYLE();
     let body;
     if (!chk) body = `<div class="ev-empty">${esc(S.st.error || '검사를 할 수 없습니다')}</div>`;
     else {
       const nC = chk.check.length, nN = chk.no_room.length, nE = chk.exclude_recommended.length, nV = chk.violations.length;
+      const gd = chk.guide || null, gs = (gd && gd.summary) || {}, fl = chk.flags || {};
+      const nEst = (fl.timing_estimated || []).length, nOv = (fl.overlap || []).length, nFl = (fl.flash || []).length;
+      const firstOf = (ids) => `<button type="button" class="btn btn-sm" data-act="goto-cell" data-cell="${esc(ids[0])}">첫 칸 보기</button>`;
       body = `<div class="sec">남은 항목</div>
         <div class="xp-list">
           ${xpRow(nC ? 'warn' : 'ok', '확인 필요', nC ? `${nC}개 · 목록에서 정한다 (정하지 않으면 자막에 넣지 않음)` : '0개 · 모두 작가가 정함',
@@ -1135,7 +1197,13 @@
           ${xpRow(nN ? 'bad' : 'ok', '배치 확인 필요', nN ? `${nN}개 · 아래에서 정한다` : '0개 · 모두 자리를 찾음')}
           ${xpRow(nE ? 'info' : 'ok', '제외 추천', nE ? `${nE}개 · 목록을 훑어본 뒤 묶어서 확정` : '모두 확정함',
             nE ? '<button type="button" class="btn btn-sm" data-act="xp-goto" data-filter="exclude">목록에서 보기</button><button type="button" class="btn btn-sm btn-primary" data-act="bulk-exclude">묶어서 확정</button>' : '')}
-          ${xpRow(nV ? 'warn' : 'ok', '가독성 검사', `16자 · 2줄 · 초당 14자 · 표시 시간${nV ? ` · ${nV}칸 넘음` : ' · 모두 지킴'}`)}
+          ${xpRow(nV ? 'warn' : 'ok', '가독성 검사', `${num(st.max_units)}자 · ${num(st.max_lines)}줄 · 초당 ${num(st.cps)}자${st.profile === 'children' ? ' (어린이)' : ''} · 표시 시간${nV ? ` · ${nV}칸 넘음` : ' · 모두 지킴'}`)}
+          ${gd ? xpRow(gs.must ? 'bad' : gs.should ? 'warn' : 'ok', '지침 검사',
+            gs.must || gs.should ? `의무 ${num(gs.must)}건 (${num(gs.cells_must)}칸) · 권고 ${num(gs.should)}건 (${num(gs.cells_should)}칸) · 아래 조항별 목록`
+              : '표기 · 문장부호 · 시간 · 장면 전환 조항에 걸린 칸 없음') : ''}
+          ${nFl ? xpRow('bad', '몇 프레임짜리 칸', `${nFl}칸 · 읽을 수 없는 길이로 나간다`, firstOf(fl.flash)) : ''}
+          ${nOv ? xpRow('warn', '겹친 대사', `${nOv}칸 · 두 줄의 말이 겹쳐 시작이나 길이를 양보했다`, firstOf(fl.overlap)) : ''}
+          ${nEst ? xpRow('info', '시각 추정', `${nEst}칸 · 받아쓰기로 못 맞춘 줄이라 시작·끝을 확인한다`, firstOf(fl.timing_estimated)) : ''}
           ${(chk.unnamed || []).length ? xpRow('warn', '문구 없는 소리', `${chk.unnamed.length}개 · [소리] 그대로라 문구를 정해야 한다`,
             `<button type="button" class="btn btn-sm btn-primary" data-act="edit" data-id="${esc(chk.unnamed[0])}">문구 고치기</button>`) : ''}
         </div>
@@ -1144,18 +1212,20 @@
           return `<button type="button" data-act="goto-cell" data-cell="${esc(v.cell)}"><span class="t tnum">${c ? fmtTime(c.start) : esc(v.cell)}</span><span class="tx">${esc(c ? (c.lines || []).join(' / ') : '')}</span><span class="why">${esc((v.violations || []).map(violText).join(', '))}</span></button>`;
         }).join('')}</div>` : ''}
         ${chk.no_room.map((e) => { const it = D.byId.get(e.item); return it ? noRoomHtml(it) : ''; }).join('')}
+        ${guideHtml(gd)}
         ${savedHtml()}
-        <div class="xp-note">저장하면 작업 폴더의 export 에 쓴다 · 확인 필요와 제외 항목은 자막에 넣지 않는다</div>`;
+        <div class="xp-note">저장하면 작업 폴더의 export 에 쓴다 · 확인 필요와 제외 항목은 자막에 넣지 않는다 · TTML 은 프레임 단위 시각과 위·아래 위치를 담는다</div>`;
     }
-    const fmt = S.modal.fmt === 'vtt' ? 'vtt' : 'srt';
+    const fmt = exportFmt(S.modal.fmt);
     box.innerHTML = `<div class="xp">
       <div class="xp-head"><span class="logo" aria-hidden="true">SDH</span><h3 id="modal-title">내보내기 전 검사</h3><span class="muted">${esc(S.P.title)}</span><span class="spacer"></span>
-        <button type="button" class="btn${fmt === 'vtt' ? ' btn-primary' : ''}" data-act="export" data-fmt="vtt">VTT 저장</button>
-        <button type="button" class="btn${fmt === 'srt' ? ' btn-primary' : ''}" data-act="export" data-fmt="srt">SRT 저장</button>
+        ${['ttml', 'vtt', 'srt'].filter((f) => st.formats.includes(f)).map((f) => `<button type="button" class="btn${fmt === f ? ' btn-primary' : ''}" data-act="export" data-fmt="${f}">${f.toUpperCase()} 저장</button>`).join('')}
         <button type="button" class="icon-btn" data-act="close" aria-label="닫기">×</button></div>
       <div class="xp-body">${body}</div></div>`;
     box.scrollTop = scroll;
   }
+  /** One of the formats the server writes (srt when unknown). */
+  const exportFmt = (f) => (STYLE().formats.includes(f) ? f : 'srt');
   function openExport(fmt) {
     pauseMain();
     teardownPreview();
@@ -1163,7 +1233,7 @@
     S.lastExport = null;
     renderExport();
     showModal();
-    const b = $(`#modal-box [data-act="export"][data-fmt="${fmt === 'vtt' ? 'vtt' : 'srt'}"]`);
+    const b = $(`#modal-box [data-act="export"][data-fmt="${exportFmt(fmt)}"]`);
     if (b) b.focus();
   }
   async function doExport(fmt) {

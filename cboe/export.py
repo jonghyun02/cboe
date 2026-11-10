@@ -1,25 +1,38 @@
 # -*- coding: utf-8 -*-
-"""내보내기: last check of a draft and the SRT / VTT writer for placed cells.
+"""내보내기: the SRT / VTT / TTML writers for placed cells and the check that goes with them.
 
-``final_check(draft)`` re-validates what placement promises (DESIGN.md §6, 10-13 memo 5.1)
-from the cells' text and times, without trusting their ``check``: every cell has text and a
-start before its end, cells are in time order, do not overlap and keep 2 frames between them,
-16 units a line (II.2), 2 lines (II.4), 14 units/s (II.3), 5/6 s to 7 s (General Requirements
-1). The draft's ``no_room`` items are listed as still to place. Limit problems are reported,
-not fixed: the writer decides (검수 화면 3.5). ``write`` runs it first and refuses only what
-cannot be written at all (``fatal``: no text, no times, end not after start).
+``write(cells, path, fmt, fps=...)`` writes the file and returns the result of the independent
+guide check (``cboe.check.run``) on the same cells, with the draft's frame rate, so the review
+page can show it. Limit problems are reported, not fixed: the writer decides (검수 화면 3.5).
+Only what cannot be written at all is refused (no text, no times, end not after start).
+
+``to_ttml`` follows General Requirements 13 ("All TTML files created for subtitles or SDH must
+adhere to the following technical specifications" = 자막·SDH 용 TTML 파일은 다음 기술 규격을
+따라야 한다): percentage values only, positioning with ``tts:textAlign`` and ``tts:displayAlign``
+on two regions (bottom, top) that have static ``tts:extent`` and ``tts:origin``, ``tts:fontSize``
+100%. Times are whole video frames (``240f`` with ``ttp:frameRate`` and, for 23.976 / 29.97 /
+59.94, ``ttp:frameRateMultiplier="1000 1001"``), ``xml:lang`` is ko. A cell's ``pos`` ("bottom" |
+"top") picks the region. The sample snippet the guide links to was not at hand; the extent and
+origin values are the usual 10 % safe margins and should be compared with the delivery spec.
+
+``final_check(draft)`` keeps the earlier shape of the result for the limits placement promises
+(16 units a line, 2 lines, reading speed, 5/6 s to 7 s, order, 2 frames between cells); it is a
+view of ``cboe.check.run`` and holds no numbers of its own (they are in ``cboe.style``).
 """
 from __future__ import annotations
 
 import html
 import math
+from fractions import Fraction
 from pathlib import Path
 
-from .textutil import units
+from . import check
 
-MAX_UNITS, MAX_LINES, CPS = 16.0, 2, 14.0
-MIN_DUR, MAX_DUR, GAP_FRAMES = 5 / 6, 7.0, 2
-DEFAULT_FPS = 30.0          # a draft without "fps": the most lenient common frame rate for 2 frames
+FORMATS = ("srt", "vtt", "ttml")
+MEDIA_TYPES = {"srt": "application/x-subrip", "vtt": "text/vtt; charset=utf-8",
+               "ttml": "application/ttml+xml; charset=utf-8"}
+TTML_ORIGIN, TTML_EXTENT = "10% 10%", "80% 80%"      # static region box (General Requirements 13)
+_LIMITS = ("line_length", "line_count", "reading_speed", "min_duration", "max_duration")
 
 
 def _ts(t: float, sep: str) -> str:
@@ -42,61 +55,32 @@ def _text_lines(c: dict) -> list[str]:
     return [str(x) for x in (c.get("lines") or []) if str(x).strip()]
 
 
-def final_check(draft, fps: float | None = None) -> dict:
-    """Problems of a draft (``{"cells": [...], "no_room": [...]}`` or a bare list of cells).
+def final_check(draft, fps: float | None = None, profile=None) -> dict:
+    """Limit problems of a draft (``{"cells": [...], "no_room": [...]}`` or a bare list of cells).
 
     Returns ``{"ok", "fatal", "cells", "overlaps", "order", "no_room", "summary"}``: ``cells`` lists
     each cell with limit violations, ``overlaps`` cells closer than 2 frames to the next one,
     ``order`` cells that start before the one before them. ``ok`` only when nothing is listed.
+    The notation and shot-change rules are in the full result of ``check.run``.
     """
-    if isinstance(draft, dict):
-        cells = list(draft.get("cells") or [])
-        no_room = list(draft.get("no_room") or [])
-        fps = fps or _num(draft.get("fps"))
-    else:
-        cells, no_room = list(draft or []), []
-    fps = fps if fps and fps > 0 else DEFAULT_FPS
-    min_f = math.ceil(MIN_DUR * fps - 1e-6)
-    max_f = math.floor(MAX_DUR * fps + 1e-6)
-    fatal, bad, overlaps, order = [], [], [], []
-    for i, c in enumerate(cells):
-        cid = c.get("id") or f"#{i + 1}"
-        s, e, lines = _num(c.get("start")), _num(c.get("end")), _text_lines(c)
-        if s is None or e is None or e <= s or not lines:
-            why = "글 없음" if not lines else "시각 없음" if s is None or e is None else "끝이 시작보다 빠름"
-            fatal.append({"cell": cid, "index": i, "reason": why})
-            continue
-        chars = [units(x) for x in lines]
-        dur_f = round((e - s) * fps)                 # whole frames, as placement counts them
-        v = []
-        if any(u > MAX_UNITS + 1e-9 for u in chars):
-            v.append("한 줄 16자 초과")
-        if len(lines) > MAX_LINES:
-            v.append("2줄 초과")
-        if dur_f <= 0 or sum(chars) * fps / dur_f > CPS + 1e-6:
-            v.append("초당 14자 초과")
-        if dur_f < min_f:
-            v.append("5/6초 미만")
-        if dur_f > max_f:
-            v.append("7초 초과")
-        if v:
-            bad.append({"cell": cid, "index": i, "violations": v})
-    good = [(i, c) for i, c in enumerate(cells) if _num(c.get("start")) is not None and _num(c.get("end")) is not None]
-    for (i, a), (j, b) in zip(good, good[1:]):
-        sa, sb = _num(a["start"]), _num(b["start"])
-        if sb < sa:
-            order.append({"cell": b.get("id") or f"#{j + 1}", "index": j, "after": a.get("id") or f"#{i + 1}"})
-    ordered = sorted(good, key=lambda ic: (_num(ic[1]["start"]), _num(ic[1]["end"])))
-    for (i, a), (j, b) in zip(ordered, ordered[1:]):
-        gap_f = round((_num(b["start"]) - _num(a["end"])) * fps)
-        if gap_f < GAP_FRAMES:
-            overlaps.append({"cell": a.get("id") or f"#{i + 1}", "next": b.get("id") or f"#{j + 1}",
-                             "gap": round(_num(b["start"]) - _num(a["end"]), 3),
-                             "reason": "겹침" if gap_f < 0 else "간격 2프레임 미만"})
+    no_room = list(draft.get("no_room") or []) if isinstance(draft, dict) else []
+    res = check.run(draft if isinstance(draft, dict) else list(draft or []), fps=fps, profile=profile)
+    fatal, bad, overlaps, order = [], {}, [], []
+    for v in res["violations"]:
+        if v["code"] in check.FATAL:
+            fatal.append({"cell": v["cell"], "index": v["index"], "reason": v["message"]})
+        elif v["code"] in _LIMITS:
+            bad.setdefault(v["index"], {"cell": v["cell"], "index": v["index"], "violations": []})
+            bad[v["index"]]["violations"].append(v["message"])
+        elif v["code"] in ("overlap", "frame_gap"):
+            overlaps.append({"cell": v["cell"], "next": v["next"], "gap": v["gap"], "reason": v["message"]})
+        elif v["code"] == "order":
+            order.append({"cell": v["cell"], "index": v["index"], "after": v["after"]})
+    bad = [bad[k] for k in sorted(bad)]
     pending = [{"item": r.get("item"), "t": r.get("t"), "reason": r.get("reason")} for r in no_room]
     ok = not (fatal or bad or overlaps or order or pending)
     return {"ok": ok, "fatal": fatal, "cells": bad, "overlaps": overlaps, "order": order, "no_room": pending,
-            "summary": {"cells": len(cells), "fatal": len(fatal), "violations": len(bad), "overlaps": len(overlaps),
+            "summary": {"cells": res["cells"], "fatal": len(fatal), "violations": len(bad), "overlaps": len(overlaps),
                         "order": len(order), "no_room": len(pending)}}
 
 
@@ -117,20 +101,82 @@ def to_vtt(cells: list[dict]) -> str:
     out = ["WEBVTT\n"]
     for c in _sorted_cells(cells):
         body = "\n".join(html.escape(x, quote=False) for x in _text_lines(c))
-        out.append(f"{_ts(_num(c['start']), '.')} --> {_ts(_num(c['end']), '.')}\n{body}\n")
+        where = " line:10%" if c.get("pos") == "top" else ""       # a cell moved to the top of the picture
+        out.append(f"{_ts(_num(c['start']), '.')} --> {_ts(_num(c['end']), '.')}{where}\n{body}\n")
     return "\n".join(out)
 
 
-def write(cells: list[dict], path, fmt: str = "srt") -> Path:
-    """Write ``cells`` as SRT or VTT (UTF-8) after ``final_check``; raises ValueError on fatal cells."""
+def frame_rate(fps: float) -> tuple[int, str | None]:
+    """``ttp:frameRate`` and ``ttp:frameRateMultiplier`` of a video frame rate:
+    24 -> (24, None), 23.976 -> (24, "1000 1001"), 29.97 -> (30, "1000 1001")."""
+    whole = max(1, round(fps))
+    if abs(fps - whole) < 1e-3:
+        return whole, None
+    if abs(fps - whole * 1000 / 1001) < 5e-3:
+        return whole, "1000 1001"
+    exact = Fraction(fps).limit_denominator(1001)
+    rate = max(1, math.ceil(exact))
+    mult = exact / rate
+    return rate, f"{mult.numerator} {mult.denominator}"
+
+
+def to_ttml(cells: list[dict], fps, title: str | None = None, lang: str = "ko") -> str:
+    """The cells as a TTML document (module doc: General Requirements 13). ``fps`` is the frame
+    rate of the video; every time is written as a whole frame."""
+    fps = _num(fps)
+    if not fps or fps <= 0:
+        raise ValueError("TTML 로 내보내려면 영상의 fps 가 필요합니다")
+    rate, mult = frame_rate(fps)
+
+    def esc(s) -> str:
+        return html.escape(str(s), quote=False)
+
+    def region(name: str, align: str) -> str:
+        return (f'      <region xml:id="{name}" tts:origin="{TTML_ORIGIN}" tts:extent="{TTML_EXTENT}" '
+                f'tts:displayAlign="{align}" tts:textAlign="center"/>')
+
+    rows = ['<?xml version="1.0" encoding="UTF-8"?>',
+            '<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttp="http://www.w3.org/ns/ttml#parameter" '
+            'xmlns:tts="http://www.w3.org/ns/ttml#styling" xmlns:ttm="http://www.w3.org/ns/ttml#metadata" '
+            f'xml:lang="{html.escape(lang, quote=True)}" ttp:timeBase="media" ttp:frameRate="{rate}"'
+            + (f' ttp:frameRateMultiplier="{mult}"' if mult else "") + ">",
+            "  <head>"]
+    if title:
+        rows += ["    <metadata>", f"      <ttm:title>{esc(title)}</ttm:title>", "    </metadata>"]
+    rows += ["    <styling>",
+             '      <style xml:id="s1" tts:fontFamily="proportionalSansSerif" tts:fontSize="100%" '
+             'tts:textAlign="center" tts:color="white"/>',
+             "    </styling>",
+             "    <layout>", region("bottom", "after"), region("top", "before"), "    </layout>",
+             "  </head>", "  <body>", "    <div>"]
+    for i, c in enumerate(_sorted_cells(cells), 1):
+        begin, end = round(_num(c["start"]) * fps), round(_num(c["end"]) * fps)
+        where = "top" if c.get("pos") == "top" else "bottom"
+        text = "<br/>".join(esc(x) for x in _text_lines(c))
+        rows.append(f'      <p xml:id="c{i}" begin="{begin}f" end="{end}f" region="{where}" style="s1">{text}</p>')
+    rows += ["    </div>", "  </body>", "</tt>", ""]
+    return "\n".join(rows)
+
+
+def write(cells: list[dict], path, fmt: str = "srt", fps=None, cuts=None, profile=None,
+          title: str | None = None) -> dict:
+    """Write ``cells`` as SRT, VTT or TTML (UTF-8, ``\\n`` line ends) and check them against the guide.
+
+    ``fps`` is the frame rate of the draft: the check counts frames with it (24 is assumed without
+    it) and TTML needs it. ``cuts`` (shot-change times) switches on the shot-change rules of the
+    check, ``profile`` is "adult" or "children". Returns ``{"path": Path, "format", "cells": number
+    written, "check": check.run(...)}``. Raises ValueError for an unknown format and for cells that
+    cannot be written at all.
+    """
     fmt = str(fmt or "srt").lower().lstrip(".")
-    if fmt not in ("srt", "vtt"):
+    if fmt not in FORMATS:
         raise ValueError(f"unknown subtitle format: {fmt}")
-    chk = final_check({"cells": cells})
-    if chk["fatal"]:
-        raise ValueError("내보낼 수 없는 칸: " + ", ".join(f"{x['cell']} ({x['reason']})" for x in chk["fatal"]))
+    res = check.run({"cells": cells, "fps": fps, "profile": profile}, cuts=cuts)
+    fatal = [v for v in res["violations"] if v["code"] in check.FATAL]
+    if fatal:
+        raise ValueError("내보낼 수 없는 칸: " + ", ".join(f"{v['cell']} ({v['message']})" for v in fatal))
+    text = to_srt(cells) if fmt == "srt" else to_vtt(cells) if fmt == "vtt" else to_ttml(cells, fps, title)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    text = to_srt(cells) if fmt == "srt" else to_vtt(cells)
     path.write_text(text, encoding="utf-8", newline="\n")
-    return path
+    return {"path": path, "format": fmt, "cells": len(_sorted_cells(cells)), "check": res}

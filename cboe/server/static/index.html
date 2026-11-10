@@ -20,6 +20,7 @@
     </div>
     <div class="progress" id="progress" aria-live="polite"></div>
     <div class="top-actions">
+      <button type="button" class="btn" data-act="open-export" data-fmt="ttml" title="프레임 단위 시각과 위·아래 위치를 담는 TTML">TTML 저장</button>
       <button type="button" class="btn" data-act="open-export" data-fmt="vtt">VTT 저장</button>
       <button type="button" class="btn btn-primary" data-act="open-export" data-fmt="srt">SRT 저장</button>
     </div>
@@ -33,7 +34,7 @@
       <div class="stage is-paused" id="stage">
         <video id="video" preload="auto" playsinline></video>
         <img class="stage-still" id="stage-still" alt="" hidden>
-        <div class="stage-layer" id="stage-layer"><div class="subs" id="subs"></div></div>
+        <div class="stage-layer" id="stage-layer"><div class="subs subs-top" id="subs-top"></div><div class="subs" id="subs"></div></div>
         <div class="stage-time tnum" id="stage-time">--:--.-</div>
         <div class="stage-range tnum" id="stage-range" hidden></div>
         <button type="button" class="stage-play" id="stage-play" data-act="toggle-play" aria-label="재생">

@@ -330,10 +330,21 @@ def test_refine_onset_finds_rise():
 
 
 def test_phrases_long_short():
+    # II.9: the onomatopoeia first; the description is a choice; no '[의성어, 설명]' comma form
     ph = phrases.phrases("Thunder")
-    assert ph["long"] == "[천둥 소리]" and ph["short"].startswith("[") and ph["ono"]
-    assert phrases.mood_phrase("Happy music") == "♬ 경쾌한 음악"          # II.7: 행복한 대신 경쾌한
-    assert phrases.mood_phrase("Scary music", "고조되는") == "♬ 고조되는 무서운 음악"
+    assert ph == {"long": "[우르릉]", "short": "[우르릉]", "ono": "[우르릉 - 천둥]", "desc": "[천둥 소리]"}
+    assert phrases.phrases("Zipper (clothing)")["ono"] == "[직 - 지퍼]"   # the guide's own example
+    # no onomatopoeia in the table: the description
+    assert phrases.phrases("Sneeze") == {"long": "[재채기]", "short": "[재채기]", "ono": None, "desc": "[재채기]"}
+    # '[의성어 - 출처]' only when the description names a source: not '개 짖는 소리', not '쾅 소리'
+    assert phrases.phrases("Bark") == {"long": "[멍멍]", "short": "[멍멍]", "ono": None, "desc": "[개 짖는 소리]"}
+    assert phrases.phrases("Bang")["ono"] is None and phrases.source("Rain") == "비"
+    named = [cls for cls, r in phrases.table().items() if r["desc"] or r["ono"]]
+    assert len(named) > 350 and not any("," in v for cls in named for v in phrases.phrases(cls).values() if v)
+    assert phrases.mood_phrase("Happy music") == "[경쾌한 음악]"          # II.7: 행복한 대신 경쾌한, in brackets
+    assert phrases.mood_phrase("Scary music", "고조되는") == "[고조되는 무서운 음악]"
+    assert phrases.mood_phrase("Sad music", None, "Piano") == "[슬픈 피아노 연주]"
+    assert phrases.mood_phrase(None) == "[음악]"                           # the mood is not known
 
 
 # ------------------------------------------------------------------ 추천 규칙

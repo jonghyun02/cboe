@@ -82,6 +82,63 @@ def test_state_shape(client):
     assert p1["cells"] and any("L0001" in c["refs"] for c in st["draft"]["cells"] if c["id"] in p1["cells"])
 
 
+def test_state_carries_style_and_guide_check(client):
+    st = client.get("/api/state").json()
+    # the limits and the notation the page shows come from the server (cboe.style), not from the page
+    style = st["style"]
+    assert (style["profile"], style["cps"], style["max_units"], style["max_lines"]) == ("adult", 14.0, 16.0, 2)
+    assert (style["open"], style["close"], style["note"], style["music"]) == ("[", "]", "♪", "음악")
+    assert (style["joint_sep"], style["joint_all"]) == (", ", "함께")
+    assert style["formats"] == ["srt", "vtt", "ttml"] and st["project"]["profile"] == "adult"
+    # the independent guide check of the draft: cells that break an obligation / a recommendation
+    guide = st["export_check"]["guide"]
+    sm = st["summary"]
+    assert sm["guide"] == {"must": guide["summary"]["cells_must"], "should": guide["summary"]["cells_should"],
+                           "must_items": guide["summary"]["must"], "should_items": guide["summary"]["should"]}
+    assert set(sm["flags"]) == {"timing_estimated", "overlap", "flash"} and guide["fps"] == st["project"]["fps"]
+    assert guide["cut_checks"] and guide["profile"] == "adult"
+    assert all(v["level"] in ("must", "should") and v["clause"] for v in guide["violations"])
+    codes = {v["code"] for v in guide["violations"]}
+    assert not codes & {"label_parens", "note_glyph", "line_end_punct", "sentence_period", "dots"}   # today's notation
+    draft = st["draft"]
+    assert draft["profile"] == "adult" and draft["notation"] == 2
+    assert all(c["pos"] == "bottom" and isinstance(c["flags"], list) for c in draft["cells"])
+
+
+def test_old_notation_is_shown_in_todays(client):
+    # the sample folder is written like an older work folder: music phrases as '♬ …'
+    st = client.get("/api/state").json()
+    m1 = item(st, "M0001")
+    assert m1["phrase"] == "[무서운 음악]" and m1["short"] == "[무서운 음악]"
+    assert [p["text"] for p in m1["phrases"]] == ["[무서운 음악]", "[고조되는 무서운 음악]", "[음악]"]
+    assert not any("♬" in ln for c in st["draft"]["cells"] for ln in c["lines"])
+    assert any(c["lines"] == ["[무서운 음악]"] or "- [무서운 음악]" in c["lines"] for c in st["draft"]["cells"]) or m1["no_room"]
+    # speaker items carry the label placement writes: [이름]
+    p1 = item(st, "P0001")
+    assert p1["speaker"]["label"] == "[BJ 옴뫄]" and p1["speaker"]["label_tail"] == ""
+    named = [ln for c in st["draft"]["cells"] for ln in c["lines"] if ln.startswith(("[BJ 옴뫄] ", "- [BJ 옴뫄] "))]
+    assert named and not any(ln.startswith(("(", "- (")) for c in st["draft"]["cells"] for ln in c["lines"])
+    # a phrase the writer once confirmed in the old notation comes out as a label too
+    old = {"decision": "include", "phrase": "♬ 고조되는 무서운 음악", "short": "♬ 음악"}
+    st = client.post("/api/items/M0001", json=old).json()
+    assert item(st, "M0001")["phrase"] == "[고조되는 무서운 음악]"
+    assert not any("♬" in ln for c in st["draft"]["cells"] for ln in c["lines"])
+
+
+def test_children_profile_from_project_json(work):
+    meta = json.loads((work / "project.json").read_text(encoding="utf-8"))
+    (work / "project.json").write_text(json.dumps(dict(meta, profile="children"), ensure_ascii=False), encoding="utf-8")
+    with TestClient(create_app(work)) as c:
+        st = c.get("/api/state").json()
+        assert st["style"]["cps"] == 11.0 and st["style"]["profile_label"] == "어린이"
+        assert st["draft"]["profile"] == "children"
+        assert st["export_check"]["guide"]["profile"] == "children" and not st["error"]
+    (work / "project.json").write_text(json.dumps(dict(meta, profile="teen"), ensure_ascii=False), encoding="utf-8")
+    with TestClient(create_app(work)) as c:
+        st = c.get("/api/state").json()                               # a wrong value is said, the page still opens
+        assert "teen" in st["error"] and st["style"]["profile"] == "adult"
+
+
 # --------------------------------------------------------------- decisions
 def test_decision_round_trip(client, work):
     st = client.post("/api/items/S0001", json={"decision": "include"}).json()
@@ -119,7 +176,12 @@ def test_speaker_scope(client, work):
     # line scope touches one line only
     st = client.post("/api/items/P0010", json={"name": "희", "decision": "include", "scope": "line"}).json()
     assert item(st, "P0010")["speaker"]["name"] == "희" and item(st, "P0011")["speaker"]["name"] == "양희"
-    assert any(ln.startswith("(희)") for c in st["draft"]["cells"] if "L0010" in c["refs"] for ln in c["lines"])
+    assert any(ln.startswith("[희]") for c in st["draft"]["cells"] if "L0010" in c["refs"] for ln in c["lines"])
+    assert item(st, "P0010")["speaker"]["label"] == "[희]" and item(st, "P0011")["speaker"]["label"] == "[양희]"
+    # two people at once: '에루/마야카' in the script is shown as II.10 wants it
+    st = client.post("/api/items/P0010", json={"name": "희/양희", "decision": "include"}).json()
+    assert item(st, "P0010")["speaker"]["label"] == "[희, 양희]"
+    assert any(ln.startswith("[희, 양희]") for c in st["draft"]["cells"] if "L0010" in c["refs"] for ln in c["lines"])
 
 
 def test_validation(client, work):
@@ -180,6 +242,9 @@ def test_swap_prev_time():
     t = swap_prev_time(draft, it, fps, 0.0)
     want = 2 / 14 + 1                                               # '[쿵]' = 2 reading chars
     assert 12.0 < t and t + want <= 15.0 - 2 / fps + 1e-6
+    from cboe import style
+    slow = swap_prev_time(draft, it, fps, 0.0, style.get("children"))       # 11 units a second: shown longer
+    assert slow < t and slow + 2 / 11 + 1 <= 15.0 - 2 / fps + 1e-6
     tight = {"cells": [dict(cells[0], end=14.9), cells[1]], "no_room": draft["no_room"]}
     with pytest.raises(PlacementError, match="빈틈"):
         swap_prev_time(tight, it, fps, 0.0)
@@ -203,13 +268,28 @@ def test_state_survives_placement_error(work, monkeypatch):
         assert item(st, "S0001")["final"] == "include" and st["error"]
 
 
+def test_draft_of_an_older_version_is_shown_in_todays_notation(work, monkeypatch):
+    # placement cannot run, so the page falls back on draft.json: one written before the notation
+    # changed still has '(이름)' and '♬ …' in its lines
+    from cboe import placement
+    from cboe.util import write_json
+    write_json(work / "draft.json", {"fps": 23.976, "no_room": [], "cells": [
+        {"id": "C0001", "start": 181.0, "end": 182.5, "lines": ["- (BJ 옴뫄) 뭐?", "- [쿵]"], "refs": [], "kind": "mixed"},
+        {"id": "C0002", "start": 183.0, "end": 185.0, "lines": ["♬ 무서운 음악"], "refs": [], "kind": "music"}]})
+    monkeypatch.setattr(placement, "place", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("no engine")))
+    with TestClient(create_app(work)) as c:
+        st = c.get("/api/state").json()
+        assert "no engine" in st["error"]
+        assert [x["lines"] for x in st["draft"]["cells"]] == [["- [BJ 옴뫄] 뭐?", "- [쿵]"], ["[무서운 음악]"]]
+
+
 # ------------------------------------------------------------------ export
 def test_export(client, work):
     r = client.post("/api/export", json={"format": "srt"}).json()
     path = Path(r["path"])
     assert path.is_file() and path.parent == work / "export" and r["url"] == "api/export/srt"
     text = path.read_text(encoding="utf-8")
-    assert "-->" in text and "(BJ 옴뫄) 흐윽 후윽" in text
+    assert "-->" in text and "[BJ 옴뫄] 흐윽 후윽" in text and "(BJ 옴뫄)" not in text and "♬" not in text
     assert any("확인 필요" in w for w in r["warnings"]) and r["state"]["project"]["title"]
     d = client.get("/api/export/srt")
     assert d.status_code == 200 and "filename*=utf-8''" in d.headers["content-disposition"]
@@ -219,6 +299,34 @@ def test_export(client, work):
     assert Path(r["path"]).read_text(encoding="utf-8").startswith("WEBVTT")
     assert client.get("/api/export/vtt").headers["content-type"].startswith("text/vtt")
     assert client.post("/api/export", json={"format": "ass"}).status_code == 422
+
+
+def test_export_shows_the_guide_check_and_writes_ttml(client, work):
+    from cboe import check
+    r = client.post("/api/export", json={"format": "srt"}).json()
+    # the check of the file just written: with the draft's frame rate (not 30) and clause by clause
+    chk = r["check"]
+    assert chk["fps"] == r["state"]["project"]["fps"] and not chk["fps_assumed"] and chk["cells"] == r["cells"]
+    assert chk["summary"] == r["export_check"]["guide"]["summary"]      # the same result the page showed before saving
+    again = check.run(Path(r["path"]), fps=chk["fps"], cuts=r["state"]["cuts"])
+    assert again["summary"]["by_code"] == chk["summary"]["by_code"]     # and what the checker says of the file itself
+    for w in r["warnings"]:
+        assert "간격 2프레임 미만" not in w                              # the false alarm of the 30 fps guess is gone
+    sm = chk["summary"]
+    assert (sm["must"] == 0) == (not any(w.startswith("지침 검사: 의무") for w in r["warnings"]))
+    assert (sm["should"] == 0) == (not any(w.startswith("지침 검사: 권고") for w in r["warnings"]))
+
+    r = client.post("/api/export", json={"format": "ttml"}).json()
+    path = Path(r["path"])
+    assert path.suffix == ".ttml" and path.parent == work / "export" and r["url"] == "api/export/ttml"
+    text = path.read_text(encoding="utf-8")
+    assert 'xml:lang="ko"' in text and 'ttp:frameRate="24" ttp:frameRateMultiplier="1000 1001"' in text
+    assert text.count("<p ") == r["cells"] == len(r["state"]["draft"]["cells"]) and 'region="bottom"' in text
+    cells, meta = check.parse_ttml(text)
+    assert [c["lines"] for c in cells] == [c["lines"] for c in r["state"]["draft"]["cells"]]
+    d = client.get("/api/export/ttml")
+    assert d.status_code == 200 and d.headers["content-type"].startswith("application/ttml+xml")
+    assert d.content == path.read_bytes()
 
 
 # ------------------------------------------------------------------- media

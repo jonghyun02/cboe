@@ -224,12 +224,14 @@ class Project:
         return lines, sounds
 
     def recompute(self) -> dict:
-        from . import placement
+        from . import placement, style
         with self._lock:
             lines, sounds = self.placement_inputs()
             meta = self.meta
+            # the limits of this work folder's profile (project.json "profile": adult | children)
             draft = placement.place(lines, sounds, self.cuts(), float(meta.get("fps") or 25.0),
-                                    window=(meta.get("t0", 0.0), meta.get("t1")))
+                                    window=(meta.get("t0", 0.0), meta.get("t1")),
+                                    settings=style.for_project(meta).settings())
             write_json(self.path("draft.json"), draft)
             return draft
 
@@ -239,28 +241,47 @@ class Project:
 
     # ----------------------------------------------------------------- export
     def export_check(self) -> dict:
+        """What is left before exporting. ``guide`` is the result of the independent guide check
+        (``cboe.check.run``: clause by clause, must / should) on the current draft, with the
+        draft's frame rate, the shot changes and the profile of this work folder; ``flags`` lists
+        the cells placement marked (timing_estimated, overlap, flash)."""
+        from . import check, style
         eff = self.effective_items()
         draft = self.draft()
+        profile = style.for_project(self.meta).profile
+        if draft.get("notation") != style.NOTATION or draft.get("profile") != profile:
+            draft = self.recompute()        # written with an older notation ('(이름)') or another profile
+        guide = check.run(draft, cuts=self.cuts(), profile=profile)
+        flags: dict = {}
+        for c in draft.get("cells", []):
+            for name in c.get("flags") or []:
+                flags.setdefault(name, []).append(c["id"])
         sounds = [it for it in eff if it["kind"] in ("sfx", "music")]
         # sounds left at 확인 필요 are not captioned; speaker lines left at 확인 필요 are still
         # exported, only without a name, so they are reported apart
-        check = [it["id"] for it in sounds if it["final"] == "check"]
+        pending = [it["id"] for it in sounds if it["final"] == "check"]
         check_speaker = [it["id"] for it in eff if it["kind"] == "speaker" and it["final"] == "check"]
         undecided_ex = [it["id"] for it in sounds if it["final"] == "exclude" and not it["decided"]]
         viol = [c for c in draft.get("cells", []) if (c.get("check") or {}).get("violations")]
         # an included sound whose caption is still the placeholder '[소리]' must be named first
         unnamed = [it["id"] for it in eff if it["kind"] == "sfx" and it["final"] == "include"
                    and (it.get("phrase") or "").strip() in ("[소리]", "")]
-        return {"check": check, "check_speaker": check_speaker, "no_room": draft.get("no_room", []),
+        return {"check": pending, "check_speaker": check_speaker, "no_room": draft.get("no_room", []),
                 "exclude_recommended": undecided_ex, "unnamed": unnamed,
-                "violations": [{"cell": c["id"], "violations": c["check"]["violations"]} for c in viol]}
+                "violations": [{"cell": c["id"], "violations": c["check"]["violations"]} for c in viol],
+                "guide": guide, "flags": flags, "profile": profile}
 
-    def export(self, fmt: str = "srt") -> Path:
+    def export(self, fmt: str = "srt", report: bool = False):
+        """Write the draft as ``fmt`` (srt | vtt | ttml) into the work folder's ``export``.
+        Returns the path, or with ``report=True`` the whole result of ``export.write``
+        (``{"path", "format", "cells", "check"}``: the guide check of what was written)."""
         import re
 
         from . import export as ex
         draft = self.recompute()
+        fmt = str(fmt or "srt").lower().lstrip(".")
         title = re.sub(r'[\\/:*?"<>|]+', "_", self.meta.get("title") or self.work.name).strip() or "export"
         out = self.path("export") / f"{title}.{fmt}"
-        ex.write(draft["cells"], out, fmt)
-        return out
+        res = ex.write(draft["cells"], out, fmt, fps=draft.get("fps"), cuts=self.cuts(),
+                       profile=draft.get("profile"), title=self.meta.get("title") or self.work.name)
+        return res if report else res["path"]

@@ -1,16 +1,19 @@
 # -*- coding: utf-8 -*-
 """Text helpers for 끼워 넣기 (5.9): Netflix Korean II.2 character count and line breaking.
 
+The limits (16 units, 2 lines) and the notation come from ``cboe.style``.
+
 ``units(s)``  II.2 count of one displayed line: Hangul syllables and jamo, other full-width/CJK
-              characters and symbols such as ♬ count 1; Latin letters, digits, spaces and
-              punctuation count 0.5. II.2 names Latin characters, spaces and punctuation only;
-              counting digits 0.5 is our rule (10-13 memo 5.1).
+              characters and symbols such as ♪ count 1; Latin letters, digits, spaces and
+              punctuation (of any width: ， ？ 「 too) count 0.5. II.2 names Latin characters,
+              spaces and punctuation only; counting digits 0.5 is our rule (10-13 memo 5.1).
 ``wrap(text)`` at most two lines of at most 16 units (II.2, II.4), broken at eojeol (space)
               boundaries. One line when it fits (II.4 "usually kept to one line"). Otherwise the
               break with no overflow whose two lines are closest in length, preferring a break
               after punctuation (General Requirements 4 "after punctuation marks"; a sentence end
-              more than a comma), a slightly bottom-heavy shape (I.11) and no break inside ( ) or
-              [ ] (a speaker name or a sound label). Korean particles and endings are written
+              more than a comma), a slightly bottom-heavy shape (I.11), no break inside ( ) or
+              [ ] (a speaker label or a sound label) and none between a ♪ and the lyric next to
+              it. Korean particles and endings are written
               without a space, so a space break never separates a noun from its particle; Kiwi
               adds the General Requirements 4 "should not separate" cases that a space does
               separate: a determiner from its noun (관형사 MM, "무슨 | 그림자"), an adnominal from
@@ -22,7 +25,10 @@
               layout fits, more lines (or an over-long line) come back so that ``fits`` and the
               placement checks see the overflow. The text itself is never changed: joining the
               lines with spaces gives the input with runs of white space collapsed (a word cut in
-              two joins without one).
+              two joins without one). With ``tidy`` (a function line -> displayed line, i.e.
+              ``style.tidy_line``) the lines come back as they are displayed and it is the
+              displayed width that has to fit; where to break is still scored on the text as
+              written, so a sentence end stays a preferred place although its period is not shown.
 ``fits(x)``   whether a text (or a list of lines) stays within the line and line-count limits.
 """
 from __future__ import annotations
@@ -31,8 +37,8 @@ import functools
 import threading
 import unicodedata
 
-MAX_UNITS = 16.0        # II.2
-MAX_LINES = 2           # II.4
+from . import style
+
 EPS = 1e-9
 
 _SENTENCE_END = ("…", ".", "?", "!")        # "..", "?!" end with these too
@@ -49,14 +55,16 @@ def char_units(ch: str) -> float:
         return 1.0                                   # Hangul syllables and jamo
     if ch.isascii():
         return 0.5                                   # Latin letters, digits, space, punctuation
+    cat = unicodedata.category(ch)
+    if cat[0] in "PZ":
+        return 0.5                                   # punctuation and spaces of any width: …, ·, ‘ ’, ，, ？, 「
     if unicodedata.east_asian_width(ch) in ("W", "F"):
         return 1.0                                   # CJK and other full-width characters
-    cat = unicodedata.category(ch)
-    if cat[0] in "PZ" or cat == "Nd":
-        return 0.5                                   # …, ·, ‘ ’, no-break space, other digits
+    if cat == "Nd":
+        return 0.5                                   # other digits
     if cat[0] == "L" and "LATIN" in unicodedata.name(ch, ""):
         return 0.5                                   # é, ñ, ...
-    return 1.0                                       # symbols (♬ ♪ ☎), other scripts
+    return 1.0                                       # symbols (♪ ☎), other scripts
 
 
 def units(text) -> float:
@@ -87,8 +95,10 @@ def end_bonus(piece: str) -> float:
     return 0.0
 
 
-def _spaces(text: str) -> list[tuple[int, bool]]:
-    """Positions of the spaces of ``text`` and whether each is inside ( ) or [ ]."""
+def _spaces(text: str) -> list[tuple[int, float]]:
+    """Positions of the spaces of ``text`` and the extra cost of a break there: 4 inside ( ) or
+    [ ] (a label stays whole when it can), 100 between a music note and the lyric next to it
+    (II.7: the note belongs to the text; only when no other break fits)."""
     out, depth = [], 0
     for i, ch in enumerate(text):
         if ch in "([":
@@ -96,7 +106,9 @@ def _spaces(text: str) -> list[tuple[int, bool]]:
         elif ch in ")]":
             depth = max(0, depth - 1)
         elif ch == " ":
-            out.append((i, depth > 0))
+            # after the opening note or before the closing one: an odd number of notes so far
+            by_note = style.NOTE in (text[i - 1:i], text[i + 1:i + 2]) and text.count(style.NOTE, 0, i) % 2 == 1
+            out.append((i, 100.0 if by_note else 4.0 if depth > 0 else 0.0))
     return out
 
 
@@ -213,36 +225,45 @@ def _greedy(text: str, max_units: float) -> list[str]:
     return lines
 
 
-def wrap(text, max_units: float = MAX_UNITS, max_lines: int = MAX_LINES, kiwi: bool = True) -> list[str]:
-    """Lines of ``text`` (module doc). ``kiwi=False`` skips the Kiwi hints (same feasibility)."""
+def wrap(text, max_units: float = style.MAX_UNITS, max_lines: int = style.MAX_LINES, kiwi: bool = True,
+         tidy=None) -> list[str]:
+    """Lines of ``text`` (module doc). ``kiwi=False`` skips the Kiwi hints (same feasibility);
+    ``tidy`` makes each line as it is displayed (lines that become empty are dropped)."""
     text = norm(text)
     if not text:
         return []
-    if units(text) <= max_units + EPS:
-        return [text]
+    shown = tidy or (lambda s: s)
+    whole = shown(text)
+    if units(whole) <= max_units + EPS:
+        return [whole] if whole else []
     if max_lines >= 2:
         hints = _hints(text) if kiwi else {}
         best = None
-        for i, inside in _spaces(text):
-            a, b = text[:i], text[i + 1:]
+        for i, cost in _spaces(text):
+            a, b = shown(text[:i]), shown(text[i + 1:])
             ua, ub = units(a), units(b)
             if ua > max_units + EPS or ub > max_units + EPS:
                 continue
-            score = abs(ua - ub) + (0.5 if ua > ub else 0.0) - end_bonus(a) + hints.get(i, 0.0)
-            if inside:
-                score += 4.0
+            score = abs(ua - ub) + (0.5 if ua > ub else 0.0) - end_bonus(text[:i]) + hints.get(i, 0.0) + cost
             key = (round(score, 6), i)
             if best is None or key < best[0]:
                 best = (key, a, b)
         if best is not None:
-            return [best[1], best[2]]
-    return _greedy(text, max_units)
+            return [x for x in best[1:] if x]
+    return [x for x in (shown(y) for y in _greedy(text, max_units)) if x]
 
 
-def fits(text, max_units: float = MAX_UNITS, max_lines: int = MAX_LINES) -> bool:
-    """Whether ``text`` (a string, wrapped first, or a list of lines) stays within the limits."""
-    lines = wrap(text, max_units, max_lines, kiwi=False) if isinstance(text, str) else [str(x) for x in text]
-    return len(lines) <= max_lines and all(units(x) <= max_units + EPS for x in lines)
+def fits(text, max_units: float = style.MAX_UNITS, max_lines: int = style.MAX_LINES, tidy=None) -> bool:
+    """Whether ``text`` (a string, wrapped first, or a list of lines) stays within the limits.
+    With ``tidy`` it is the displayed lines that count."""
+    def within(lines) -> bool:
+        return len(lines) <= max_lines and all(units(x) <= max_units + EPS for x in lines)
+
+    if not isinstance(text, str):
+        return within([str(x) for x in text])
+    if within(wrap(text, max_units, max_lines, kiwi=False)):
+        return True                                  # a displayed line is never wider than the written one
+    return tidy is not None and within(wrap(text, max_units, max_lines, kiwi=False, tidy=tidy))
 
 
 def line_units(lines) -> list[float]:
