@@ -179,6 +179,39 @@ def test_a_doorbell_between_the_door_and_its_verb_keeps_its_family():
     assert "car" not in cues.sfx_cue("문이 끼익 열린다.")["families"]
 
 
+@pytest.mark.parametrize("text, phrase, family", [
+    ("문이 사이렌 소리와 함께 열린다.", "[위이잉 - 사이렌]", "siren"),
+    ("현관문이 초인종 소리와 함께 열린다.", "[딩동 - 초인종]", "doorbell"),
+    ("문이 전화벨 소리와 함께 열린다.", "[따르릉 - 전화]", "phone"),
+    ("문이 빗소리와 함께 열린다.", "[쏴 - 비]", "rain"),
+    ("문이 천둥소리와 함께 열린다.", "[우르릉 - 천둥]", "thunder"),
+    ("문이 바람 소리를 내며 열린다.", "[휘잉 - 바람]", "wind"),
+    ("문이 발소리와 함께 열린다.", "[저벅저벅]", "footsteps"),
+    ("문이 웃음소리와 함께 열린다.", "[웃음]", "laughter"),
+    ("문이 경적 소리와 함께 열린다.", "[빵빵 - 경적]", "horn"),
+    ("문이 종소리와 함께 열린다.", "[댕 - 종]", "bell"),
+])
+def test_what_else_sounds_as_the_door_opens_names_the_cue(text, phrase, family):
+    """'문이 X 소리와 함께 / 소리를 내며 열린다' with X not an onomatopoeia: X sounds (the door
+    opens too: its family counts), no '[덜컥 - 문]' the script does not write."""
+    c = cues.sfx_cue(text)
+    assert c["phrase"] == phrase and family in c["families"] and "door" in c["families"]
+    assert not any("덜컥" in p for p in c["phrases"])
+
+
+def test_a_door_sound_no_table_has_stays_as_written():
+    """'문이 끽 소리를 내며 열린다': the written '끽' is the door's sound, not the usual '덜컥'; a
+    '…소리' that names nothing the door makes ('음악 소리') makes up no door sound either."""
+    for text, ono, noun in (("문이 끽 소리를 내며 열린다.", "끽", "문"), ("냉장고 문이 띵 소리를 내며 열린다.", "띵", "문"),
+                            ("철문이 끽 소리와 함께 닫힌다.", "끽", "철문")):
+        c = cues.sfx_cue(text)
+        assert c["phrase"] == f"[{ono} - {noun}]" and f"[{ono}]" in c["phrases"] and "door" in c["families"]
+        assert not any("덜컥" in p for p in c["phrases"]) and c["written_ono"]
+    for text in ("문이 음악 소리와 함께 열린다.", "문이 휘파람 소리와 함께 열린다."):
+        c = cues.sfx_cue(text)
+        assert c["phrase"] is None and not any("덜컥" in p or "문" in p for p in c["phrases"])
+
+
 @pytest.mark.parametrize("text", [
     "책상을 툭 친다.",                    # a manner word, not written as a sound
     "텅 빈 거리.",
