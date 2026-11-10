@@ -252,6 +252,75 @@ def test_the_same_words_said_twice_are_two_lines(tmp_path):
     assert line_fp(twice[0], 0) != line_fp(twice[2], 1)
 
 
+TWICE = [line("L0001", "하늘", "가자", 10.0, 10.8), line("L0002", "바다", "응", 11.5, 12.0),
+         line("L0003", "하늘", "가자", 13.0, 13.8)]
+
+
+def renumbered(lines):
+    return [dict(ln, id=f"L{k:04d}") for k, ln in enumerate(lines, 1)]
+
+
+def test_a_line_of_the_same_words_added_in_front_does_not_move_the_decision(tmp_path):
+    p = make(tmp_path, lines=TWICE, extras=[])
+    p.set_line("L0003", include=False)                          # the second '가자'
+    p.set_line("L0001", text="가자 얼른")                         # the first one
+    # read again: one more '가자' of 하늘 at the very start, every id moves by one
+    again = renumbered([line("L0000", "하늘", "가자", 5.0, 5.8)] + TWICE)
+    write_json(p.path("dialogue.json"), {"mode": "scenes", "extras": [], "lines": again})
+    got = {k: (v["start"], v["include"], v["text"]) for k, v in by_id(p.effective_lines()).items()}
+    assert got == {"L0001": (5.0, True, "가자"), "L0002": (10.0, True, "가자 얼른"),
+                   "L0003": (11.5, True, "응"), "L0004": (13.0, False, "가자")}
+    p.set_line("L0003", include=False)                          # a write keys the decisions by today's ids
+    st = read_json(p.path("review.json"))["lines"]
+    assert set(st) == {"L0002", "L0003", "L0004"} and st["L0004"]["fp"] == line_fp(again[3], 2)
+
+
+def test_a_decided_line_taken_out_of_the_script_leaves_the_other_one_alone(tmp_path):
+    p = make(tmp_path, lines=TWICE, extras=[])
+    p.set_line("L0001", include=False)                          # the first '가자'
+    again = renumbered(TWICE[1:])                               # read again: that line is gone
+    write_json(p.path("dialogue.json"), {"mode": "scenes", "extras": [], "lines": again})
+    got = {k: (v["start"], v["include"]) for k, v in by_id(p.effective_lines()).items()}
+    assert got == {"L0001": (11.5, True), "L0002": (13.0, True)}     # the '가자' at 13.0 was never touched
+    p.set_line("L0001", include=False)
+    st = read_json(p.path("review.json"))["lines"]
+    aside = [k for k in st if k.startswith("fp:")]               # kept aside, not on a line
+    assert set(st) == {"L0001"} | set(aside) and len(aside) == 1 and st[aside[0]]["include"] is False
+    # the line comes back in the script: so does its decision
+    write_json(p.path("dialogue.json"), {"mode": "scenes", "extras": [], "lines": TWICE})
+    assert not by_id(p.effective_lines())["L0001"]["include"]
+
+
+def test_lines_of_the_same_words_that_cannot_be_told_apart_get_no_decision(tmp_path):
+    same = [line("L0001", "하늘", "가자", 10.0, 10.8), line("L0002", "하늘", "가자", 12.0, 12.8)]
+    p = make(tmp_path, lines=same, extras=[])
+    p.set_line("L0001", include=False)
+    # read again with a third '가자' right behind: the neighbours no longer tell which one it was
+    again = renumbered(same + [line("L0003", "하늘", "가자", 14.0, 14.8)])
+    write_json(p.path("dialogue.json"), {"mode": "scenes", "extras": [], "lines": again})
+    assert all(v["include"] for v in p.effective_lines())
+
+
+def test_a_line_decision_of_an_older_version_goes_by_its_place_among_the_same_words(tmp_path):
+    fp = line_fp(TWICE[2], 1)                                   # stored without a context
+    p = make(tmp_path, lines=TWICE, extras=[], review={"lines": {"L0003": {"fp": fp, "include": False}}})
+    lines = by_id(p.effective_lines())
+    assert lines["L0001"]["include"] and not lines["L0003"]["include"]
+
+
+def test_the_line_where_a_name_is_shown_follows_its_line_when_the_ids_change(tmp_path):
+    ls = [line("L0001", "하늘", "가자", 10.0, 10.8), line("L0002", "바다", "응", 11.5, 12.0),
+          line("L0003", "하늘", "가자", 13.0, 13.8), line("L0004", "하늘", "어서", 15.0, 15.8)]
+    p = make(tmp_path, lines=ls, extras=[])
+    p.set_people(["하늘"], mode="generic", before="여자", reveal="line", reveal_line="L0003")
+    labels = {k: v["label_name"] for k, v in by_id(p.effective_lines()).items()}
+    assert (labels["L0001"], labels["L0003"]) == ("여자", "하늘")
+    again = renumbered([line("L0000", "하늘", "가자", 5.0, 5.8)] + ls)
+    write_json(p.path("dialogue.json"), {"mode": "scenes", "extras": [], "lines": again})
+    labels = {k: v["label_name"] for k, v in by_id(p.effective_lines()).items()}
+    assert [labels[k] for k in ("L0001", "L0002", "L0004", "L0005")] == ["여자", "여자", "하늘", "하늘"]
+
+
 # =================================================================== what the writer adds (4-05, 5-05, 7-m1)
 def test_an_extra_becomes_a_line_or_is_set_aside(tmp_path):
     p = make(tmp_path)
