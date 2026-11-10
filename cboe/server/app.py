@@ -12,6 +12,16 @@ folder's profile: the page keeps no copy of them) and, in ``export_check.guide``
 ``summary.guide``, the result of the independent guide check (``cboe.check``) on the draft.
 Sound phrases stored in an older notation ('♬ …') are shown in today's ('[…]').
 
+검수 층 (``cboe.state`` module doc): the dialogue lines are review items too. The state carries
+``lines`` (the merged lines in film order, the ones that are out with the reason: ``line_row``),
+``extras`` ('대본에 없는 말' with ``state`` open | line | ignored), ``scenes`` (scenes.json),
+``people`` (the people, when their name is told, the writer's decision, ``early``), ``added``
+(what the writer added) and the counts in ``summary.lines`` / ``summary.extras`` /
+``summary.people``. Routes: ``/api/lines/{id}`` (in / out, text, name, language, sung, start /
+end, breaks, keep), ``/api/lines/bulk``, ``/api/lines/{id}/speaker`` (a name by scope),
+``/api/extras/{id}`` (line | ignore | clear), ``/api/added`` (+ ``/{id}`` to change, DELETE to
+remove), ``/api/people``. Unknown ids are 404, values that cannot be used 400, clashes 409.
+
 Video and frames are limited to the project window [t0, t1): the page never seeks
 outside it and ``/api/frame`` clamps into it, so sealed parts of a test video are
 not shown (same rule as ``media.Media``).
@@ -37,7 +47,7 @@ from pydantic import BaseModel
 
 from .. import export as export_mod
 from .. import style
-from ..state import Project
+from ..state import EXCLUDED_KO, LINE_STATUSES, ORIGIN_KO, Conflict, Project, ReviewError
 from ..textutil import units
 from ..util import log, read_json
 
@@ -45,7 +55,9 @@ STATIC = Path(__file__).resolve().with_name("static")
 FINALS = ("include", "exclude", "check")
 KINDS = ("sfx", "music", "speaker")
 ExportFormat = Literal["srt", "vtt", "ttml"]      # export_mod.FORMATS
-INPUT_FILES = ("project.json", "items.json", "dialogue.json", "review.json", "cuts.json", "script.json")
+INPUT_FILES = ("project.json", "items.json", "dialogue.json", "review.json", "cuts.json", "script.json",
+               "scenes.json", "asr.json")
+Scope = Literal["line", "from_here", "before", "scene", "person", "speaker", "voice"]   # cboe.people.SCOPES
 
 
 # --------------------------------------------------------------------- bodies
@@ -54,7 +66,78 @@ class ItemUpdate(BaseModel):
     phrase: str | None = None
     short: str | None = None
     name: str | None = None
-    scope: Literal["line", "speaker", "voice"] | None = None
+    scope: Scope | None = None
+
+
+class LineUpdate(BaseModel):
+    """The writer's decision on one dialogue line; a field sent as null goes back to the default."""
+    include: bool | None = None
+    text: str | None = None
+    text_from: Literal["script", "heard", "writer"] | None = None
+    name: str | None = None
+    language: str | None = None
+    sung: bool | None = None
+    start: float | None = None
+    end: float | None = None
+    breaks: list[int] | None = None
+    keep: bool | None = None
+    show_name: bool | None = None          # only for a line without a speaker item
+
+
+class LinesBulk(BaseModel):
+    ids: list[str]
+    include: bool | None = None
+
+
+class SpeakerUpdate(BaseModel):
+    name: str | None = None
+    scope: Scope = "line"
+
+
+class ExtraAction(BaseModel):
+    action: Literal["line", "ignore", "clear"]
+    text: str | None = None
+    name: str | None = None
+    language: str | None = None
+    sung: bool | None = None
+    start: float | None = None
+    end: float | None = None
+
+
+class AddedNew(BaseModel):
+    kind: Literal["line", "sfx", "music"]
+    start: float
+    end: float
+    text: str | None = None
+    phrase: str | None = None
+    name: str | None = None
+    language: str | None = None
+    sung: bool | None = None
+    show_name: bool | None = None
+    breaks: list[int] | None = None
+    keep: bool | None = None
+
+
+class AddedUpdate(BaseModel):
+    start: float | None = None
+    end: float | None = None
+    text: str | None = None
+    phrase: str | None = None
+    name: str | None = None
+    language: str | None = None
+    sung: bool | None = None
+    show_name: bool | None = None
+    breaks: list[int] | None = None
+    keep: bool | None = None
+
+
+class PeopleUpdate(BaseModel):
+    """How people are labelled before their name is told (cboe.people): several at once."""
+    names: list[str]
+    mode: Literal["name", "generic"] | None = None
+    before: str | None = None
+    reveal: Literal["auto", "line", "never"] | None = None
+    reveal_line: str | None = None
 
 
 class BulkUpdate(BaseModel):
@@ -193,7 +276,50 @@ def export_warnings(chk: dict) -> list[str]:
         out.append(f"지침 검사: 의무 조항에 걸린 칸 {sm['cells_must']}개 ({sm['must']}건)")
     if sm.get("should"):
         out.append(f"지침 검사: 권고 조항에 걸린 칸 {sm['cells_should']}개 ({sm['should']}건)")
+    ln = chk.get("lines") or {}
+    for key, text in (("differs_open", "대본과 들린 말이 다른데 아직 고르지 않은 줄 {}개 (대본 글로 넣었습니다)"),
+                      ("unheard", "소리로 못 맞춰 시각을 추정한 줄 {}개"),
+                      ("no_room", "시각을 추정한 줄 가운데 자리가 없어 빠진 줄 {}개"),
+                      ("absent", "영화에 없는 장면이라 뺀 줄 {}개"),
+                      ("out_of_range", "처리 구간 밖이라 뺀 줄 {}개"),
+                      ("writer_excluded", "작가가 뺀 줄 {}개")):
+        if ln.get(key):
+            out.append(text.format(len(ln[key])))
+    if chk.get("extras_open"):
+        out.append(f"아직 정하지 않은 '대본에 없는 말' {len(chk['extras_open'])}개 (자막에 넣지 않음)")
+    if chk.get("names_early"):
+        out.append(f"이름이 밝혀지기 전에 이름 표시가 나가는 인물 {len(chk['names_early'])}명")
     return out
+
+
+ROW_KEYS = ("id", "idx", "seq", "origin", "speaker", "name", "label_name", "text", "text_from", "status", "timing",
+            "start", "end", "guess", "scene_id", "language", "source", "note", "hints", "match", "voice",
+            "speaker_item", "excluded", "extra", "breaks", "decision", "cells", "no_room")
+ROW_FLAGS = ("include", "estimated", "pinned", "decided", "show_name", "name_early", "generic", "sung", "keep")
+DIALOGUE_KEYS = ("id", "speaker", "text", "start", "end", "voice", "status", "timing")
+
+
+def line_row(ln: dict) -> dict:
+    """A merged dialogue line as the page gets it (``Project.compose``), kept small for a long film:
+    no word times; empty values, false flags (``ROW_FLAGS``) and ``origin`` / ``text_from``
+    "script" are left out; the script text, the raw script line and what was heard only where
+    they say something (``script_text`` when the shown text differs, ``asr_text`` / ``diff`` for
+    differs · unheard lines and for a text taken from what was heard); ``label`` = the label as
+    placed when the name is shown."""
+    row = {k: ln[k] for k in ROW_KEYS if ln.get(k) not in (None, [], {}, "", "script")}
+    row.update({k: True for k in ROW_FLAGS if ln.get(k)})
+    if ln.get("script_text") and ln["script_text"] != ln.get("text"):
+        row["script_text"] = ln["script_text"]
+    if ln.get("raw") and ln["raw"] != ln.get("script_text"):
+        row["raw"] = ln["raw"]
+    if ln.get("status") in ("differs", "unheard") or ln.get("text_from") == "heard":
+        row["asr_text"] = ln.get("asr_text") or ""
+        if ln.get("diff"):
+            row["diff"] = ln["diff"]
+    if ln.get("label_name") or ln.get("language"):
+        row["label"] = style.line_labels({"name": ln.get("label_name"), "language": ln.get("language")},
+                                         show_name=True)[0].strip()
+    return row
 
 
 def show_item(it: dict, lines: dict) -> dict:
@@ -202,7 +328,9 @@ def show_item(it: dict, lines: dict) -> dict:
     (``speaker.label`` '[영희/영어]', ``speaker.label_tail`` '/영어')."""
     if it.get("kind") == "speaker":
         sp = it.get("speaker") or {}
-        ln = dict(lines.get(sp.get("line_id")) or {}, name=sp.get("name"))
+        line = lines.get(sp.get("line_id")) or {}
+        # the label placement writes: '[남자1]' before the name is told (cboe.people), else the name
+        ln = dict(line, name=line.get("label_name") or sp.get("name"))
         head, _cont = style.line_labels(ln, show_name=True)
         bare, _ = style.line_labels(dict(ln, name=None), show_name=True)
         sp["label"] = head.strip()
@@ -295,6 +423,7 @@ class ReviewService:
         self.error: str | None = None
         self.exports: dict[str, Path] = {}
         self._draft: dict | None = None
+        self._comp: dict | None = None
         self._sig = None
         self._grabber: FrameGrabber | None = None
 
@@ -310,8 +439,11 @@ class ReviewService:
         return tuple(sig)
 
     def recompute(self) -> dict:
+        self._comp = None
         try:
-            self._draft = self.project.recompute()
+            comp = self.project.compose()
+            self._draft = self.project.recompute(comp)
+            self._comp = self.project.finish(comp, self._draft)    # used once by the state that follows
             self.error = None
         except Exception as exc:                       # placement is still evolving; keep the page usable
             log.exception("placement failed")
@@ -329,6 +461,7 @@ class ReviewService:
     def reload_draft(self) -> None:
         """After Project.export(), which recomputes and writes draft.json itself."""
         d = read_json(self.project.path("draft.json"))
+        self._comp = None
         if d is not None:
             self._draft = d
             self._draft.setdefault("cells", [])
@@ -363,10 +496,10 @@ class ReviewService:
             self._grabber = FrameGrabber(video)
         return self._grabber
 
-    def export_check(self) -> tuple[dict | None, str | None]:
+    def export_check(self, comp: dict | None = None, draft: dict | None = None) -> tuple[dict | None, str | None]:
         """``Project.export_check()`` and an error message when it cannot run."""
         try:
-            return self.project.export_check(), None
+            return self.project.export_check(comp=comp, draft=draft), None
         except Exception as exc:
             log.exception("export_check failed")
             return None, f"내보내기 검사 오류 · {type(exc).__name__}: {exc}"
@@ -386,9 +519,14 @@ class ReviewService:
                 st, st_error = style.get(), f"project.json · {exc}"
             lines = p.dialogue()
             by_id = {ln.get("id"): ln for ln in lines}
-            eff = [show_item(it, by_id) for it in p.effective_items()]
+            comp, self._comp = self._comp, None                  # the one placement was made from, if just made
+            if comp is None:
+                comp = p.compose(draft=draft)
+            merged = {ln["id"]: ln for ln in comp["lines"]}
+            # a speaker item of a line that is out is out of the list and the counts too
+            eff = [show_item(it, merged) for it in comp["items"] if not it.get("line_excluded")]
             cells = draft.get("cells", [])
-            no_room = {e.get("item"): e for e in draft.get("no_room", [])}
+            no_room = {e.get("item"): e for e in draft.get("no_room", []) if not e.get("line")}
 
             cells_by_ref: dict[str, list[str]] = {}
             for c in cells:
@@ -407,7 +545,7 @@ class ReviewService:
                     except PlacementError as exc:
                         it["swap_prev"] = {"error": str(exc)}
 
-            chk, chk_error = self.export_check()
+            chk, chk_error = self.export_check(comp, draft)
             guide = ((chk or {}).get("guide") or {}).get("summary") or {}
             summary = {"total": len(eff), "decided": sum(1 for it in eff if it["decided"]),
                        "final": {f: 0 for f in FINALS}, "rec": {f: 0 for f in FINALS},
@@ -427,6 +565,23 @@ class ReviewService:
                 summary["rec"][r] += 1
                 summary["kind"][k] = summary["kind"].get(k, 0) + 1
                 summary["by_kind"].setdefault(k, {x: 0 for x in FINALS})[f] += 1
+            # dialogue lines: by alignment status, in / out (and why), the writer's own; extras; people
+            script_lines = [ln for ln in comp["lines"] if ln.get("idx") is not None]
+            summary["lines"] = {
+                "total": len(script_lines), "status": {s: sum(1 for ln in script_lines if ln["status"] == s)
+                                                       for s in LINE_STATUSES},
+                "included": sum(1 for ln in comp["lines"] if ln["include"]),
+                "excluded": {r: sum(1 for ln in comp["lines"] if ln["excluded"] == r) for r in EXCLUDED_KO},
+                "added": len(comp["lines"]) - len(script_lines),
+                "estimated": sum(1 for ln in comp["lines"] if ln["include"] and ln["estimated"]),
+                "text_changed": sum(1 for ln in script_lines if ln["text"] != ln.get("script_text")),
+                "no_room": sum(1 for e in draft.get("no_room", []) if e.get("line")),
+                "differs_open": len(((chk or {}).get("lines") or {}).get("differs_open") or [])}
+            summary["extras"] = {s: sum(1 for x in comp["extras"] if x["state"] == s) for s in ("open", "line", "ignored")}
+            summary["extras"]["total"] = len(comp["extras"])
+            summary["people"] = {"total": len(comp["people"]),
+                                 "early": sum(1 for x in comp["people"] if x.get("early")),
+                                 "decided": sum(1 for x in comp["people"] if x.get("decision"))}
 
             video = meta.get("video")
             project = {"title": meta.get("title") or p.work.name, "fps": fps, "t0": t0, "t1": t1,
@@ -434,9 +589,18 @@ class ReviewService:
                        "video": bool(video and Path(video).is_file()), "video_url": "media/video",
                        "video_name": Path(video).name if video else None, "sample": bool(meta.get("sample")),
                        "work": str(p.work), "profile": st.profile}
+            added_cells = {r: [c["id"] for c in cells if r in (c.get("refs") or [])]
+                           for r in (a["id"] for a in comp["added"])}
             return {"version": self.version, "project": project,
-                    "dialogue": [{k: v for k, v in ln.items() if k != "words"} for ln in lines],
-                    "items": eff, "draft": draft, "cuts": p.cuts(), "characters": p.characters(),
+                    # the script lines as aligned (only what the older page reads; the rest is in "lines")
+                    "dialogue": [{k: ln.get(k) for k in DIALOGUE_KEYS if k in ln} for ln in lines],
+                    # the merged lines in film order (the writer's choices, why a line is out, its cells)
+                    "lines": [line_row(ln) for ln in comp["lines"]],
+                    "line_codes": {"origin": ORIGIN_KO, "excluded": EXCLUDED_KO, "status": list(LINE_STATUSES)},
+                    "extras": comp["extras"], "scenes": comp["scenes"], "people": comp["people"],
+                    "added": [dict(a, cells=added_cells.get(a["id"], []), no_room=no_room.get(a["id"]))
+                              for a in comp["added"]],
+                    "items": eff, "draft": draft, "cuts": p.cuts(), "characters": p.characters(comp["review"]),
                     # the limits and the notation the page shows and composes with (cboe.style)
                     "style": dict(st.public(), formats=list(export_mod.FORMATS)),
                     "summary": summary, "export_check": chk, "error": self.error or st_error or chk_error}
@@ -502,7 +666,7 @@ def create_app(work) -> FastAPI:
         with svc.lock:
             it = svc.item(item_id)
             if it["kind"] == "speaker" and ("phrase" in fields or "short" in fields):
-                raise HTTPException(400, "화자 항목은 대사 글을 바꾸지 않습니다")
+                raise HTTPException(400, "화자 항목은 대사 글을 바꾸지 않습니다 · 대사 글은 대사 줄 고치기로 바꿉니다")
             if it["kind"] != "speaker" and ("name" in fields or "scope" in fields):
                 raise HTTPException(400, "이름과 범위는 화자 항목에만 씁니다")
             if "phrase" in fields and fields["phrase"] is None:
@@ -540,6 +704,99 @@ def create_app(work) -> FastAPI:
                 eff = next((e for e in p.effective_items() if e["id"] == item_id), {})
                 if not (eff.get("decided") and eff.get("final") == "include"):
                     p.set_decision(item_id, decision="include")   # moving it means the writer keeps it
+            return svc.state(recompute=True)
+
+    # ---------------------------------------------------------- the review layer
+    def apply(what: str, fn, *args, **kwargs):
+        """Run a Project change; unknown ids -> 404, a value that cannot be used -> 400, a clash
+        with the work folder -> 409 (Korean messages)."""
+        try:
+            return fn(*args, **kwargs)
+        except KeyError as exc:
+            raise HTTPException(404, f"없는 {what}입니다: {exc.args[0] if exc.args else ''}") from None
+        except Conflict as exc:
+            raise HTTPException(409, str(exc)) from None
+        except ReviewError as exc:
+            raise HTTPException(400, str(exc)) from None
+
+    def sent(body: BaseModel) -> dict:
+        out = {k: getattr(body, k) for k in body.model_fields_set}
+        for k in ("text", "phrase", "name", "before"):
+            if isinstance(out.get(k), str):
+                out[k] = out[k].strip() or None
+        return out
+
+    @app.post("/api/lines/bulk")
+    def lines_bulk(body: LinesBulk):
+        """Take several dialogue lines in or out at once (include null: back to the default)."""
+        with svc.lock:
+            apply("줄", svc.project.set_lines, body.ids, body.include)
+            return svc.state(recompute=True)
+
+    @app.post("/api/lines/{line_id}")
+    def update_line(line_id: str, body: LineUpdate):
+        """A dialogue line: in / out, its text (script, heard, the writer's), name, language, sung,
+        fixed start / end, where to cut it (eojeol numbers) and 'one cell'."""
+        fields = sent(body)
+        if not fields:
+            raise HTTPException(400, "바꿀 내용이 없습니다")
+        if "language" in fields and fields["language"] is not None:
+            fields["language"] = fields["language"].strip()          # "": spoken in Korean
+        with svc.lock:
+            apply("줄", svc.project.set_line, line_id, **fields)
+            return svc.state(recompute=True)
+
+    @app.post("/api/lines/{line_id}/speaker")
+    def update_speaker(line_id: str, body: SpeakerUpdate):
+        """The name of this line and, by scope, of the same person's other lines: line ·
+        from_here · before · scene · person (older: speaker) · voice."""
+        name = (body.name or "").strip() or None
+        with svc.lock:
+            apply("줄", svc.project.set_speaker, line_id, name, body.scope)
+            return svc.state(recompute=True)
+
+    @app.post("/api/extras/{extra_id}")
+    def extra_action(extra_id: str, body: ExtraAction):
+        """'대본에 없는 말': make it a line (action line), set it aside (ignore) or undo (clear)."""
+        fields = {k: v for k, v in sent(body).items() if k != "action" and v is not None}
+        with svc.lock:
+            apply("'대본에 없는 말'", svc.project.set_extra, extra_id, body.action, **fields)
+            return svc.state(recompute=True)
+
+    @app.post("/api/added")
+    def add_item(body: AddedNew):
+        """Something the writer adds: a line, or a sound / music / other note ([음악이 멈춘다])."""
+        fields = {k: v for k, v in sent(body).items() if k != "kind"}
+        with svc.lock:
+            apply("항목", svc.project.add, body.kind, **fields)
+            return svc.state(recompute=True)
+
+    @app.post("/api/added/{added_id}")
+    def update_added(added_id: str, body: AddedUpdate):
+        fields = sent(body)
+        if not fields:
+            raise HTTPException(400, "바꿀 내용이 없습니다")
+        with svc.lock:
+            apply("항목", svc.project.update_added, added_id, **fields)
+            return svc.state(recompute=True)
+
+    @app.delete("/api/added/{added_id}")
+    def delete_added(added_id: str):
+        with svc.lock:
+            apply("항목", svc.project.delete_added, added_id)
+            return svc.state(recompute=True)
+
+    @app.post("/api/people")
+    def update_people(body: PeopleUpdate):
+        """How people are labelled: mode name (이름 그대로) | generic (before: '남자') | null, and
+        from which line the name is shown (reveal auto | line + reveal_line | never)."""
+        fields = {k: v for k, v in sent(body).items() if k != "names"}
+        if not body.names:
+            raise HTTPException(400, "인물을 하나 이상 골라야 합니다")
+        if not fields:
+            raise HTTPException(400, "바꿀 내용이 없습니다")
+        with svc.lock:
+            apply("인물", svc.project.set_people, body.names, **fields)
             return svc.state(recompute=True)
 
     # --------------------------------------------------------------- export
