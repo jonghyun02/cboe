@@ -621,7 +621,7 @@ def test_an_older_work_folder_opens_and_gives_the_same_draft(tmp_path):
     assert all(ln["status"] == "ok" and ln["include"] for ln in lines)
     chk = p.export_check()
     assert chk["lines"] == {"differs_open": [], "unheard": [], "absent": [], "out_of_range": [], "writer_excluded": [],
-                            "no_room": []} and chk["extras_open"] == []
+                            "no_room": [], "unsettled": []} and chk["extras_open"] == []
     rv = read_json(p.path("review.json"))
     assert set(rv) == {"items", "placement"}                                      # reading writes nothing
 
@@ -732,3 +732,67 @@ def test_name_display_of_lines_without_a_speaker_item(tmp_path):
     # a timed line that simply has no speaker item (an older run): no name, as before
     q = make(tmp_path / "q", items=[it for it in items_for(LINES) if it["id"] != "P0001"])
     assert not by_id(q.effective_lines())["L0001"]["show_name"]
+
+
+# =================================================================== 4차: settle 이 끝까지 맞춰짐
+LONG = "알았어 지금 바로 갈게 조금만 기다려"
+
+
+def chain_lines(step=2.25):
+    """Heard lines (long) and guessed lines (short) by turns, nobody's face seen: a guessed line
+    without room makes the next line of that person show the name, the longer label takes the room
+    of the next guessed line, and so on — more than three placements deep."""
+    who = ["하늘", "구름", "바다", "하늘", "구름"]
+    ls = [line("L0001", "바다", LONG, 18.9, 19.3),
+          line("L0002", "하늘", "음 그래", 19.5, 19.6, status="unheard", timing="voice")]
+    t, k = 20.0, 3
+    for i, w in enumerate(who):
+        ls.append(line(f"L{k:04d}", w, LONG, t, t + 0.3))
+        k += 1
+        if i + 1 == len(who):
+            break
+        ls.append(line(f"L{k:04d}", who[i + 1], "응 알아", t + 1.4, t + 1.5, status="unheard", timing="voice"))
+        k += 1
+        t += step
+    return ls
+
+
+def label_of(comp):
+    return {ln["id"]: (ln["label_name"], ln["show_name"]) for ln in comp["lines"] if ln["include"]}
+
+
+def test_settle_follows_a_chain_of_lines_without_room_to_the_end(tmp_path):
+    ls = chain_lines()
+    p = make(tmp_path, lines=ls, items=[speaker_item(x) for x in ls], extras=[])
+    comp, d = p.settle()
+    nr = sorted(e["line"] for e in d["no_room"] if e.get("line"))
+    assert set(nr) <= set(comp["unplaced"]) and "L0006" in comp["unplaced"]
+    assert label_of(comp) == label_of(p.compose(draft=d)) == label_of(p.compose(draft=read_json(p.path("draft.json"))))
+    text = {r: c["lines"][0] for c in d["cells"] for r in c["refs"]}
+    lines = by_id(comp["lines"])
+    # the line after one without a cell shows the name, in the state and in the draft alike
+    assert lines["L0007"]["show_name"] and text["L0007"].startswith("[바다] ")
+    for lid, ln in lines.items():
+        if ln["include"] and lid in text:
+            assert text[lid].startswith(f"[{ln['label_name']}] ") == ln["show_name"], lid
+    it = by_id(p.effective_items(draft=d))["P0007"]
+    assert it["final"] == "include" and not it["reason"].startswith("같은 화자가 이어 말함")
+    assert p.export_check(draft=d)["lines"]["unsettled"] == []
+    with TestClient(create_app(p.work)) as c:                                      # the first GET and the next agree
+        a, b = c.get("/api/state").json(), c.get("/api/state").json()
+        for st in (a, b):
+            assert by_id(st["lines"])["L0007"].get("show_name") and by_id(st["items"])["P0007"]["final"] == "include"
+        srt = open(c.post("/api/export", json={"format": "srt"}).json()["path"], encoding="utf-8").read()
+        assert srt.count("[바다]") == 2
+
+
+def test_settle_that_does_not_end_lists_the_lines_it_could_not_settle(tmp_path, monkeypatch):
+    from cboe import state as state_mod
+    ls = chain_lines()
+    p = make(tmp_path, lines=ls, items=[speaker_item(x) for x in ls], extras=[])
+    monkeypatch.setattr(state_mod, "SETTLE_MAX", 1)
+    comp, d = p.settle()
+    assert d["unsettled"] and label_of(comp) == label_of(p.compose(draft=d))      # the state says what compose says
+    chk = p.export_check(draft=d)
+    assert chk["lines"]["unsettled"] == d["unsettled"]
+    assert any("이름 표시가 맞춰지지 않은 줄" in w for w in export_warnings(chk))

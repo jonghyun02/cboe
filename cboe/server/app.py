@@ -291,7 +291,8 @@ def export_warnings(chk: dict) -> list[str]:
                       ("no_room", "시각을 추정한 줄 가운데 자리가 없어 빠진 줄 {}개"),
                       ("absent", "영화에 없는 장면이라 뺀 줄 {}개"),
                       ("out_of_range", "처리 구간 밖이라 뺀 줄 {}개"),
-                      ("writer_excluded", "작가가 뺀 줄 {}개")):
+                      ("writer_excluded", "작가가 뺀 줄 {}개"),
+                      ("unsettled", "배치를 거듭해도 이름 표시가 맞춰지지 않은 줄 {}개 (초안 칸의 이름 표시를 확인)")):
         if ln.get(key):
             out.append(text.format(len(ln[key])))
     if chk.get("extras_open"):
@@ -595,6 +596,7 @@ class ReviewService:
                 "estimated": sum(1 for ln in comp["lines"] if ln["include"] and ln["estimated"]),
                 "text_changed": sum(1 for ln in script_lines if ln["text"] != ln.get("script_text")),
                 "no_room": sum(1 for e in draft.get("no_room", []) if e.get("line")),
+                "unsettled": len(draft.get("unsettled") or []),
                 "differs_open": len(((chk or {}).get("lines") or {}).get("differs_open") or [])}
             summary["extras"] = {s: sum(1 for x in comp["extras"] if x["state"] == s) for s in ("open", "line", "ignored")}
             summary["extras"]["total"] = len(comp["extras"])

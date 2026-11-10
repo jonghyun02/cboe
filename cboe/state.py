@@ -57,7 +57,7 @@ import threading
 import time
 from pathlib import Path
 
-from .util import read_json, write_json
+from .util import log, read_json, write_json
 
 FINALS = ("include", "exclude", "check")
 LINE_STATUSES = ("ok", "differs", "unheard", "absent", "out_of_range")
@@ -72,6 +72,7 @@ ADDED_KINDS = ("line", "sfx", "music")
 MAX_TEXT = 1000                               # letters of a line the writer writes (a long speech is ~300)
 MAX_PHRASE = 200                              # letters of a sound or note the writer writes
 CONTINUES = "같은 화자가 이어 말함"            # the reason of a speaker item whose name a run carries
+SETTLE_MAX = 64                               # placements of one settle at most (a chain ends far sooner)
 
 
 class ReviewError(ValueError):
@@ -927,7 +928,9 @@ class Project:
         """Everything merged (module doc): ``{"items", "lines", "extras", "added", "people",
         "scenes", "unplaced"}``. ``draft``: the placement result of this composition — with it,
         items whose root went to ``no_room`` are 확인 필요 again, lines carry their cells, and a line
-        that got no cell (``unplaced``) names nobody: the line after it is no continuation of it.
+        that got no cell (``unplaced``: the draft's ``no_room`` lines and the ``unplaced`` that
+        ``settle`` keeps there from its earlier rounds) names nobody: the line after it is no
+        continuation of it.
 
         A line: the dialogue.json keys plus ``idx`` (script order; None for an added line),
         ``seq`` (film order), ``origin`` script | heard | writer, ``status`` (ok when missing),
@@ -976,7 +979,8 @@ class Project:
         _scene_of_added(lines)
         by_line = {ln["id"]: ln for ln in lines}
         eff = self._merge_items(review, items, by_line) + added_items
-        unplaced = _no_room_lines(draft) & set(by_line)       # in, but no cell in that placement
+        # in, but no cell in that placement — or in an earlier round of the same settle (draft "unplaced")
+        unplaced = (_no_room_lines(draft) | set((draft or {}).get("unplaced") or ())) & set(by_line)
         _speaker_runs(lines, eff, recommend.decide_speaker, unplaced)
         # labels: generic before the name is told, numbers per scene (cboe.people)
         shown = [ln for ln in lines if ln["include"]]
@@ -1090,23 +1094,39 @@ class Project:
         ``draft.json``, and the composition finished with it. When a line gets no cell (no_room),
         the lines after it are worked out again with that known (``compose(draft=…)``: a line
         without a cell names nobody, so the next one of the same person shows the name) and,
-        when a label changes, placed again — at most three placements."""
+        when a label changes, placed again.
+
+        The lines held as 'no cell' only grow from round to round (every no_room seen so far, kept
+        in the draft as ``unplaced``): a name shown once more is the safe side, and a chain (a line
+        without room → the next line shows the name → the longer label takes the room of the next
+        guessed line …) ends — at most one round per line. ``compose(draft=the draft)`` is then
+        the composition returned. Past ``SETTLE_MAX`` rounds the composition of the last draft is
+        returned and the lines whose label it shows otherwise than the draft are listed in the
+        draft as ``unsettled`` (export check, state)."""
         with self._lock:
             review = comp["review"] if comp is not None else self.review()
             comp = comp if comp is not None else self.compose(review)
-            for k in range(3):
+            held = set(comp.get("unplaced") or ())
+            ids = {ln["id"] for ln in comp["lines"] if ln["include"]}
+            for _ in range(min(len(ids) + 2, SETTLE_MAX)):
+                placed = _label_inputs(comp)
                 draft = self._place(comp)
-                if _no_room_lines(draft) == set(comp.get("unplaced") or ()):
+                nr = _no_room_lines(draft) & ids
+                if nr <= held:                              # nothing new without room: comp is its composition
+                    draft["unplaced"] = sorted(held)
                     comp = self.finish(comp, draft)
                     break
+                held |= nr
+                draft["unplaced"] = sorted(held)
                 again = self.compose(review, draft)         # finished with this draft
-                if _label_inputs(again) == _label_inputs(comp):
+                if _label_inputs(again) == placed:
                     comp = again                            # the same labels: this draft is its placement
                     break
-                if k == 2:                                  # does not settle: keep what was placed
-                    comp = self.finish(comp, draft)
-                    break
                 comp = again
+            else:
+                was = {x[0]: x[1:] for x in placed}
+                draft["unsettled"] = [x[0] for x in _label_inputs(comp) if was.get(x[0]) != x[1:]]
+                log.warning("배치를 %d번 해도 이름 표시가 맞춰지지 않음: %s", SETTLE_MAX, ", ".join(draft["unsettled"][:10]))
             write_json(self.path("draft.json"), draft)
             return comp, draft
 
@@ -1127,7 +1147,8 @@ class Project:
         ``lines`` counts the dialogue lines still to look at: ``differs_open`` (the script and what
         was heard differ and the writer has not chosen), ``unheard`` (in, at a guessed time),
         ``absent`` / ``out_of_range`` (out: not in the film / outside the processed part),
-        ``writer_excluded``, ``no_room`` (no cell: a guessed line squeezed between two others).
+        ``writer_excluded``, ``no_room`` (no cell: a guessed line squeezed between two others),
+        ``unsettled`` (placement did not settle: the draft may show the name otherwise, ``settle``).
         ``extras_open``: '대본에 없는 말' not decided yet. ``names_early``: people whose name is
         shown before it is told (``{"person", "line", "told"}``; told None = never called)."""
         from . import check, style
@@ -1159,7 +1180,8 @@ class Project:
                  "absent": [ln["id"] for ln in comp["lines"] if ln["excluded"] == "absent"],
                  "out_of_range": [ln["id"] for ln in comp["lines"] if ln["excluded"] == "out_of_range"],
                  "writer_excluded": [ln["id"] for ln in comp["lines"] if ln["excluded"] == "writer"],
-                 "no_room": [e for e in draft.get("no_room", []) if e.get("line")]}
+                 "no_room": [e for e in draft.get("no_room", []) if e.get("line")],
+                 "unsettled": list(draft.get("unsettled") or [])}
         early = [{"person": p["name"], "line": p["early"]["line"], "told": p["early"]["told"]}
                  for p in comp["people"] if p.get("early")]
         return {"check": pending, "check_speaker": check_speaker,
