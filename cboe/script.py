@@ -27,8 +27,9 @@ Accepted files
   on in the next row without a hyphen (a cell broken right after a long label): it names the
   speaker of those words when the name labels words elsewhere in the file or the label and the
   words would not fit on one row, and it does not read as a sound (``[전화벨]``, ``[정적]``). Each
-  row that starts with a hyphen is the line of another speaker (a two-speaker cell gives two
-  lines with the time of the cell). Times are kept (``start``/``end``) so alignment can be skipped.
+  row that starts with a hyphen, or names another speaker than the rows before it (``[가람] 가자.``
+  / ``[나래] 응.``), is the line of another speaker (a two-speaker cell gives two lines with the
+  time of the cell). Times are kept (``start``/``end``) so alignment can be skipped.
 Text files are read as UTF-8, UTF-16 (with a byte order mark) or CP949.
 
 Output (``read``)::
@@ -387,17 +388,38 @@ def _label_line(r: str, following: list[str], known: frozenset | set = frozenset
     return "/" in m.group(1) or textutil.units(f"{r} {rest}") > style.MAX_UNITS + 1e-9
 
 
-def _speaker_rows(shown: list[str]) -> list[list[str]]:
+def _row_name(row: str, following: list[str], known) -> str | None:
+    """The person a row of a cell names as its speaker: ``[나래] 응.``, ``(나래) 응.``, ``[나래]
+    [웃음]``, or ``[나래]`` alone with the words on the next row (``_label_line``); None for a row
+    that names nobody (``[쾅]``, ``(웃으며) 응.``, words alone)."""
+    m = BRACKET_NAME_RE.match(row) or PAREN_NAME_RE.match(row)
+    if not m or (m.group(2) and not LETTER_RE.search(m.group(2))):
+        return None
+    if not m.group(2) and not (row.lstrip().startswith("[") and _label_line(row, following, known)):
+        return None
+    probe = sp.parse_cue("")
+    return probe["name"] if _label(m.group(1), probe) else None
+
+
+def _speaker_rows(shown: list[str], known=None) -> list[list[str]]:
     """The rows of a cell by speaker: a row that starts with a hyphen starts the words of
     another speaker (II.5: ``- [미나] 누구세요?`` / ``- [준호] 나야``), rows without one go on with
-    the speaker before. The hyphen of a group's first row is taken off."""
+    the speaker before — except, with ``known`` (``_labelled_names``), a row that names another
+    speaker than the one its rows named (``- [가람] 가자.`` / ``[나래] 응.``: I.6, one speaker per
+    row; II.8, the speaker ID where a speaker starts). The hyphen of a group's first row is taken
+    off."""
     groups: list[list[str]] = []
-    for row in shown:
+    names: list[str | None] = []                     # the speaker each group's rows named so far
+    for k, row in enumerate(shown):
         m = HYPHEN_RE.match(row)
-        if m or not groups:
-            groups.append([row[m.end():].strip() if m else row])
+        body = row[m.end():].strip() if m else row
+        name = _row_name(body, shown[k + 1:], known) if known is not None else None
+        if m or not groups or (name and names[-1] and not _same_name(name, names[-1])):
+            groups.append([body])
+            names.append(name)
         else:
             groups[-1].append(row)
+            names[-1] = names[-1] or name
     return groups
 
 
@@ -488,7 +510,8 @@ def _subtitle_line(rows: list[str], known: set) -> tuple[dict, list[str]]:
 
 def _read_subtitle(path: Path) -> dict:
     """A timed subtitle: one line per speaker of a cell — the two rows of a two-speaker cell
-    (``- [미나] …`` / ``- [준호] …``) are two lines with the time of the cell. Such lines carry
+    (``- [미나] …`` / ``- [준호] …``, also ``[미나] …`` / ``[준호] …``: ``_speaker_rows``) are two lines
+    with the time of the cell. Such lines carry
     ``turn`` "<cell>-<speaker>" (1-based): the hyphen says they are two speakers even when no
     name is written (``- 누구야?`` / ``- 나야``), and the speaker stays None. A speaker's own sound
     written alone after the label (``[미나] [웃음]``) goes to that speaker's words in the cell; with
@@ -501,10 +524,12 @@ def _read_subtitle(path: Path) -> dict:
     known = _labelled_names(cells)
     wordless: list[dict] = []
     for n, (start, end, shown) in enumerate(cells, 1):
-        groups = _speaker_rows(shown)
+        groups = _speaker_rows(shown, known)
         read = [_subtitle_line(rows, known) for rows in groups]
         mine: list[dict] = []
+        before: list[str | None] = []              # the line before each group in the file
         for g, (cue, texts) in enumerate(read, 1):
+            before.append(b.lines[-1]["id"] if b.lines else None)
             if texts:
                 extra = {"turn": f"{n}-{g}"} if len(groups) > 1 else {}
                 mine.append(b.line(cue, _clean(" ".join(texts)), start=start, end=end, **extra))
@@ -516,7 +541,7 @@ def _read_subtitle(path: Path) -> dict:
                 to["vocal"].extend(v for v in cue["vocal"] if v not in to["vocal"])
                 continue
             w = {"id": f"W{len(wordless) + 1:04d}", "speaker": cue["name"], "vocal": list(cue["vocal"]),
-                 "start": start, "end": end, "after_line": b.lines[-1]["id"] if b.lines else None,
+                 "start": start, "end": end, "after_line": before[g - 1],
                  "raw": _clean(" ".join(r for r in rows if r))}
             if len(groups) > 1:
                 w["turn"] = f"{n}-{g}"

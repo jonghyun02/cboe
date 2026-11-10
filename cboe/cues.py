@@ -804,7 +804,8 @@ def extract(doc: dict) -> list[dict]:
     ``after_line`` / ``before_line``: the dialogue lines of the same scene right before and after
     it (a speaker's own sound: its line). A script without elements (``format`` lines) gives the
     speakers' own sounds of its lines only, and of the subtitle cells that are only such a sound
-    (``wordless``: line_id None, ``at`` = the cell's [start, end], after the line before it)."""
+    (``wordless``: line_id None, ``wordless_id`` its id there, ``at`` = the cell's [start, end],
+    after the line before it)."""
     doc = doc or {}
     elements = doc.get("elements") or []
     lines = doc.get("lines") or []
@@ -826,7 +827,7 @@ def extract(doc: dict) -> list[dict]:
                 if v and w.get("start") is not None and w.get("end") is not None:
                     add("vocal", v, scene_id=w.get("scene_id"), element_id=None, line_id=None,
                         speaker=w.get("speaker"), text=w.get("raw") or "", after_line=after, before_line=None,
-                        at=[float(w["start"]), float(w["end"])])
+                        at=[float(w["start"]), float(w["end"])], wordless_id=w.get("id"))
 
         add_alone(None)
         for ln in lines:
@@ -1172,8 +1173,10 @@ def build(doc: dict, lines: list[dict], scenes=None, span=None) -> list[dict]:
 
 
 def counts(cues: list[dict]) -> dict:
+    """How many cues, with a window, of each type; ``elements``: the script records they come from
+    (an element, a line, a subtitle cell of only a speaker's sound: ``wordless_id``)."""
     out = {"cues": len(cues), "windowed": sum(1 for c in cues if c.get("window")),
-           "elements": len({c.get("element_id") or c.get("line_id") for c in cues})}
+           "elements": len({c.get("element_id") or c.get("line_id") or c.get("wordless_id") for c in cues})}
     for t in TYPES:
         out[t] = sum(1 for c in cues if c["type"] == t)
     return out

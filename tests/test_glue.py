@@ -446,6 +446,48 @@ def test_a_speakers_sound_without_words_stays_that_speakers_sound(tmp_path):
     assert "wordless" not in script.read(g)
 
 
+def test_a_speakers_sound_without_words_keeps_its_place_in_the_file(tmp_path):
+    """The sound of a speaker without words that comes first in a cell of two (or in the middle
+    of three) goes after the line before it in the file, not after the words written below it;
+    each such cell is a script record of its own in the counts."""
+    from cboe import cues
+    f = tmp_path / "order.srt"
+    f.write_text("1\n00:00:01,000 --> 00:00:02,000\n[가람] 가자.\n\n"
+                 "2\n00:00:03,000 --> 00:00:05,000\n- [나래] [웃음]\n- [가람] 됐어.\n\n"
+                 "3\n00:00:06,000 --> 00:00:08,000\n- [가람] 됐어.\n- [나래] [웃음]\n- [다솜] 응.\n\n"
+                 "4\n00:00:09,000 --> 00:00:11,000\n[다솜] [한숨]\n", encoding="utf-8")
+    doc = script.read(f)
+    assert [(ln["id"], ln["speaker"]) for ln in doc["lines"]] == [
+        ("L0001", "가람"), ("L0002", "가람"), ("L0003", "가람"), ("L0004", "다솜")]
+    assert [(w["speaker"], w["after_line"], w.get("turn")) for w in doc["wordless"]] == [
+        ("나래", "L0001", "2-1"), ("나래", "L0003", "3-2"), ("다솜", "L0004", None)]
+    got = cues.build(doc, [dict(ln, status="ok", timing="script", aligned=True) for ln in doc["lines"]], None, (0.0, 30.0))
+    assert [(c["speaker"], c["after_line"], c["window"]) for c in got] == [
+        ("나래", "L0001", [3.0, 5.0]), ("나래", "L0003", [6.0, 8.0]), ("다솜", "L0004", [9.0, 11.0])]
+    assert [c["wordless_id"] for c in got] == [w["id"] for w in doc["wordless"]]
+    assert cues.counts(got)["elements"] == 3
+
+
+def test_a_row_that_names_another_speaker_is_that_speakers_line(tmp_path):
+    """'- [가람] 가자.' / '[나래] 응.' (no hyphen on the second row): one speaker per row (I.6), a
+    speaker ID where a speaker starts (II.8) — two lines of the cell, not 가람's '가자. 응.' with
+    나래 as his manner of speech. The same speaker named again, or a sound row, splits nothing."""
+    f = tmp_path / "mixed.srt"
+    f.write_text("1\n00:00:01,000 --> 00:00:03,000\n- [가람] 가자.\n[나래] 응.\n\n"
+                 "2\n00:00:04,000 --> 00:00:06,000\n[가람] 됐어.\n[나래] [웃음]\n\n"
+                 "3\n00:00:07,000 --> 00:00:09,000\n- [가람] 가자.\n[김나래/속마음]\n응.\n\n"
+                 "4\n00:00:10,000 --> 00:00:12,000\n[가람] 가자.\n[가람/속삭이며] 응.\n\n"
+                 "5\n00:00:13,000 --> 00:00:15,000\n[가람] 가자.\n[쾅]\n응.\n", encoding="utf-8")
+    doc = script.read(f)
+    got = [(ln["speaker"], ln["text"], ln.get("turn"), ln["delivery"], ln["source"]) for ln in doc["lines"]]
+    assert got == [("가람", "가자.", "1-1", [], None), ("나래", "응.", "1-2", [], None),
+                   ("가람", "됐어.", "2-1", [], None),
+                   ("가람", "가자.", "3-1", [], None), ("김나래", "응.", "3-2", [], "inner"),
+                   ("가람", "가자. 응.", None, ["속삭이며"], None),
+                   ("가람", "가자. 응.", None, [], None)]
+    assert [(w["speaker"], w["vocal"], w.get("turn")) for w in doc["wordless"]] == [("나래", ["웃음"], "2-2")]
+
+
 def test_a_sound_alone_on_its_row_names_nobody(tmp_path):
     # another writer's subtitle: a sound on the row above the words, without hyphens
     sounds = ["전화벨", "정적", "침묵", "문 열림", "음악 계속", "빵빵", "띵동", "멀리서", "통화 중"]
