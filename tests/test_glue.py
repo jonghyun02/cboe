@@ -11,6 +11,8 @@ import importlib.util
 import json
 from pathlib import Path
 
+import pytest
+
 from cboe import screenplay as sp
 from cboe import script
 
@@ -217,3 +219,59 @@ def test_inspect_reads_the_new_formats(tmp_path, capsys):
     assert "줄 상태: 맞음 2, 못 맞춤 1, 장면이 영상에 없음 1, 처리 구간 밖 1" in out and "대본에 없는 들린 말 1" in out
     assert "음악이 멈춤 · 소리 18.0dB 떨어짐" in out and "대본에 적힌 출처 offscreen" in out
     assert "시각 없어 건너뛴 대사 줄 2" in out
+
+
+# ------------------------------------------------------------ the command line
+def test_run_passes_the_llm_scope_and_language_detection(monkeypatch, tmp_path, capsys):
+    from cboe import pipeline
+    from cboe.__main__ import main
+    seen = []
+    monkeypatch.setattr(pipeline, "run", lambda work, stages, force, cfg: seen.append(cfg) or {})
+    assert main(["run", str(tmp_path)]) == 0
+    assert (seen[-1]["llm_scope"], seen[-1]["asr_detect_language"]) == ("all", False)      # the stages' defaults
+    assert main(["run", str(tmp_path), "--llm-scope", "useful", "--asr-detect-language", "--no-llm"]) == 0
+    assert (seen[-1]["llm_scope"], seen[-1]["asr_detect_language"], seen[-1]["llm"]) == ("useful", True, False)
+    with pytest.raises(SystemExit):
+        main(["run", str(tmp_path), "--llm-scope", "some"])
+    capsys.readouterr()
+
+
+# ------------------------------------------------------------ phrases of classes without a description
+class _Onto:
+    PARENTS = {"Wind noise (microphone)": ["Microphone", "Wind"], "Microphone": ["Sound equipment"],
+               "Speech": ["Human voice"], "Human voice": ["Human sounds"]}
+
+    def parents(self, c):
+        return self.PARENTS.get(c, [])
+
+
+def test_a_class_without_a_description_is_never_named_in_english(monkeypatch):
+    import re
+
+    from cboe import ontology, phrases
+
+    def missing():
+        raise OSError("no hierarchy on this PC")
+
+    monkeypatch.setattr(ontology, "get", missing)
+    phrases.described_parent.cache_clear()
+    plain = {"long": "[소리]", "short": "[소리]", "ono": None, "desc": "[소리]"}
+    assert phrases.phrases("Speech") == plain and phrases.phrases("Not a class at all") == plain
+    assert phrases.ko("Speech") == "소리" and phrases.ko("Not a class at all") == "소리"
+    english = re.compile(r"[A-Za-z]{3}")                      # 'TV 소리' is Korean; a class name is not
+    for cls, row in phrases.table().items():
+        said = [phrases.ko(cls)] + [v for v in phrases.phrases(cls).values() if v]
+        assert not any(cls in v for v in said), cls
+        if not row["desc"]:
+            assert not any(english.search(v) for v in said), cls
+    # with the hierarchy: the nearest described parent speaks for it
+    monkeypatch.setattr(ontology, "get", lambda: _Onto())
+    phrases.described_parent.cache_clear()
+    try:
+        assert phrases.described_parent("Wind noise (microphone)") == "Wind"
+        assert phrases.phrases("Wind noise (microphone)") == phrases.phrases("Wind")
+        assert phrases.ko("Wind noise (microphone)") == phrases.ko("Wind")
+        assert phrases.phrases("Speech") == plain              # no ancestor is described either
+        assert phrases.ko("Thunder") == "천둥"                  # a described class is as before
+    finally:
+        phrases.described_parent.cache_clear()

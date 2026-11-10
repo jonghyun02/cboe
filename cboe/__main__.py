@@ -3,6 +3,7 @@
 
     python -m cboe init <work> --video V [--script S] [--start 0] [--end 290] [--title T] [--children]
     python -m cboe run <work> [--stages a,b] [--force a,b|all] [--no-llm] [--agent-limit N]
+                              [--llm-scope all|useful] [--asr-detect-language]
     python -m cboe serve <work> [--port 8765]
     python -m cboe export <work> [--format srt|vtt|ttml]
     python -m cboe check <file.srt|.vtt|.ttml|draft.json> [--fps F] [--cuts cuts.json] [--children]
@@ -43,6 +44,10 @@ def main(argv=None):
     r.add_argument("--agent-limit", type=int, default=40, help="에이전트로 다시 볼 후보 수 한도")
     r.add_argument("--llm-model", default="sonnet")
     r.add_argument("--jobs", type=int, default=3, help="동시에 돌릴 LLM 호출 수")
+    r.add_argument("--llm-scope", choices=["all", "useful"], default="all",
+                   help="LLM 에 물을 후보: all 은 전부, useful 은 답이 추천을 바꿀 수 있는 것만")
+    r.add_argument("--asr-detect-language", action="store_true",
+                   help="받아쓰기에서 구간마다 언어를 알아낸다 (외국어 대사 표시용, 기본은 한 언어로)")
     s = sub.add_parser("serve")
     s.add_argument("work")
     s.add_argument("--port", type=int, default=8765)
@@ -86,7 +91,7 @@ def main(argv=None):
     elif args.cmd == "run":
         from . import pipeline
         cfg = {"llm": not args.no_llm, "agent_limit": args.agent_limit, "llm_model": args.llm_model,
-               "jobs": args.jobs}
+               "jobs": args.jobs, "llm_scope": args.llm_scope, "asr_detect_language": args.asr_detect_language}
         stages = [x for x in args.stages.split(",") if x] or None
         force = [x for x in args.force.split(",") if x]
         rep = pipeline.run(args.work, stages, force, cfg)

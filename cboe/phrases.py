@@ -69,9 +69,36 @@ def category(cls: str) -> str:
     return info(cls)["category"]
 
 
+SOUND = "소리"        # what a class the table does not describe is called (never its English name)
+
+
+@lru_cache(maxsize=None)
+def described_parent(cls: str) -> str | None:
+    """The nearest ancestor of ``cls`` in the AudioSet hierarchy that the table describes
+    ('Wind noise (microphone)' -> 'Wind'), or None — also when the hierarchy files are not
+    on this PC (then only the table is used)."""
+    try:
+        from . import ontology
+        onto = ontology.get()
+    except (OSError, ImportError, ValueError, KeyError):
+        return None
+    level, seen = list(onto.parents(cls)), {cls}
+    while level:
+        for p in level:
+            if info(p)["desc"] or info(p)["ono"]:
+                return p
+        seen.update(level)
+        level = sorted({q for p in level for q in onto.parents(p)} - seen)
+    return None
+
+
 def ko(cls: str) -> str:
-    """Short Korean name for lists ('자동차 경적', '천둥')."""
-    d = info(cls)["desc"] or cls
+    """Short Korean name for lists ('자동차 경적', '천둥'); a class without a description is
+    named by its described parent, else '소리'."""
+    d = info(cls)["desc"]
+    if not d:
+        parent = described_parent(cls) if not info(cls)["ono"] else None
+        return ko(parent) if parent else (info(cls)["ono"] or SOUND)
     for suf in (" 소리", "소리"):
         if d.endswith(suf) and len(d) > len(suf):
             return d[: -len(suf)].strip()
@@ -113,9 +140,18 @@ def phrases(cls: str) -> dict:
          'short': '[우르릉]',          # for a tight place (the same as long now)
          'ono':   '[우르릉 - 천둥]',    # onomatopoeia and source, or None
          'desc':  '[천둥 소리]'}        # the description
+
+    A class the table does not describe takes the captions of its described parent, else
+    '[소리]' — never its English name.
     """
     r = info(cls)
-    desc = r["desc"] or r["ono"] or cls              # a class the table does not describe: its name
+    if not r["desc"] and not r["ono"]:
+        parent = described_parent(cls)
+        if parent:
+            return phrases(parent)
+        plain = style.bracket(SOUND)
+        return {"long": plain, "short": plain, "ono": None, "desc": plain}
+    desc = r["desc"] or r["ono"]
     first = style.sfx_phrase(r["ono"], desc)
     src = source(cls) if r["ono"] else None
     return {"long": first, "short": first, "ono": style.sfx_with_source(r["ono"], src) if src else None,
