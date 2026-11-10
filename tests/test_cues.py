@@ -199,6 +199,12 @@ def test_music_cues_and_song_titles():
     m = cues.music_cue("rain cats의 slow tide가 깔리며 장면이 열린다.", context=True)
     assert m["songs"] == [{"artist": "rain cats", "title": "slow tide"}] and not m["diegetic"]
     assert m["phrase"] == "[rain cats의 'slow tide']"
+    # a title without quotes said drawn out first, then whole: the whole is the title
+    songs = cues.song_titles("자, 다음 곡은 glen moss오빠의 shine~. shine on forever!", True)
+    assert songs == [{"artist": "glen moss", "title": "shine on forever"}]
+    assert cues.title_phrases(songs[0], True)[0] == "[glen moss의 'shine on forever'가 흐른다]"
+    assert cues.song_titles("glen moss의 shine~. 다들 좋아하는 곡!", True)[0]["title"] == "shine"
+    assert cues.song_titles("glen moss의 shine. sunset drive도 이어서.", True)[0]["title"] == "shine"   # another title
     m = cues.music_cue("이내 별무리의 ‘밤길’ 선행되고")                 # an adverb is no part of the name
     assert m["songs"] == [{"artist": "별무리", "title": "밤길"}] and m["phrase"] == "[별무리의 '밤길']"
     assert cues.music_cue("MOON - Slow Night 가 흐르며 엔딩.")["songs"] == [{"artist": "MOON", "title": "Slow Night"}]

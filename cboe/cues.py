@@ -210,6 +210,7 @@ _QUOTED = rf"[{_OPEN_Q}]([^{_OPEN_Q}{_CLOSE_Q}\n]{{1,40}}?)[{_CLOSE_Q}]"
 _ARTIST = r"([A-Za-z][A-Za-z.'’]*(?:(?:\s*&\s*|\s+)[A-Za-z][A-Za-z.'’]*){0,4}(?:[가-힣]{1,3})?|[가-힣]+(?:\s[가-힣]+)?)"
 TITLE_ARTIST_Q = re.compile(_ARTIST + r"의\s*" + _QUOTED)
 TITLE_ARTIST_LATIN = re.compile(_ARTIST + r"의\s+([A-Za-z][A-Za-z0-9 ,'’!?&-]{0,40})")
+TITLE_AGAIN = re.compile(r"\s*[~～….\-]+\s*([A-Za-z][A-Za-z0-9 ,'’&-]{0,40})")   # after an unquoted title
 # 'MOON - Slow Night 가 흐르며': singer, a dash, a Latin title
 TITLE_DASH = re.compile(r"(?<![A-Za-z가-힣])([A-Za-z][A-Za-z.&'’ ]{0,24}?|[가-힣]{1,8})\s+-\s+([A-Za-z][A-Za-z0-9 ,'’!?&]{1,40})")
 # words that stand before a singer's name and are not part of it ('이내 별무리의 …', '다시 하늘별의 …')
@@ -555,8 +556,13 @@ def song_titles(text: str, context: bool) -> list[dict]:
             add(m.group(1), m.group(2), (m.start(), m.end()))
     for m in TITLE_ARTIST_LATIN.finditer(t):
         title = m.group(2).strip().rstrip("!? ")      # written without quotes: '!' is the line's, not the title's
+        end = m.end()
+        # 'the title~. the title in full!': said drawn out first, then whole — the whole is the title
+        more = TITLE_AGAIN.match(t, end)
+        if more and more.group(1).lower().startswith(title.lower() + " "):
+            title, end = more.group(1).strip().rstrip("!? "), more.end()
         if title.lower() not in LATIN_STOP and len(title.replace(" ", "")) >= 3:
-            add(m.group(1), title, (m.start(), m.end()))
+            add(m.group(1), title, (m.start(), end))
     for m in TITLE_DASH.finditer(t):
         title = m.group(2).strip()
         if title.lower() not in LATIN_STOP and m.group(1).strip().lower() not in LATIN_STOP | {"cut to"}:
