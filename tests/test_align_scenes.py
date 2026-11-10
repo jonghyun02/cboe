@@ -477,8 +477,14 @@ def test_asr_noise_shapes():
     assert align.noise_shape(["시청해", "주셔서", "감사합니다."]) == "credit"
     assert align.noise_shape(["한글자막", "by", "가나다"]) == "credit"
     assert align.noise_shape(["구독과", "좋아요"]) == "credit"
-    assert align.noise_shape(["타파", "타파", "타파"]) == "repeat"
+    assert align.noise_shape(["타파", "타파", "타파", "타파"]) == "repeat"
     assert align.noise_shape(["감사합니다", "가람씨"]) is None             # thanks someone: a real line
+    # words said in films: a credit word alone, a call two or three times (asr.hint_echo keeps it too)
+    for toks in (["시청", "앞에서", "보자."], ["자막", "좀", "켜", "봐."], ["신문", "구독", "끊었어."],
+                 ["엄마!", "엄마!"], ["가자,", "가자!"], ["타파", "타파", "타파"]):
+        assert align.noise_shape(toks) is None, toks
+    assert align.noise_shape(["자막", "제공:", "가나다"]) == "credit"
+    assert align.noise_shape(["좋아요", "구독", "부탁드려요"]) == "credit"
     assert align.noise_shape(["타파하", "코토포"]) is None and align.noise_shape(["."]) is None
     assert align.noise_shape(["baby", "코토포"]) is None                  # 'by' only as a word of its own
 

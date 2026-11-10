@@ -130,7 +130,11 @@ EXTRA_SHORT = 2       # a group of this many letters or fewer is marked "short" 
 # quantile 0.40 / 0.47. NOISE_P is not measured (no work folder has word probabilities).
 NOISE_GREETINGS = {"감사합니다", "고맙습니다", "감사해요", "고마워요", "감사드립니다", "안녕하세요", "안녕히계세요",
                    "안녕히가세요", "수고하셨습니다", "수고하세요", "시청해주셔서감사합니다", "다음영상에서만나요"}
-NOISE_CREDIT = re.compile(r"자막|구독|시청|좋아요와|알림\s*설정|(?<![A-Za-z])by(?![A-Za-z])", re.I)
+# credits as whole phrases: a word alone ('시청 앞에서', '자막 좀 켜 봐', '신문 구독') is said in films
+NOISE_CREDIT = re.compile(r"(?:한글|한국어|우리말)\s*자막|자막\s*(?:제공|제작|번역|협찬|by|[:：])|"
+                          r"구독\s*(?:과|하고|및)?\s*좋아요|좋아요\s*(?:와|및)?\s*구독|구독\s*(?:부탁|눌러)|"
+                          r"시청\s*(?:해\s*)?주셔서|알림\s*설정|(?<![A-Za-z])by(?![A-Za-z])", re.I)
+NOISE_REPEAT = 4      # one word this many times: the model's loop ('엄마! 엄마!' twice or three times is a call, asr.hint_echo)
 NOISE_P, NOISE_SPEECH, NOISE_SPEECH_UNDER_MUSIC, NOISE_MUSIC, NOISE_VAD = 0.5, 0.15, 0.4, 0.5, 0.3
 
 
@@ -1137,9 +1141,9 @@ def _gap_scene(gaps, m: float):
 
 def noise_shape(toks: list[str]) -> str | None:
     """'credit' | 'greeting' | 'repeat' when ASR words have the shape of what the ASR model
-    writes where nobody speaks: a subtitle or channel credit (NOISE_CREDIT), a greeting alone
-    or the same greeting over and over (NOISE_GREETINGS), one word said again and again; None
-    otherwise."""
+    writes where nobody speaks: a subtitle or channel credit phrase (NOISE_CREDIT), a greeting
+    alone or the same greeting over and over (NOISE_GREETINGS), one word said NOISE_REPEAT times
+    or more; None otherwise."""
     keys = [k for k in ("".join(norm_chars(t)) for t in toks) if k]
     if not keys:
         return None
@@ -1148,7 +1152,7 @@ def noise_shape(toks: list[str]) -> str | None:
     joined = "".join(keys)
     if any(len(joined) % len(g) == 0 and joined == g * (len(joined) // len(g)) for g in NOISE_GREETINGS):
         return "greeting"
-    if len(keys) > 1 and len(set(keys)) == 1:
+    if len(keys) >= NOISE_REPEAT and len(set(keys)) == 1:
         return "repeat"
     return None
 
