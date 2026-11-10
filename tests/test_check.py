@@ -272,6 +272,13 @@ def test_order_and_cells_that_cannot_be_written():
     ("뭐라고 (웃으며) 했어", ["label_parens"]),             # II.9 [ ] for sounds, anywhere in the line
     ("[지수] 나도야! (재채기)", ["label_parens"]),
     ("그 사람 (25) 왔어", []),                              # a number in parentheses is no label
+    ("(25) 살이야", []),                                    # 4th review: nor at the start of a line
+    ("오늘 (OK) 좋아", []),                                 # nor Latin letters
+    ("(OK) 좋아", []),
+    ("[결과 발표] 축하해", []),                              # 4th review: a noun that ends in 과, no two names
+    ("[사과 깎는 중] 맛있겠다", []),
+    ("[영희와 철수] 설마!", ["joint_id"]),                   # II.10 (X)
+    ("- [민수와 지혜] 가자", ["joint_id"]),
     ("[영어/피터] 안녕", ["language_last"]),                # II.8 "place the language label at the end"
     ("[피터/전화/영어] 안녕", []),
     ("[영희/혼잣말로] 가자", []),
@@ -439,6 +446,50 @@ def test_ttml_of_other_tools_is_read_in_document_order():
     assert meta["fps"] == 24 and [(c["start"], c["end"], c["lines"]) for c in cells] == [(2.0, 4.0, ["가", "나"])]
 
 
+def test_positions_and_italics_other_tools_write_are_read():
+    # 4th review: VTT line: (as to_vtt writes a top cell), SRT {\i1}, an ASS tag left in the text
+    vtt = ("WEBVTT\n\n00:01.000 --> 00:03.000 line:10%\n위\n\n00:04.000 --> 00:05.000 align:center line:0\n위 둘\n\n"
+           "00:06.000 --> 00:07.000 line:-1\n아래\n\n00:08.000 --> 00:09.000 line:85%\n아래 둘\n")
+    assert [c.get("pos", "bottom") for c in check.parse_subtitles(vtt, vtt=True)] == ["top", "top", "bottom", "bottom"]
+    srt = "1\n00:00:01,000 --> 00:00:03,000\n{\\i1}가나다{\\i0}\n\n2\n00:00:04,000 --> 00:00:05,000\n{\\b1}라마{\\b0}\n"
+    cells = check.parse_subtitles(srt)
+    assert [(c["lines"], c.get("italic", False)) for c in cells] == [(["가나다"], True), (["라마"], False)]
+    # a cell of a draft whose text holds the tag: italic once written to SRT, a tag as text in VTT and TTML
+    assert "italics" in {v["code"] for v in check.run([cell("<i>가나다라</i> 마바사")], fps=FPS)["violations"]}
+    assert "italics" not in {v["code"] for v in check.run([cell("가나 <다라>")], fps=FPS)["violations"]}
+
+
+def _tt(head, body, attrs='ttp:frameRate="24"'):
+    return ('<tt xmlns="http://www.w3.org/ns/ttml" xmlns:ttp="http://www.w3.org/ns/ttml#parameter" '
+            f'xmlns:tts="http://www.w3.org/ns/ttml#styling" {attrs}><head>{head}</head><body>{body}</body></tt>')
+
+
+def test_ttml_time_containment_and_inherited_italics():
+    # 4th review: begin on <body>/<div> is added to the times inside (TTML time containment), a <p>
+    # without times takes those of its spans, and italics come down from div, region and style chains
+    cells, _ = check.parse_ttml(_tt("", '<div begin="10s"><p begin="1s" end="3s">가</p></div>'))
+    assert [(c["start"], c["end"]) for c in cells] == [(11.0, 13.0)]
+    cells, _ = check.parse_ttml(_tt("", '<div><p begin="1s" end="2s">가</p></div>').replace("<body>", '<body begin="5s">'))
+    assert [(c["start"], c["end"]) for c in cells] == [(6.0, 7.0)]
+    cells, _ = check.parse_ttml(_tt("", '<div><p><span begin="1s" end="2s">가</span><span begin="2.5s" end="4s">나</span></p></div>'))
+    assert [(c["start"], c["end"], c["lines"]) for c in cells] == [(1.0, 4.0, ["가나"])]
+    assert check.run(cells, fps=FPS)["violations"] == []                       # no "bad_time"
+    cells, _ = check.parse_ttml(_tt("", '<div timeContainer="seq"><p dur="2s">가</p><p dur="1s">나</p></div>'))
+    assert [(c["start"], c["end"]) for c in cells] == [(0.0, 2.0), (2.0, 3.0)]
+    styles = ('<styling><style xml:id="base" tts:fontStyle="italic"/><style xml:id="s1" style="base"/>'
+              '<style xml:id="plain" tts:fontStyle="normal"/></styling>'
+              '<layout><region xml:id="r1" tts:fontStyle="italic"/><region xml:id="up" tts:displayAlign="before"/></layout>')
+    body = ('<div><p begin="1s" end="2s" style="s1">사슬</p>'                          # a style that names another
+            '<p begin="3s" end="4s" region="r1">영역</p></div>'                          # the region's style
+            '<div tts:fontStyle="italic"><p begin="5s" end="6s">물림</p>'               # from the div around it
+            '<p begin="7s" end="8s" style="plain">보통</p></div>'                       # set back on the p
+            '<div><p begin="9s" end="10s" region="up">위</p></div>')
+    cells, _ = check.parse_ttml(_tt(styles, body))
+    assert [(c["lines"][0], c.get("italic", False), c["pos"]) for c in cells] == [
+        ("사슬", True, "bottom"), ("영역", True, "bottom"), ("물림", True, "bottom"), ("보통", False, "bottom"),
+        ("위", False, "top")]
+
+
 def test_what_holds_no_cells_is_refused(tmp_path):
     with pytest.raises(ValueError, match="TTML 문서를 읽을 수 없습니다"):
         check.parse_ttml('<tt xmlns="http://www.w3.org/ns/ttml"><body><div><p begin="1s" end="2s">가 & 나</p>')
@@ -462,6 +513,9 @@ def test_what_holds_no_cells_is_refused(tmp_path):
     ("list.json", "[1, 2]"),
     ("scalar.json", '"cells"'),
     ("broken.json", "{"),
+    ("empty.srt", ""),                                      # 4th review: these passed with "걸린 조항이 없습니다"
+    ("words.srt", "이건 자막이 아님\n그냥 글\n"),
+    ("words.vtt", "WEBVTT\n\n자막 없음\n"),
 ])
 def test_command_line_says_2_for_what_it_cannot_read(tmp_path, capsys, name, body):
     from cboe.__main__ import main
@@ -482,6 +536,13 @@ def test_cuts_file_forms(tmp_path):
     assert check.load_cuts(tmp_path / "list.json") == [3.0, 4.5]
     assert check.load_cuts(tmp_path / "cuts.txt") == [5.0, 6.5]
     assert check.load_cuts([7, "x", 8.5]) == [7.0, 8.5] and check.load_cuts(None) == []
+    # 4th review: a file whose times are no numbers was read as no shot changes, and the rules looked passed
+    for name, body in (("a.json", '{"cuts": "abc"}'), ("b.json", '{"cuts": [1, "x"]}'), ("c.txt", "1.5\n열\n")):
+        (tmp_path / name).write_text(body, encoding="utf-8")
+        with pytest.raises(ValueError, match="화면 전환 시각"):
+            check.load_cuts(tmp_path / name)
+    (tmp_path / "none.json").write_text('{"fps": 24}', encoding="utf-8")
+    assert check.load_cuts(tmp_path / "none.json") == []
 
 
 def test_command_line(tmp_path, capsys):

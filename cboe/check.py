@@ -99,8 +99,11 @@ _ORDER = {code: k for k, (code, *_rest) in enumerate(RULES)}
 _HYPHEN = re.compile(r"^-\s*")
 _LABEL = re.compile(r"\[([^\[\]]*)\]")
 _LEAD_LABELS = re.compile(r"^(?:\[[^\[\]]*\]\s*)+")
-_PAREN_LABEL = re.compile(r"^(?:-\s*)?\([^()]{1,30}\)")
-_PAREN = re.compile(r"\(([^()]{1,30})\)")             # '(재채기)' anywhere in a line; '(25)' is no label
+# '(재채기)', '(빌)' at the start of a line or anywhere in it; only a parenthesis that holds Hangul is
+# taken for a label: '(25) 살이야', '오늘 (OK) 좋아' are no labels
+_PAREN_LABEL = re.compile(r"^(?:-\s*)?\((?=[^()]*[가-힣])[^()]{1,30}\)")
+_PAREN = re.compile(r"\(([^()]{1,30})\)")
+_HANGUL = re.compile(r"[가-힣]")
 # '..', '...', '.…' and, inside a line, '….': one … (I.4); '….' at the end is a line-end period (I.13)
 _DOTS = re.compile(r"\.[.…]|…\.(?!\s*$)")
 # language names, to see where a label puts its language (II.8); a name that is not here is not seen
@@ -112,14 +115,18 @@ _LANGUAGES = frozenset((
     "네팔어 스와힐리어 수어 한국어 한국말 일본말 중국말").split()) | {"표준 중국어"}
 _SENTENCE_PERIOD = re.compile(r"[^\s.…,?!\dA-Za-z．。，、][.．。]\s+[^\s\[♪]")
 _NO_SPACE_HYPHEN = re.compile(r"^-(?=[^\s\d-])")
-_JOINT = re.compile(r"^(?:-\s*)?\[[^\[\]/]*\S[와과]\s+\S[^\[\]]*\]\s*\S")
+# '[영희와 철수] 설마!': one name, 와/과, one name, and the label ends there (a speaker label before
+# its line); '[사과 깎는 중]' (three words) is no such label, nor is a common noun that ends in 과/와
+_JOINT = re.compile(r"^(?:-\s*)?\[\s*(\S+)[와과]\s+[^\s\[\]/,]+\s*\]\s*\S")
+_NOT_NAMES = frozenset("결 사 효 성 경 통 학 일 부 전 외 내 교 초 기 이 공 안 무 소".split())   # 결과 사과 … 소와
 _COMMAS, _PERIODS = ",，、", ".．。"
 _OTHER_NOTES = "♬♫♩"
 _TIME = re.compile(r"(?:(\d+):)?(\d{1,2}):(\d{1,2})[,.](\d{1,3})\s*-->\s*(?:(\d+):)?(\d{1,2}):(\d{1,2})[,.](\d{1,3})")
 _VTT_TAG = re.compile(r"</?[A-Za-z][^<>]*>|<\d+:\d[\d:.]*>")
-_SRT_TAG = re.compile(r"</?(?:i|b|u|font)(?:\s[^<>]*)?>|\{\\an?\d\}", re.I)
-_ITALIC = re.compile(r"<i[\s.>]", re.I)
-_AN_TOP = re.compile(r"\{\\an?[789]\}")
+_SRT_TAG = re.compile(r"</?(?:i|b|u|font)(?:\s[^<>]*)?>|\{\\[^{}]*\}", re.I)    # {\an8}, {\i1}: any ASS tag
+_ITALIC = re.compile(r"<i[\s.>]|\{[^{}]*\\i1[^{}]*\}", re.I)
+_AN_TOP = re.compile(r"\{[^{}]*\\an?[789][^{}]*\}")
+_VTT_LINE = re.compile(r"(?:^|\s)line:(-?\d+(?:\.\d+)?)(%?)")
 
 
 def _num(x):
@@ -138,9 +145,10 @@ def _secs(h, m, s, ms) -> float:
 
 def parse_subtitles(text: str, vtt: bool = False) -> list[dict]:
     """Cells of an SRT or VTT text in file order: ``[{"id": "#n", "start", "end", "lines"}]``.
-    Markup is not text: VTT tags, the SRT tags ``<i> <b> <u> <font>`` and ``{\\anN}`` are taken
-    out (``{\\an7}``-``{\\an9}`` put the cell on top). A cell that had ``<i>`` carries
-    ``"italic": True`` (I.10)."""
+    Markup is not text: VTT tags, the SRT tags ``<i> <b> <u> <font>`` and every ``{\\…}`` tag
+    (ASS override) are taken out. ``{\\an7}``-``{\\an9}`` and the VTT cue setting ``line:`` above
+    the middle (``line:10%``, or a line number counted from the top, ``line:0``) put the cell on
+    top. A cell that had ``<i>`` or ``{\\i1}`` carries ``"italic": True`` (I.10)."""
     cells = []
     for block in re.split(r"\n[ \t]*\n", text.replace("\r\n", "\n").replace("\r", "\n").strip()):
         rows = block.split("\n")
@@ -151,6 +159,10 @@ def parse_subtitles(text: str, vtt: bool = False) -> list[dict]:
         lines = [r for r in rows[k + 1:]]
         slanted = any(_ITALIC.search(r) for r in lines)
         top = any(_AN_TOP.search(r) for r in lines)
+        where = _VTT_LINE.search(rows[k][_TIME.search(rows[k]).end():]) if vtt else None
+        if where:
+            v = float(where.group(1))
+            top = v < 50 if where.group(2) else v >= 0      # a negative line number counts from the bottom
         if vtt:
             lines = [html.unescape(_VTT_TAG.sub("", r)) for r in lines]
         else:
@@ -199,9 +211,13 @@ def parse_ttml(text: str) -> tuple[list[dict], dict]:
 
     Each ``<p>`` is a cell; its text is gathered in document order through nested ``<span>``s,
     a ``<br/>`` ends a line wherever it is, and runs of white space are one space (TTML's default
-    ``xml:space``). A cell styled ``tts:fontStyle="italic"`` (on the ``<p>``, a ``<span>`` or a
-    style they name) carries ``"italic": True``. Raises ValueError for a document that is not
-    well-formed XML or whose root is not ``<tt>``."""
+    ``xml:space``). Times follow TTML time containment: a ``begin`` on ``<body>`` or a ``<div>``
+    is added to the times inside it, and a ``<p>`` without times takes them from its timed
+    ``<span>``s (first begin, last end). A cell styled ``tts:fontStyle="italic"`` carries
+    ``"italic": True``: on the ``<p>`` or a ``<span>``, on a ``<div>``/``<body>`` around it, on a
+    style they name (also through a style that names another one) or on their region. A cell in
+    the region "top" (or one with ``tts:displayAlign="before"``) is ``"pos": "top"``. Raises
+    ValueError for a document that is not well-formed XML or whose root is not ``<tt>``."""
     import xml.etree.ElementTree as ET
     try:
         root = ET.fromstring(text.encode("utf-8"))
@@ -221,40 +237,102 @@ def parse_ttml(text: str) -> tuple[list[dict], dict]:
     # be considered to be the effective frame rate multiplied by the effective sub-frame rate;
     # otherwise ... one (1) tick per second" (없으면 실효 fps x 서브프레임 수, fps 도 없으면 1초에 1틱)
     ticks = _num(root.get(ttp + "tickRate")) or (fps * sub if fps else 1.0)
-    italic_styles = {s.get(xml_id) for s in root.iter(tt + "style") if s.get(tts + "fontStyle") == "italic"}
+    use = fps or style.DEFAULT_FPS
+    styles = {s.get(xml_id): s for s in root.iter(tt + "style") if s.get(xml_id)}
+    regions = {r.get(xml_id): r for r in root.iter(tt + "region") if r.get(xml_id)}
 
-    def italic(el) -> bool:
-        return el.get(tts + "fontStyle") == "italic" or bool(set((el.get("style") or "").split()) & italic_styles)
+    def own_font(el, seen=()):
+        """``tts:fontStyle`` of ``el`` itself or of the styles it names (a style may name others)."""
+        if el.get(tts + "fontStyle"):
+            return el.get(tts + "fontStyle")
+        for ref in reversed((el.get("style") or "").split()):      # the later reference wins
+            s = styles.get(ref)
+            if s is not None and ref not in seen:
+                v = own_font(s, seen + (ref,))
+                if v:
+                    return v
+        return None
 
-    def gather(el, lines: list[list[str]]) -> bool:
-        """Text of the children of ``el`` into ``lines`` (the last one is open); whether any is italic."""
+    def region_font(rid):
+        r = regions.get(rid)
+        if r is None:
+            return None
+        return own_font(r) or next((s.get(tts + "fontStyle") for s in r.findall(tt + "style")
+                                    if s.get(tts + "fontStyle")), None)
+
+    def is_top(rid) -> bool:
+        r = regions.get(rid)
+        return rid == "top" or (r is not None and r.get(tts + "displayAlign") == "before")
+
+    def when(el, key):
+        return _ttml_time(el.get(key), use, ticks)
+
+    def content(el) -> bool:
+        return (el.tag.startswith(tt) if tt else True) and el.tag.rpartition("}")[2] not in ("metadata", "set", "animate")
+
+    def gather(el, lines: list[list[str]], font, offset: float, span_times: list) -> bool:
+        """Text of the children of ``el`` into ``lines`` (the last one is open); whether any is
+        italic (``font`` = the style ``el`` passes down); the times of timed <span>s, absolute."""
         slanted = False
         for child in el:
             name = child.tag.rpartition("}")[2]
             if name == "br":
                 lines.append([])
-            elif (child.tag.startswith(tt) if tt else True) and name not in ("metadata", "set", "animate"):
-                slanted |= italic(child)                       # a <span>: its text, then its children
+            elif content(child):
+                f = own_font(child) or font                    # a <span>: its text, then its children
+                slanted |= f == "italic"
+                b, e = when(child, "begin"), when(child, "end")
+                if e is None and child.get("dur") and (d := when(child, "dur")) is not None:
+                    e = (b or 0.0) + d
+                if b is not None or e is not None:
+                    span_times.append((offset + (b or 0.0), None if e is None else offset + e))
                 lines[-1].append(child.text or "")
-                slanted |= gather(child, lines)
+                slanted |= gather(child, lines, f, offset + (b or 0.0), span_times)
             lines[-1].append(child.tail or "")                 # text after the child belongs to this element
         return slanted
 
     cells = []
-    use = fps or style.DEFAULT_FPS
-    for p in root.iter(tt + "p"):
-        lines = [[p.text or ""]]
-        slanted = gather(p, lines) | italic(p)
-        begin, end = _ttml_time(p.get("begin"), use, ticks), _ttml_time(p.get("end"), use, ticks)
-        if end is None and begin is not None and p.get("dur"):
-            d = _ttml_time(p.get("dur"), use, ticks)
-            end = None if d is None else begin + d
-        c = {"id": p.get(xml_id) or f"#{len(cells) + 1}", "start": begin, "end": end,
+
+    def walk(el, offset: float, font, region):
+        """TTML time containment: a time is counted from the begin of the element around it (body,
+        div; in a ``timeContainer="seq"`` from the end of the one before); a style, a region and
+        the region's style pass down to what is inside. Returns the end of ``el`` (s) or None."""
+        if not content(el):
+            return None
+        region = el.get("region") or region
+        font = own_font(el) or font
+        b = when(el, "begin")
+        if el.tag.rpartition("}")[2] != "p":
+            start, last, seq = offset + (b or 0.0), None, el.get("timeContainer") == "seq"
+            for child in el:
+                end = walk(child, last if seq and last is not None else start, font, region)
+                if end is not None:
+                    last = end if seq or last is None else max(last, end)
+            return last
+        lines, span_times = [[el.text or ""]], []
+        f = font or region_font(region)
+        slanted = gather(el, lines, f, offset + (b or 0.0), span_times) | (f == "italic")
+        e = when(el, "end")
+        if e is None and el.get("dur"):
+            d = when(el, "dur")
+            if d is not None:
+                b = 0.0 if b is None else b                    # no begin: the begin of the container
+                e = b + d
+        begin, end = (None if b is None else offset + b), (None if e is None else offset + e)
+        if begin is None and end is None and span_times:     # the times are on the <span>s
+            begin = min(s for s, _e in span_times)
+            ends = [x for _s, x in span_times if x is not None]
+            end = max(ends) if ends else None
+        c = {"id": el.get(xml_id) or f"#{len(cells) + 1}", "start": begin, "end": end,
              "lines": [t for t in (" ".join("".join(x).split()) for x in lines) if t],
-             "pos": "top" if p.get("region") == "top" else "bottom"}
+             "pos": "top" if is_top(region) else "bottom"}
         if slanted:
             c["italic"] = True
         cells.append(c)
+        return end
+
+    for body in root.iter(tt + "body"):
+        walk(body, 0.0, None, None)
     return cells, {"fps": fps}
 
 
@@ -287,7 +365,10 @@ def load(source) -> tuple[list[dict], dict]:
                 raise ValueError("draft.json 은 칸 목록이나 {\"cells\": [...]} 이어야 합니다")
             return load(data)
         if ext in (".srt", ".vtt"):
-            return parse_subtitles(text, vtt=ext == ".vtt"), {}
+            cells = parse_subtitles(text, vtt=ext == ".vtt")
+            if not cells:                                 # an empty file or one that holds no subtitle
+                raise ValueError(f"자막 칸을 찾지 못했습니다: {path.name} (시각 줄 '00:00:01,000 --> 00:00:02,000' 이 없음)")
+            return cells, {}
         if ext in (".ttml", ".xml", ".dfxp"):
             return parse_ttml(text)
         raise ValueError(f"검사할 수 없는 파일 형식입니다: {path.name} (srt · vtt · ttml · draft.json)")
@@ -296,19 +377,24 @@ def load(source) -> tuple[list[dict], dict]:
 
 def load_cuts(source) -> list[float]:
     """Shot-change times (s) from ``cuts.json`` ({"cuts": [...]}), a JSON list, or a text file with
-    one time a line; a list comes back as it is."""
+    one time a line; a list comes back as it is. A file whose times are not numbers ({"cuts":
+    "abc"}, words) raises ValueError: shot-change rules quietly left out would look passed."""
     if source is None:
         return []
     if not isinstance(source, (str, Path)):
         return [v for v in (_num(x) for x in source) if v is not None]
-    text = Path(source).read_text(encoding="utf-8-sig")
+    path = Path(source)
+    text = path.read_text(encoding="utf-8-sig")
     try:
         data = json.loads(text)
     except ValueError:
         data = text.split()
     if isinstance(data, dict):
-        data = data.get("cuts") or []
-    return [v for v in (_num(x) for x in data) if v is not None]
+        data = data.get("cuts")
+        data = [] if data is None else data
+    if not isinstance(data, list) or any(_num(x) is None for x in data):
+        raise ValueError(f"화면 전환 시각을 읽을 수 없습니다: {path.name} (초 단위 숫자 목록이어야 함)")
+    return [_num(x) for x in data]
 
 
 # --------------------------------------------------------------------------- text rules
@@ -367,13 +453,14 @@ def _text_rules(lines: list[str]):
             yield "sentence_period", k, line
         if _DOTS.search(line):
             yield "dots", k, line
-        if _PAREN_LABEL.match(line) or any(any(ch.isalpha() for ch in m.group(1)) for m in _PAREN.finditer(line)):
+        if _PAREN_LABEL.match(line) or any(_HANGUL.search(m.group(1)) for m in _PAREN.finditer(line)):
             yield "label_parens", k, line
         if any(ch in line for ch in _OTHER_NOTES):
             yield "note_glyph", k, line
         if _NO_SPACE_HYPHEN.match(line):
             yield "hyphen", k, line
-        if _JOINT.match(line):
+        m = _JOINT.match(line)
+        if m and m.group(1) not in _NOT_NAMES:
             yield "joint_id", k, line
     starts = [x.startswith("- ") for x in lines]
     if len(lines) >= 2 and any(starts) and not all(starts) and not any(_NO_SPACE_HYPHEN.match(x) for x in lines):
@@ -461,7 +548,9 @@ def run(source, fps=None, cuts=None, profile=None) -> dict:
             add("max_duration", k)
         for code, n, text in _text_rules(texts[k]):
             add(code, k, line=n, text=text)
-        if c.get("italic"):
+        # a file marks italics (read as "italic"); a cell's own text that holds '<i>' or '{\i1}' is
+        # italic once written to SRT, and shows the tag as text in VTT and TTML: both break I.10
+        if c.get("italic") or any(_ITALIC.search(x) for x in texts[k]):
             add("italics", k)
 
     timed = [k for k in range(len(cells)) if start[k] is not None and end[k] is not None]

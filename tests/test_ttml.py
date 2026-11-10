@@ -100,6 +100,26 @@ def test_ttml_gives_back_the_seconds_of_the_srt(fps):
         assert abs(a["start"] - b["start"]) <= half and abs(a["end"] - b["end"]) <= half, (fps, a, b)
 
 
+@pytest.mark.parametrize("fps, end, start", [
+    (29999 / 1251, 1128.44, 1128.523),      # ffprobe's rate of a real video (23.98002): its own rate in the header
+    (23.98, 877.648, 877.731)])             # a rounded rate (written as 24 x 1000/1001): the gap is kept
+def test_two_frames_between_cells_stay_two_frames_in_the_file(tmp_path, fps, end, start):
+    # 4th review: TTML rounded each time at 23.976 on its own, so a 2-frame gap of a 23.98 draft became
+    # 1 frame ("간격 2프레임 미만" in the file, not in the check the server showed)
+    cells = [cell("C0001", round(end - 1.5, 3), end, ["가나다"]), cell("C0002", start, round(start + 1.5, 3), ["라마바"])]
+    draft = check.run({"cells": cells, "fps": fps})
+    assert draft["violations"] == [] and round(start * fps) - round(end * fps) == 2
+    if fps != 23.98:
+        assert export.frame_rate(fps) == (24, "29999 30024") and export.effective_rate(fps) == pytest.approx(fps)
+    path = export.write(cells, tmp_path / "a.ttml", "ttml", fps=fps)["path"]
+    got, meta = check.parse_ttml(path.read_text(encoding="utf-8"))
+    (b1, e1), (b2, e2) = [(round(c["start"] * meta["fps"]), round(c["end"] * meta["fps"])) for c in got]
+    assert b2 - e1 == 2                                       # in the file's own frames
+    assert check.run(path, fps=fps)["violations"] == []       # what `python -m cboe check --fps` says
+    assert check.run(path)["violations"] == []                # and at the rate the header states
+    assert export.write(cells, tmp_path / "b.ttml", "ttml", fps=fps)["check"]["violations"] == []
+
+
 def test_characters_xml_cannot_hold_are_left_out():
     text = export.to_ttml([cell("C1", 1.0, 2.0, ["가\x02나\x1f", "\x0b다￾"])], 24, title="제\x00목")
     root = parse(text)                                        # still well-formed
@@ -123,8 +143,9 @@ def test_write_ttml_and_what_it_refuses(tmp_path):
     assert res["path"].read_bytes().decode("utf-8") == export.to_ttml(CELLS, FPS, "제목")
     assert b"\r\n" not in res["path"].read_bytes()
     assert res["check"]["fps"] == FPS
-    found = [(v["cell"], v["code"]) for v in res["check"]["violations"]]
-    assert found == [("C0001", "order")]                  # CELLS is not in time order; the file is
+    # CELLS is not in time order, the file is: the check is the check of the file (4th review)
+    assert [(v["cell"], v["code"]) for v in check.run({"cells": CELLS, "fps": FPS})["violations"]] == [("C0001", "order")]
+    assert res["check"]["violations"] == []
     with pytest.raises(ValueError, match="fps"):          # frames cannot be written without the frame rate
         export.write(CELLS, tmp_path / "b.ttml", "ttml")
     with pytest.raises(ValueError):

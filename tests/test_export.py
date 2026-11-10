@@ -65,6 +65,34 @@ def test_write_returns_the_guide_check_with_the_drafts_frame_rate(tmp_path):
     assert kids["profile"] == "children" and [v["message"] for v in kids["violations"]] == ["초당 11자 초과"]
 
 
+def test_srt_writes_a_top_cell_with_an8_and_both_formats_keep_it(tmp_path):
+    # 4th review: the SRT writer left the position out, so a top cell came back at the bottom
+    cells = [cell("C0001", 1.0, 2.0, ["위에 뜨는 줄", "둘째 줄"]), cell("C0002", 3.0, 4.0, ["아래 줄"])]
+    cells[0]["pos"] = "top"
+    srt = export.to_srt(cells)
+    assert "00:00:01,000 --> 00:00:02,000\n{\\an8}위에 뜨는 줄\n둘째 줄\n" in srt and srt.count("{\\an") == 1
+    from cboe import check
+    for fmt in ("srt", "vtt"):
+        path = export.write(cells, tmp_path / f"top.{fmt}", fmt, fps=FPS)["path"]
+        got, _meta = check.load(path)
+        assert [c.get("pos", "bottom") for c in got] == ["top", "bottom"], fmt
+        assert got[0]["lines"] == ["위에 뜨는 줄", "둘째 줄"]                      # the tag is no text
+
+
+def test_write_returns_the_check_of_the_file_it_wrote(tmp_path):
+    # 4th review: the check was run on the cells, not on the file, so the two could disagree (a
+    # TTML frame lost in rounding; '<i>' in a line is italics in the SRT file). The ids are the draft's.
+    cells = [cell("C0001", 1.0, 2.5, ["<i>가나다라</i> 마바사"]), cell("C0002", 3.0, 4.5, ["아자차"])]
+    from cboe import check
+    assert "italics" in {v["code"] for v in check.run({"cells": cells, "fps": FPS})["violations"]}
+    res = export.write(cells, tmp_path / "i.srt", "srt", fps=FPS)
+    again = check.run(res["path"], fps=FPS)
+    assert [(v["code"], v["index"]) for v in res["check"]["violations"]] == \
+           [(v["code"], v["index"]) for v in again["violations"]]
+    assert [(v["cell"], v["code"]) for v in res["check"]["violations"] if v["code"] == "italics"] == [("C0001", "italics")]
+    assert export.write([], tmp_path / "none.srt", "srt", fps=FPS)["check"]["cells"] == 0   # nothing written: no error
+
+
 def test_write_refuses_cells_that_cannot_be_written(tmp_path):
     for bad in (cell("C0001", 2.0, 2.0, ["가"]), cell("C0001", 1.0, 2.0, ["  "]), cell("C0001", None, 2.0, ["가"])):
         with pytest.raises(ValueError):
