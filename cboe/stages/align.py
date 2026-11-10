@@ -87,7 +87,8 @@ EDGE_S = 1.0          # a window starting / ending farther than this from the fi
 # has at least OUT_RUN_LINES lines, or when it was squeezed into less than half the time its
 # characters need. Shorter runs stay (unheard), as before. Not tuned on data.
 OUT_RUN_LINES = 5
-ROOM_MIN = 1.0        # s of unclaimed ASR words or voice a scene that was not found needs to be there
+ROOM_MIN = 1.0        # s of unclaimed ASR words or voice scenes that were not found need to be there
+                      # (half the time their lines take, when that is less)
 # a scene not found by 3-grams is found by its lines with this many anchored letters (or this
 # share of its letters, for a short scene)
 FOUND_BY_LINES, FOUND_BY_SHARE = 6, 0.4
@@ -615,13 +616,16 @@ def _align_scenes(p, doc: dict, words: list[dict], t_lo: float, t_hi: float, hea
         g0 = edge_time(prev, False) + 0.05 if prev is not None else t_lo
         g1 = edge_time(nxt, True) - 0.05 if nxt is not None else t_hi
         sid = us[uis[0]]["scene_id"] if len({us[ui]["scene_id"] for ui in uis}) == 1 else None
-        if g1 - g0 >= ROOM_MIN:
+        # room: ROOM_MIN s of speech, or half the time the lines need when they are shorter
+        need = min(ROOM_MIN, 0.5 * sum(max(0.3, SEC_PER_CHAR * len(norm_chars(str(lines[i].get("text") or ""))))
+                                       for i in idx))
+        if g1 - g0 >= need:
             gaps.append((g0, g1, sid))
         k0, k1 = bisect.bisect_left(starts, g0), bisect.bisect_right(starts, g1)
         room = sum(float(words[k]["e"]) - float(words[k]["s"]) for k in range(k0, k1) if k not in claimed)
-        if g1 - g0 >= ROOM_MIN and room < ROOM_MIN:
+        if g1 - g0 >= need and room < need:
             room += sum(r[1] - r[0] for r in voice.regions(g0, g1))
-        if g1 - g0 < ROOM_MIN or room < ROOM_MIN:
+        if g1 - g0 < need or room < need:
             for i in idx:
                 out[i] = _no_time(lines[i], ABSENT, (g0, g1) if g1 > g0 else None)
             for ui in uis:
@@ -636,7 +640,9 @@ def _align_scenes(p, doc: dict, words: list[dict], t_lo: float, t_hi: float, hea
                 loc[ui]["how"] = "lines"
                 continue
             state[ui] = "unknown"
-            if len(us[ui]["grams"]) >= LONG_SCENE_GRAMS:
+            # lines outside every scene (before the first scene heading: a cover or cast page the
+            # reader took for dialogue) are not kept on a guess either
+            if len(us[ui]["grams"]) >= LONG_SCENE_GRAMS or us[ui]["scene_id"] is None:
                 for i in us[ui]["idx"]:
                     claimed.difference_update(heard_g.pop(i, []))
                     _set_no_time(out[i], ABSENT, (g0, g1))
@@ -740,7 +746,7 @@ def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str
     both sides and differ by one jamo per syllable (에요/예요, 쨰/째) and that holds none of
     ``names`` (the ASR mishears names that way): the line gets the hint "spelling" (감사
     1-m3; a hint only, the script text is kept). ``"number"``: the differing letters have
-    digits (5주 / 오 주; not compared). Returns (diff, hints)."""
+    digits (3층 / 삼 층; not compared). Returns (diff, hints)."""
     keys = [k for k in ("".join(norm_chars(str(n))) for n in names or ()) if len(k) >= 2]
     sw = text.split()
     s_c, s_o, h_c, h_o = [], [], [], []
@@ -779,8 +785,17 @@ def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str
         h_txt = " ".join(heard[j] for j in sorted(c["h"]))
         row = {"kind": "word", "script": s_txt, "heard": h_txt,
                "at": [min(c["s"]), max(c["s"]) + 1] if c["s"] else None}
-        alike = all(len(a) != len(b) or len(a) < 2 or _spelling_like(a, b) for a, b in c["sub"])
         s_key, h_key = "".join(norm_chars(s_txt)), "".join(norm_chars(h_txt))
+        if any(not a or not b for a, b in c["sub"]) and not (s_key and h_key):
+            alike = True                       # a short word not heard / heard in addition
+        else:
+            # letters swapped: one, or letters one jamo apart (sound-alike); letters added or lost
+            # inside words: most letters kept on both sides
+            alike = all(len(a) < 2 or _spelling_like(a, b) for a, b in c["sub"] if len(a) == len(b))
+            if alike and any(len(a) != len(b) for a, b in c["sub"]):
+                kept_s = len(s_key) - sum(len(a) for a, _ in c["sub"])
+                kept_h = len(h_key) - sum(len(b) for _, b in c["sub"])
+                alike = kept_s >= 0.5 * len(s_key) and kept_h >= 0.5 * len(h_key)
         if any(ch.isdigit() for a, b in c["sub"] for ch in a + b):
             row["kind"] = "number"
         elif c["n"] <= MINOR_CHARS and alike:
@@ -816,8 +831,7 @@ def _edge_out(out: list[dict], t_lo: float, t_hi: float, head_cut: bool, tail_cu
     return n
 
 
-def _finish(out: list[dict], words: list[dict], heard_g: dict, t_lo: float, t_hi: float,
-            head_cut: bool, tail_cut: bool, names=()) -> list[dict]:
+def _finish(out: list[dict], words: list[dict], heard_g: dict, names=()) -> list[dict]:
     """Statuses and what was heard over each line (``asr_text``, ``diff``, ``hints``)."""
     names = set(names or ()) | {ln.get("speaker") for ln in out if ln.get("speaker")}
     for r in out:
@@ -973,7 +987,7 @@ def run(p, cfg: dict) -> dict:
             seq = [r for r in lines if r.get("status") not in NO_TIME]
             _place_unaligned(voice, seq, t_lo, t_hi)
             mode = "aligned"
-        _finish(lines, words, heard_g, t_lo, t_hi, head_cut, tail_cut, script.get("characters"))
+        _finish(lines, words, heard_g, script.get("characters"))
         extras = _extras(lines, words, heard_g, hotwords, gaps)
     write_json(p.path("dialogue.json"), {"mode": mode, "extras": extras, "lines": lines})
     rows = _scene_rows(script, lines, info) if script and script.get("lines") else []

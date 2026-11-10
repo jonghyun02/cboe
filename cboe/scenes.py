@@ -6,8 +6,10 @@ to letters and digits (``align.norm_chars``, spaces and punctuation dropped) and
 character 3-grams. Every 3-gram that also occurs in the ASR letter stream votes with the time
 where it occurs (a 3-gram that occurs very often in the stream does not vote). A window of
 ``span`` seconds (SPAN_PER_CHAR s per letter of the unit, at least SPAN_MIN) scores the share
-of the unit's distinct 3-grams that occur inside it; the found interval is the first to the
-last voting 3-gram of the window, isolated votes at its edges trimmed.
+of the unit's distinct 3-grams that occur inside it; the found interval is the shortest stretch
+of the window holding CORE_SHARE of those 3-grams (a scene shares words with its neighbours, and
+their votes would stretch the interval over them). The interval is a core: the lines are matched
+over the whole time up to the neighbouring found scenes (``align._align_scenes``).
 
 1. Skeleton: up to CANDIDATES windows per unit with score >= STRONG and >= MIN_HITS 3-grams,
    searched over the whole processing window with no order constraint. The chain of candidates
@@ -30,6 +32,7 @@ they are searched again only between found scenes. Not validated on a second fil
 """
 from __future__ import annotations
 
+import math
 from collections import Counter, defaultdict
 
 from .stages.align import _asr_chars, norm_chars
@@ -41,7 +44,7 @@ MIN_HITS, MIN_HITS_WEAK, MOVED_HITS = 4, 3, 8
 CANDIDATES = 3
 SPAN_MIN, SPAN_PER_CHAR = 25.0, 0.3
 COMMON_PER, COMMON_MIN = 350, 10   # a 3-gram seen more than max(COMMON_MIN, letters / COMMON_PER) times does not vote
-TRIM_GAP = 6.0                # s: a vote this far from the next one at a window edge is dropped
+CORE_SHARE = 0.8             # the found interval: the shortest stretch with this share of the window's 3-grams
 OVERLAP_TOL = 2.0             # s two found scenes may overlap and still be in order
 
 
@@ -107,11 +110,7 @@ def windows(hits: list[tuple[float, int]], n_grams: int, span: float, k: int = C
     for d, left, right in rows:
         if any(ts[left] <= p["wb"] and ts[right - 1] >= p["wa"] for p in picked):
             continue
-        lo, hi = left, right
-        while hi - lo > 2 and ts[lo + 1] - ts[lo] > TRIM_GAP:
-            lo += 1
-        while hi - lo > 2 and ts[hi - 1] - ts[hi - 2] > TRIM_GAP:
-            hi -= 1
+        lo, hi = _core(hits, left, right, d)
         picked.append({"a": round(ts[lo], 3), "b": round(ts[hi - 1] + 0.3, 3), "hits": d,
                        "score": round(d / n_grams, 3), "wa": ts[left], "wb": ts[right - 1]})
         if len(picked) >= k:
@@ -119,6 +118,27 @@ def windows(hits: list[tuple[float, int]], n_grams: int, span: float, k: int = C
     for p in picked:
         del p["wa"], p["wb"]
     return picked
+
+
+def _core(hits: list[tuple[float, int]], left: int, right: int, d: int) -> tuple[int, int]:
+    """The shortest run of hits[left:right] holding CORE_SHARE of its ``d`` distinct 3-grams: the
+    window without the stray votes at its edges (3-grams the scene shares with its neighbours)."""
+    need = max(1, math.ceil(CORE_SHARE * d))
+    cnt: Counter = Counter()
+    best, r = (left, right), left
+    for lo in range(left, right):
+        while r < right and len(cnt) < need:
+            cnt[hits[r][1]] += 1
+            r += 1
+        if len(cnt) < need:
+            break
+        if hits[r - 1][0] - hits[lo][0] < hits[best[1] - 1][0] - hits[best[0]][0]:
+            best = (lo, r)
+        g = hits[lo][1]
+        cnt[g] -= 1
+        if not cnt[g]:
+            del cnt[g]
+    return best
 
 
 def _chain(cands: list[tuple[int, dict]]) -> list[tuple[int, dict]]:
