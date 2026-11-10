@@ -279,6 +279,12 @@ def test_order_and_cells_that_cannot_be_written():
     ("[사과 깎는 중] 맛있겠다", []),
     ("[영희와 철수] 설마!", ["joint_id"]),                   # II.10 (X)
     ("- [민수와 지혜] 가자", ["joint_id"]),
+    ("[영희와 철수/속마음] 설마!", ["joint_id"]),            # 4th round check: the source, manner or
+    ("[영희와 철수/영어] 설마!", ["joint_id"]),              # language after the names (II.8) hid it
+    ("- [민수와 지혜/전화] 가자", ["joint_id"]),
+    ("[영희와 철수/속마음/영어] 설마!", ["joint_id"]),
+    ("[결과 발표/영상] 축하해", []),
+    ("[사과 깎는 중/속마음] 맛있겠다", []),
     ("[영어/피터] 안녕", ["language_last"]),                # II.8 "place the language label at the end"
     ("[피터/전화/영어] 안녕", []),
     ("[영희/혼잣말로] 가자", []),

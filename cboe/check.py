@@ -121,8 +121,10 @@ _LANGUAGES = frozenset((
 _SENTENCE_PERIOD = re.compile(r"[^\s.…,?!\dA-Za-z．。，、][.．。]\s+[^\s\[♪]")
 _NO_SPACE_HYPHEN = re.compile(r"^-(?=[^\s\d-])")
 # '[영희와 철수] 설마!': one name, 와/과, one name, and the label ends there (a speaker label before
-# its line); '[사과 깎는 중]' (three words) is no such label, nor is a common noun that ends in 과/와
-_JOINT = re.compile(r"^(?:-\s*)?\[\s*(\S+)[와과]\s+[^\s\[\]/,]+\s*\]\s*\S")
+# its line) or goes on with what follows a name in a label ('[영희와 철수/속마음]', '/영어': source,
+# manner and language come after the name, II.8); '[사과 깎는 중]' (three words) is no such label,
+# nor is a common noun that ends in 과/와
+_JOINT = re.compile(r"^(?:-\s*)?\[\s*(\S+)[와과]\s+[^\s\[\]/,]+\s*(?:/[^\[\]]*)?\]\s*\S")
 _NOT_NAMES = frozenset("결 사 효 성 경 통 학 일 부 전 외 내 교 초 기 이 공 안 무 소".split())   # 결과 사과 … 소와
 _COMMAS, _PERIODS = ",，、", ".．。"
 _OTHER_NOTES = "♬♫♩"
