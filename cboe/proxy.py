@@ -21,8 +21,9 @@ frame about every second (fast seeking), ``+faststart``. Its 0 s is the film's t
   video stream and the first sound stream are used; the frame rate is not changed.
 * ``build(work, meta, ...)`` — runs it (``-progress`` → ``on_progress(0..1)``) into
   ``review.mp4.<pid>.part`` (a name of this process only), checks the result (ffprobe: one H.264
-  video, an AAC sound when the source has one, the length of the window; a second at the start,
-  the middle and the end decodes without an error), renames it when done and writes
+  video, an AAC sound when the source has one, the length of the window — shorter only where the
+  source's picture and sound end, e.g. before a longer subtitle track; a second at the start,
+  the middle and the end decodes without an error of the decoder), renames it when done and writes
   ``review.mp4.json`` = ``{"video", "size", "mtime", "t0", "t1", "encoder", "width", "height"}``.
   The whole build holds ``review.mp4.lock`` (``filelock``, as ``pipeline.run`` holds
   ``.run.lock``): a second build of the same work folder — another ``Worker`` in this process
@@ -41,6 +42,7 @@ from __future__ import annotations
 import atexit
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -87,6 +89,15 @@ def _have(tool: str) -> bool:
     return shutil.which(tool) is not None
 
 
+def _secs(text) -> float | None:
+    """Seconds as ffprobe writes them ('12.5'), None for 'N/A' or nothing."""
+    try:
+        v = float(text)
+    except (TypeError, ValueError):
+        return None
+    return v if abs(v) != float("inf") and v == v else None
+
+
 def _rate(text) -> float:
     try:
         num, _, den = str(text or "0/1").partition("/")
@@ -101,8 +112,9 @@ def probe(path, timeout: float = 60.0) -> dict:
     """ffprobe of a media file: the keys of ``util.ffprobe`` (duration, fps, width, height,
     has_audio) and ``format`` (ffprobe format_name, e.g. ``matroska,webm``), ``ext`` (lower-case
     suffix), ``vcodec`` / ``acodec`` (codec_name or None), ``vindex`` / ``aindex`` (stream index
-    of the first video stream that is not a cover picture and of the first sound stream) and
-    ``sar`` (sample aspect ratio, 1.0 when not given). Raises when ffprobe fails."""
+    of the first video stream that is not a cover picture and of the first sound stream),
+    ``sar`` (sample aspect ratio, 1.0 when not given) and ``start`` (the file's start time: what
+    ``-ss`` counts from). Raises when ffprobe fails."""
     out = subprocess.run([FFPROBE, "-v", "error", "-print_format", "json", "-show_streams", "-show_format",
                           str(path)], capture_output=True, text=True, encoding="utf-8", errors="replace",
                          check=True, timeout=timeout, creationflags=NO_WINDOW).stdout
@@ -122,7 +134,7 @@ def probe(path, timeout: float = 60.0) -> dict:
             "ext": Path(str(path)).suffix.lower(),
             "vcodec": v.get("codec_name") if v else None, "acodec": a.get("codec_name") if a else None,
             "vindex": v.get("index") if v else None, "aindex": a.get("index") if a else None,
-            "sar": sar if sar > 0 else 1.0}
+            "sar": sar if sar > 0 else 1.0, "start": _rate(fmt.get("start_time"))}
 
 
 def playable(info: dict) -> bool:
@@ -456,12 +468,66 @@ def _replace(src: Path, dst: Path) -> None:
             time.sleep(0.1)
 
 
-def check_copy(path, span: float, has_audio: bool, timeout: float = 60.0) -> str | None:
+# what the output side of a test decode writes, not the decoder: the null / framecrc muxer
+# ('[null @ …] Application provided invalid, non monotonically increasing dts to muxer …') and
+# ffmpeg about that output ('[out#0/framecrc @ …] …')
+_OUTPUT_LINE = re.compile(r"^\[(?:out#\d+/)?(?:null|framecrc)\s*@")
+_REPEATED = re.compile(r"^Last message repeated \d+ times?$")
+AFTER_S = 30.0                      # how far past the end of a short copy the source is looked at
+
+
+def decode_errors(stderr) -> list[str]:
+    """The lines of a test decode (``ffmpeg -v error … -f framecrc -``, ``check_copy``) that say
+    the copy did not decode: all but those of the output side (``_OUTPUT_LINE`` — a whole copy can
+    give them: the real film's h264_qsv copy did, its time stamps having gaps of one tick) and
+    'Last message repeated N times'."""
+    out = []
+    for raw in str(stderr or "").splitlines():
+        x = raw.strip()
+        if x and not _OUTPUT_LINE.match(x) and not _REPEATED.match(x):
+            out.append(x)
+    return out
+
+
+def media_after(video, info: dict, frm: float, to: float, timeout: float = 60.0) -> bool | None:
+    """Whether ``video`` has a packet of the picture or the sound a copy takes (``vindex`` /
+    ``aindex`` of ``info``, as ``probe`` gives it) from ``frm`` to ``to`` — seconds from the start of
+    the file, as ``-ss`` counts them. None when that cannot be told."""
+    want = {i for i in (info.get("vindex"), info.get("aindex") if info.get("has_audio") else None) if i is not None}
+    if not want or not to > frm:
+        return None
+    start = float(info.get("start") or 0.0)
+    cmd = [FFPROBE, "-v", "error", "-read_intervals", f"{start + frm:.3f}%{start + to:.3f}",
+           "-show_entries", "packet=stream_index,pts_time,dts_time", "-print_format", "json", str(video)]
+    try:
+        out = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                             check=True, timeout=timeout, creationflags=NO_WINDOW).stdout
+        packets = json.loads(out or "{}").get("packets") or []
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return None
+    for p in packets:
+        if p.get("stream_index") not in want:
+            continue
+        t = _secs(p.get("pts_time"))
+        t = t if t is not None else _secs(p.get("dts_time"))
+        if t is not None and t - start >= frm:
+            return True
+    return False
+
+
+def check_copy(path, span: float, has_audio: bool, timeout: float = 60.0, *, source=None,
+               info: dict | None = None, t0: float = 0.0) -> str | None:
     """None when a made copy looks whole, else the reason (one Korean line). ffprobe must find
     an H.264 video, an AAC sound when the source has sound, and ``span`` seconds (±1 s or 1 %);
-    then one second at the start, the middle and the end must decode without an error line.
-    A file two writers wrote at once has the right length and streams but fails the decoding
-    ('Invalid NAL unit size')."""
+    then one second at the start, the middle and the end must decode without an error line of
+    the decoder (``decode_errors``). A file two writers wrote at once has the right length and
+    streams but fails the decoding ('Invalid NAL unit size').
+
+    ``span`` comes from the file's length, which counts every stream: a subtitle track (or a
+    header) may last longer than the picture and the sound. With ``source`` (the video, ``info``
+    its ``probe`` and ``t0`` the window start) a shorter copy is whole when the source has no
+    picture or sound of its streams past the copy's end (``media_after``); its end is checked
+    where the copy ends."""
     try:
         got = probe(path, timeout=timeout)
     except (OSError, ValueError, subprocess.SubprocessError) as exc:
@@ -471,17 +537,28 @@ def check_copy(path, span: float, has_audio: bool, timeout: float = 60.0) -> str
     if has_audio and got.get("acodec") != "aac":
         return f"만든 파일에 AAC 소리가 없습니다 ({got.get('acodec')})"
     length = float(got.get("duration") or 0.0)
-    if abs(length - span) > max(1.0, 0.01 * span):
+    tol = max(1.0, 0.01 * span)
+    too_long, short = length - span > tol, span - length > tol
+    if short and source is not None and info is not None:
+        frm = t0 + length + tol
+        more = media_after(source, info, frm, min(t0 + span, frm + AFTER_S), timeout)
+        if more is False:
+            log.info("재생용 영상: 만든 파일이 처리 구간보다 %.1f초 짧습니다 · 원본의 그림과 소리가 거기서 끝납니다",
+                     span - length)
+            short = False
+    if too_long or short:
         return f"만든 파일의 길이가 {length:.1f}초입니다 (처리 구간 {span:.1f}초)"
-    for at in sorted({0.0, round(span / 2.0, 3), round(max(0.0, span - 1.0), 3)}):
+    end = min(span, length)
+    for at in sorted({0.0, round(end / 2.0, 3), round(max(0.0, end - 1.0), 3)}):
+        # framecrc, not null: the null muxer says 'non monotonically increasing dts' of a whole copy
         cmd = [FFMPEG, "-hide_banner", "-nostdin", "-v", "error", "-xerror", "-ss", f"{at:.3f}", "-i", str(path),
-               "-t", "1", "-f", "null", "-"]
+               "-t", "1", "-f", "framecrc", "-"]
         try:
-            r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                               timeout=timeout, creationflags=NO_WINDOW)
+            r = subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, text=True, encoding="utf-8",
+                               errors="replace", timeout=timeout, creationflags=NO_WINDOW)
         except (OSError, subprocess.SubprocessError) as exc:
             return f"만든 파일을 풀어 보지 못했습니다 · {at:.1f}초 · {type(exc).__name__}"
-        lines = [x.strip() for x in r.stderr.splitlines() if x.strip()]
+        lines = decode_errors(r.stderr)
         if r.returncode != 0 or lines:
             return f"만든 파일이 깨져 있습니다 · {at:.1f}초 · " + (lines[0] if lines else f"ffmpeg 종료 코드 {r.returncode}")
     return None
@@ -560,7 +637,7 @@ def build(work, meta: dict, *, info: dict | None = None, encoder_list: list[str]
             try:
                 rc, err = _run_ffmpeg(cmd, t1 - t0, on_progress, cancel, on_process)
                 if rc == 0 and part.is_file() and part.stat().st_size > 0:
-                    bad = check_copy(part, span, has_audio)
+                    bad = check_copy(part, span, has_audio, source=video, info=info, t0=t0)
                     err = bad or err
                 else:
                     bad = err

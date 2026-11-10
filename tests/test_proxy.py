@@ -410,7 +410,7 @@ def held(no_ffmpeg):
     """The real build (lock, part file, rename) with ffmpeg and the decoding check replaced."""
     no_ffmpeg.setattr(proxy, "probe", lambda p: info())
     no_ffmpeg.setattr(proxy, "encoders", lambda refresh=False: ["h264_qsv"])
-    no_ffmpeg.setattr(proxy, "check_copy", lambda path, span, has_audio, timeout=60.0: None)
+    no_ffmpeg.setattr(proxy, "check_copy", lambda path, span, has_audio, timeout=60.0, **_kw: None)
     return no_ffmpeg
 
 
@@ -764,3 +764,93 @@ def test_real_ffmpeg_ends_when_its_python_is_killed_hard(tmp_path):
         if ff is not None and ff.is_running():
             ff.kill()
         p.wait(20)
+
+
+# ------------------------------------------------------------------ 5차: 디코더 오류만, 그림·소리 길이
+NULL_MUXER = ("[null @ 0000029937c83600] Application provided invalid, non monotonically increasing dts to muxer "
+              "in stream 0: 2 >= 2\n    Last message repeated 2 times\n")
+
+
+@pytest.mark.parametrize("stderr, kept", [
+    (NULL_MUXER, []),
+    ("[framecrc @ 0x55d0] Application provided invalid, non monotonically increasing dts to muxer in stream 1: 7 >= 7\n", []),
+    ("[out#0/null @ 0x55d1] Error muxing a packet\n    Last message repeated 1 time\n", []),
+    ("", []),
+    ("[h264 @ 0000018af9cd29c0] Invalid NAL unit size (0 > 12122).\n    Last message repeated 4 times\n"
+     "[h264 @ 0000018af9cd29c0] error while decoding MB 3 4\n",
+     ["[h264 @ 0000018af9cd29c0] Invalid NAL unit size (0 > 12122).", "[h264 @ 0000018af9cd29c0] error while decoding MB 3 4"]),
+    (NULL_MUXER + "[aac @ 0x55d2] Input buffer exhausted before END element found\n",
+     ["[aac @ 0x55d2] Input buffer exhausted before END element found"]),
+    ("[vist#0:0/h264 @ 0x55d3] [dec:h264 @ 0x55d4] Decoding error: Invalid data found when processing input\n",
+     ["[vist#0:0/h264 @ 0x55d3] [dec:h264 @ 0x55d4] Decoding error: Invalid data found when processing input"]),
+])
+def test_only_the_decoders_lines_count_as_errors(stderr, kept):
+    # the null muxer's 'non monotonically increasing dts' came from a whole h264_qsv copy of a film
+    assert proxy.decode_errors(stderr) == kept
+
+
+def test_a_copy_whose_test_decode_gives_only_output_side_lines_is_taken(tmp_path, monkeypatch):
+    got = {"vcodec": "h264", "acodec": "aac", "duration": 10.0}
+    monkeypatch.setattr(proxy, "probe", lambda path, timeout=60.0: dict(got))
+    runs, answer = [], {"stderr": NULL_MUXER, "rc": 0}
+
+    def run(cmd, **kw):
+        runs.append((cmd, kw))
+        return subprocess.CompletedProcess(cmd, answer["rc"], None, answer["stderr"])
+    monkeypatch.setattr(proxy.subprocess, "run", run)
+    assert proxy.check_copy(tmp_path / "review.mp4", 10.0, True) is None
+    assert len(runs) == 3                                       # the start, the middle, the end
+    for cmd, kw in runs:
+        assert cmd[cmd.index("-f") + 1] == "framecrc" and cmd[-1] == "-"
+        assert kw.get("stdout") is subprocess.DEVNULL           # the frame sums are not kept
+    answer["stderr"] = NULL_MUXER + "[h264 @ 0x1] Invalid NAL unit size (0 > 12122).\n"
+    reason = proxy.check_copy(tmp_path / "review.mp4", 10.0, True)
+    assert reason and "깨져" in reason and "Invalid NAL unit size" in reason
+    answer.update(stderr="", rc=1)
+    assert "종료 코드 1" in proxy.check_copy(tmp_path / "review.mp4", 10.0, True)
+
+
+def _make_subtitled(path, srt, seconds=3):
+    """``seconds`` of picture and sound (MPEG-4 Part 2 + MP3) and a subtitle track whose one cue
+    starts well after them: the file lasts as long as the subtitle."""
+    cmd = ["ffmpeg", "-hide_banner", "-nostdin", "-y", "-v", "error",
+           "-f", "lavfi", "-i", f"testsrc=s=320x240:r=24:d={seconds}",
+           "-f", "lavfi", "-i", f"sine=frequency=330:duration={seconds}:sample_rate=44100", "-i", str(srt),
+           "-map", "0:v", "-map", "1:a", "-map", "2:s", "-c:v", "mpeg4", "-q:v", "4", "-c:a", "libmp3lame",
+           "-b:a", "96k", "-c:s", "srt", str(path)]
+    subprocess.run(cmd, check=True, capture_output=True, timeout=120)
+    return path
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg / ffprobe are not on PATH")
+def test_real_copy_of_a_file_whose_subtitle_track_lasts_longer_than_picture_and_sound(tmp_path):
+    srt = tmp_path / "late.srt"
+    srt.write_text("1\n00:00:08,000 --> 00:00:09,500\n지어낸 자막 한 칸\n", encoding="utf-8")
+    src = _make_subtitled(tmp_path / "subtitled.mkv", srt)
+    info_ = proxy.probe(src)
+    assert info_["duration"] == pytest.approx(9.5, abs=0.05)       # the file: as long as the subtitle
+    w = tmp_path / "work"
+    w.mkdir()
+    meta = {"title": "자막이 긴 영상", "video": str(src), "t0": 0.0, "t1": 9.5, "fps": 24.0, "duration": 9.5}
+    write_json(w / "project.json", meta)
+    rec = proxy.build(w, meta, info=info_)                         # the whole file: picture and sound 3 s
+    assert rec["encoder"] == proxy.encoders()[0]                    # the first encoder (GPU first) is taken
+    assert proxy.probe(w / "review.mp4")["duration"] == pytest.approx(3.0, abs=0.1)
+    assert proxy.fresh(w, meta)
+    assert proxy.media_after(src, info_, 4.0, 9.5) is False         # only the subtitle is there
+    assert proxy.media_after(src, info_, 1.0, 9.5) is True
+    assert proxy.media_after(src, {**info_, "vindex": None, "has_audio": False}, 1.0, 9.5) is None
+
+
+@pytest.mark.skipif(not HAVE_FFMPEG, reason="ffmpeg / ffprobe are not on PATH")
+def test_real_copy_cut_short_while_the_source_goes_on_is_still_refused(tmp_path, film):
+    work = folder(tmp_path, video=film, t0=0.0, t1=1.5)
+    meta = json.loads((work / "project.json").read_text(encoding="utf-8"))
+    proxy.build(work, meta)
+    short = work / "review.mp4"                                     # 1.5 s of a 4 s film
+    src = proxy.probe(film)
+    assert "길이" in proxy.check_copy(short, 4.0, True, source=film, info=src, t0=0.0)
+    assert "길이" in proxy.check_copy(short, 4.0, True)               # without the source: as before
+    assert proxy.check_copy(short, 1.5, True, source=film, info=src, t0=0.0) is None
+    # a window from 1 s whose copy ends at 2.5 s: the film goes on to 4 s
+    assert "길이" in proxy.check_copy(short, 3.0, True, source=film, info=src, t0=1.0)
