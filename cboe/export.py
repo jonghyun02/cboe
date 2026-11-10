@@ -11,7 +11,9 @@ adhere to the following technical specifications" = 자막·SDH 용 TTML 파일�
 따라야 한다): percentage values only, positioning with ``tts:textAlign`` and ``tts:displayAlign``
 on two regions (bottom, top) that have static ``tts:extent`` and ``tts:origin``, ``tts:fontSize``
 100%. Times are whole video frames (``240f`` with ``ttp:frameRate`` and, for 23.976 / 29.97 /
-59.94, ``ttp:frameRateMultiplier="1000 1001"``), ``xml:lang`` is ko. A cell's ``pos`` ("bottom" |
+59.94, ``ttp:frameRateMultiplier="1000 1001"``) counted at the rate the header states, so that
+the file gives back the seconds of the SRT within half a frame; ``xml:lang`` is ko; characters
+XML 1.0 cannot hold (control characters) are left out. A cell's ``pos`` ("bottom" |
 "top") picks the region. The sample snippet the guide links to was not at hand; the extent and
 origin values are the usual 10 % safe margins and should be compared with the delivery spec.
 
@@ -23,6 +25,7 @@ from __future__ import annotations
 
 import html
 import math
+import re
 from fractions import Fraction
 from pathlib import Path
 
@@ -52,7 +55,10 @@ def _num(x):
 
 
 def _text_lines(c: dict) -> list[str]:
-    return [str(x) for x in (c.get("lines") or []) if str(x).strip()]
+    lines = c.get("lines") or []
+    if isinstance(lines, str):                       # one text instead of a list of lines
+        lines = lines.split("\n")
+    return [str(x) for x in lines if str(x).strip()]
 
 
 def final_check(draft, fps: float | None = None, profile=None) -> dict:
@@ -108,7 +114,8 @@ def to_vtt(cells: list[dict]) -> str:
 
 def frame_rate(fps: float) -> tuple[int, str | None]:
     """``ttp:frameRate`` and ``ttp:frameRateMultiplier`` of a video frame rate:
-    24 -> (24, None), 23.976 -> (24, "1000 1001"), 29.97 -> (30, "1000 1001")."""
+    24 -> (24, None), 23.976 -> (24, "1000 1001"), 29.97 -> (30, "1000 1001"). A rate a reader
+    rounded (OpenCV gives 23.98 for 24000/1001 video) is taken as the NTSC rate next to it."""
     whole = max(1, round(fps))
     if abs(fps - whole) < 1e-3:
         return whole, None
@@ -120,6 +127,22 @@ def frame_rate(fps: float) -> tuple[int, str | None]:
     return rate, f"{mult.numerator} {mult.denominator}"
 
 
+def effective_rate(fps: float) -> float:
+    """The frame rate the TTML header of ``fps`` states (``ttp:frameRate`` x multiplier): frame
+    numbers are counted with it, so that a reader of the file gets the seconds back (23.98 is
+    written as 24 x 1000/1001, and so its frames are counted at 23.976 a second)."""
+    rate, mult = frame_rate(fps)
+    if not mult:
+        return float(rate)
+    num, den = (int(x) for x in mult.split())
+    return rate * num / den
+
+
+# XML 1.0 has no place for these characters (a control character from a hand-edited or HWP text
+# would make the file unreadable): Char ::= #x9 | #xA | #xD | [#x20-#xD7FF] | [#xE000-#xFFFD] | ...
+_NOT_XML = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\ud800-\udfff￾￿]")
+
+
 def to_ttml(cells: list[dict], fps, title: str | None = None, lang: str = "ko") -> str:
     """The cells as a TTML document (module doc: General Requirements 13). ``fps`` is the frame
     rate of the video; every time is written as a whole frame."""
@@ -127,9 +150,10 @@ def to_ttml(cells: list[dict], fps, title: str | None = None, lang: str = "ko") 
     if not fps or fps <= 0:
         raise ValueError("TTML 로 내보내려면 영상의 fps 가 필요합니다")
     rate, mult = frame_rate(fps)
+    per_s = effective_rate(fps)
 
     def esc(s) -> str:
-        return html.escape(str(s), quote=False)
+        return html.escape(_NOT_XML.sub("", str(s)), quote=False)
 
     def region(name: str, align: str) -> str:
         return (f'      <region xml:id="{name}" tts:origin="{TTML_ORIGIN}" tts:extent="{TTML_EXTENT}" '
@@ -150,9 +174,9 @@ def to_ttml(cells: list[dict], fps, title: str | None = None, lang: str = "ko") 
              "    <layout>", region("bottom", "after"), region("top", "before"), "    </layout>",
              "  </head>", "  <body>", "    <div>"]
     for i, c in enumerate(_sorted_cells(cells), 1):
-        begin, end = round(_num(c["start"]) * fps), round(_num(c["end"]) * fps)
+        begin, end = round(_num(c["start"]) * per_s), round(_num(c["end"]) * per_s)
         where = "top" if c.get("pos") == "top" else "bottom"
-        text = "<br/>".join(esc(x) for x in _text_lines(c))
+        text = "<br/>".join(t for t in (esc(x).strip() for x in _text_lines(c)) if t)
         rows.append(f'      <p xml:id="c{i}" begin="{begin}f" end="{end}f" region="{where}" style="s1">{text}</p>')
     rows += ["    </div>", "  </body>", "</tt>", ""]
     return "\n".join(rows)

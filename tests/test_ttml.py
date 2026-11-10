@@ -81,9 +81,31 @@ def test_frame_rate_attributes(fps, rate, mult):
     root = parse(export.to_ttml([cell("C1", 1.0, 2.0, ["가"])], fps))
     assert root.get(TTP + "frameRate") == rate and root.get(TTP + "frameRateMultiplier") == mult
     p = next(root.iter(TT + "p"))
-    assert (p.get("begin"), p.get("end")) == (f"{round(1.0 * fps)}f", f"{round(2.0 * fps)}f")
     got = int(rate) * (eval(mult.replace(" ", "/")) if mult else 1)       # the effective frame rate
-    assert got == pytest.approx(fps, abs=0.005)
+    assert got == pytest.approx(fps, abs=0.005) and got == pytest.approx(export.effective_rate(fps))
+    assert (p.get("begin"), p.get("end")) == (f"{round(1.0 * got)}f", f"{round(2.0 * got)}f")
+
+
+@pytest.mark.parametrize("fps", [23.980015987, 23.98, 23.976, 24000 / 1001, 24.0, 25.0, 29.97, 59.94, 12.5])
+def test_ttml_gives_back_the_seconds_of_the_srt(fps):
+    # a rate a reader rounded (OpenCV: 23.98 for 24000/1001 video) is written as 24 x 1000/1001; the
+    # frame numbers have to be counted at that rate, or the file drifts late (1.2 s after two hours)
+    cells = [cell("C1", 1128.523, 1130.0, ["가나"]), cell("C2", 1791.492, 1793.25, ["다라"]),
+             cell("C3", 7400.0, 7402.0, ["마바"])]
+    got, meta = check.parse_ttml(export.to_ttml(cells, fps))
+    srt = check.parse_subtitles(export.to_srt(cells))
+    assert meta["fps"] == pytest.approx(export.effective_rate(fps))
+    half = 0.5 / meta["fps"] + 1e-6
+    for a, b in zip(got, srt, strict=True):
+        assert abs(a["start"] - b["start"]) <= half and abs(a["end"] - b["end"]) <= half, (fps, a, b)
+
+
+def test_characters_xml_cannot_hold_are_left_out():
+    text = export.to_ttml([cell("C1", 1.0, 2.0, ["가\x02나\x1f", "\x0b다￾"])], 24, title="제\x00목")
+    root = parse(text)                                        # still well-formed
+    p = next(root.iter(TT + "p"))
+    assert p.text == "가나" and p.find(TT + "br").tail == "다"
+    assert root.find(f"{TT}head/{TT}metadata/{{http://www.w3.org/ns/ttml#metadata}}title").text == "제목"
 
 
 def test_lines_and_escaping():
