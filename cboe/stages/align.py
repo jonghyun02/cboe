@@ -43,9 +43,9 @@ A line the script marks as foreign (``language``) cannot match the Korean script
 letters: it is placed like any other line, never ``differs``, and is ``ok`` with ``note``
 "foreign" when it was not heard. ``asr_text`` is what the ASR heard over the line, ``diff``
 the word-level differences and ``hints``: "spelling" when they look like spelling only, "name"
-when the words differ only where the script says a character's name (the line is ``ok``:
-``compare``), "language" when the language the chunks of asr.json were told to be differs from
-the script's mark (``heard_language`` '영어': ``_finish``). Hints never change the text.
+when the words differ only where the script says a character's name and what was heard there
+sounds like it (the line is ``ok``: ``compare``), "language" when the language the chunks of
+asr.json were told to be differs from the script's mark (``heard_language`` '영어': ``_finish``). Hints never change the text.
 ASR words that no aligned line uses are ``extras`` (speech that is in no script line, 감사 1-04).
 The unheard lines of a found scene stay near its matched lines (``_place_scenes``).
 
@@ -132,6 +132,28 @@ MINOR_CHARS = 2       # letters that may differ in a stretch before it counts as
 # ASR may write up to this many letters more there than the script has (a name heard as a longer
 # string of letters); more than that is taken for other words said. Not measured.
 NAME_MORE_LETTERS = 2
+# ... and what was heard there must sound like the script's letters it stands for (``_sound_like``:
+# shared sounds over all sounds of both, 0..1); a word that sounds otherwise is another word said
+# (II.1: the word choice of the speech is followed, slang is not changed). Not measured: chosen
+# between made-up pairs — 가람아/카라마 1.0, 오반장/도만창 0.8 (a name misheard) and 선생님/쌤 0.5,
+# 엄마/어머니 0.44, 가람아/그래서 0.33, 엄마/아빠 0.29 (other words).
+NAME_SOUND_MIN = 0.6
+# speaker names that are common words for a family member, a title or a role ('엄마', '선생님',
+# '담임'): the ASR knows them as well as any other word, so a word heard otherwise there is a word
+# said otherwise, not a name misheard (``_name_keys``; also with '님' or '들': '사장님', '학생들'). A
+# name of words that are all such words ('담임 선생님') is one too; one with a name in it ('오 반장') is
+# kept. A short list of common words, not a dictionary: a name not in it still needs ``_sound_like``.
+ROLE_WORDS = frozenset((
+    # 가족·친척
+    "엄마", "아빠", "어머니", "아버지", "어머님", "아버님", "할머니", "할아버지", "할매", "할배", "언니", "오빠",
+    "누나", "형", "형님", "동생", "아들", "딸", "남편", "아내", "여보", "이모", "고모", "삼촌", "숙모", "조카",
+    # 부르는 말
+    "아저씨", "아줌마", "아주머니", "아가씨", "총각", "선배", "후배", "친구",
+    # 직함·역할
+    "선생", "쌤", "담임", "교장", "교감", "원장", "사장", "회장", "부장", "과장", "팀장", "실장", "반장", "주임",
+    "대리", "비서", "직원", "종업원", "담당", "매니저", "리더", "dj", "기자", "형사", "경찰", "순경", "판사", "검사",
+    "변호사", "의사", "간호사", "기사", "손님", "주인", "학생", "교수", "박사",
+    "소년", "소녀", "아이", "꼬마", "노인", "청년"))
 EXTRA_GAP = 0.8      # s of silence that ends a group of ASR words that are in no script line
 # groups made only of these (and vocalisations) are not kept as speech that is in no script line
 INTERJECTIONS = {"네", "예", "응", "야", "얘", "어머", "어머나", "아이고", "에이", "참", "뭐", "자", "음", "흠", "헐", "엥"}
@@ -974,15 +996,68 @@ def _spelling_like(a: str, b: str) -> bool:
     return True
 
 
+# the sound of a Hangul letter's jamo, alike ones as one (``_sound_like``): plain, tense and
+# aspirated consonants (가/까/카), ㅐ/ㅔ, ㅒ/ㅖ and ㅙ/ㅚ/ㅞ; a first ㅇ has none (가람아 sounds 가라마)
+_ONSET = ("g", "g", "n", "d", "d", "r", "m", "b", "b", "s", "s", "", "j", "j", "j", "g", "d", "b", "h")
+_VOWEL = ("a", "e", "ya", "ye", "eo", "e", "yeo", "ye", "o", "wa", "we", "we", "yo", "u", "wo", "we", "wi",
+          "yu", "eu", "ui", "i")
+_CODA = ((), ("g",), ("g",), ("g", "s"), ("n",), ("n", "j"), ("n", "h"), ("d",), ("r",), ("r", "g"), ("r", "m"),
+         ("r", "b"), ("r", "s"), ("r", "d"), ("r", "b"), ("r", "h"), ("m",), ("b",), ("b", "s"), ("s",), ("s",),
+         ("ng",), ("j",), ("j",), ("g",), ("d",), ("b",), ("h",))
+
+
+def _sounds(letters: str) -> list[str]:
+    out: list[str] = []
+    for c in letters:
+        j = _jamo(c)
+        if j is None:
+            out.append(c.lower())
+            continue
+        if _ONSET[j[0]]:
+            out.append(_ONSET[j[0]])
+        out.append(_VOWEL[j[1]])
+        out.extend(_CODA[j[2]])
+    return out
+
+
+def _sound_like(a: str, b: str) -> float:
+    """How alike two strings of letters sound: 2 × the most sounds (``_sounds``) both have in the
+    same order (not only side by side) over the sounds of both — 1.0 the same sounds
+    (가람아/카라마), 0 none shared."""
+    x, y = _sounds(a), _sounds(b)
+    if not x or not y:
+        return 0.0
+    row = [0] * (len(y) + 1)                   # longest common subsequence, one row at a time
+    for p in x:
+        diag = 0
+        for k, q in enumerate(y, 1):
+            up = row[k]
+            row[k] = diag + 1 if p == q else max(up, row[k - 1])
+            diag = up
+    return 2 * row[-1] / (len(x) + len(y))
+
+
+def _role_word(name: str) -> bool:
+    """A name of common words only (``ROLE_WORDS``, also with '님' or '들'): '엄마', '사장님',
+    '학생들', '담임 선생님'."""
+    def one(w: str) -> bool:
+        w = w[:-1] if len(w) > 1 and w.endswith("들") else w
+        return w in ROLE_WORDS or (len(w) > 1 and w.endswith("님") and w[:-1] in ROLE_WORDS)
+
+    words = ["".join(norm_chars(w)) for w in str(name or "").split()]
+    return bool(words) and all(one(w) for w in words)
+
+
 def _name_keys(names) -> list[tuple[str, int]]:
     """(letters, words) of the characters' names the ASR may mishear: every person of a speaker
-    name ('가람/나래'), without the role names (``people.is_role``: '경비2', '남자' — a common
-    word the ASR hears as well as any other)."""
+    name ('가람/나래'), without the role names (``people.is_role``: '경비2', '남자') and the names
+    made of common words for a family member, a title or a role (``ROLE_WORDS``: '엄마', '선생님')
+    — a common word the ASR hears as well as any other."""
     out: list[tuple[str, int]] = []
     for n in names or ():
         for one in people.parts(n):
             k = "".join(norm_chars(one))
-            if k and not people.is_role(one) and (k, len(one.split())) not in out:
+            if k and not people.is_role(one) and not _role_word(one) and (k, len(one.split())) not in out:
                 out.append((k, len(one.split())))
     return out
 
@@ -1027,12 +1102,14 @@ def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str
     digits (3층 / 삼 층; not compared).
 
     ``"name": true`` on a word stretch whose letters differ only inside words where the script
-    says a character's name (``names`` without the role names; the name as it is or with an
-    honorific, a vocative or a particle), touching the name itself (a particle said otherwise is
-    a word said otherwise), where something was heard instead (a name not heard at all may not
-    have been said) that is not another character's name and not more than NAME_MORE_LETTERS
-    letters longer: the ASR mishears names it does not know (감사 1-01, 8-m2). When every word
-    stretch is so, the line gets the hint "name" and does not differ (``_finish``; a hint only —
+    says a character's name (``names`` without the role names and the names of common words,
+    ``_name_keys``; the name as it is or with an honorific, a vocative or a particle), touching
+    the name itself (a particle said otherwise is a word said otherwise), where something was
+    heard instead (a name not heard at all may not have been said) that is not another
+    character's name, not more than NAME_MORE_LETTERS letters longer, and that sounds like the
+    script's differing letters (``_sound_like`` at least NAME_SOUND_MIN; a word that sounds
+    otherwise is a word said otherwise): the ASR mishears names it does not know (감사 1-01,
+    8-m2). When every word stretch is so, the line gets the hint "name" and does not differ (``_finish``; a hint only —
     the script text is kept, what was heard stays in ``asr_text``). Returns (diff, hints)."""
     keys = [k for k in ("".join(norm_chars(str(n))) for n in names or ()) if len(k) >= 2]
     nkeys = _name_keys(names)
@@ -1082,6 +1159,10 @@ def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str
             return False
         got = sum(len(b) for _, b in c["sub"])
         if not got or got > sum(len(a) for a, _ in c["sub"]) + NAME_MORE_LETTERS:
+            return False
+        # the letters heard sound like the script's letters they stand for (카라마 for 가람아; not
+        # 그래서, not 쌤 for 선생님)
+        if _sound_like("".join(a for a, _ in c["sub"]), "".join(b for _, b in c["sub"])) < NAME_SOUND_MIN:
             return False
         said = {name_at[i] for i in c["s"]}
         return not any(key not in said and key in hw and people._called(key, False).fullmatch(hw)

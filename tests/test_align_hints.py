@@ -52,6 +52,36 @@ def test_a_name_is_not_taken_for_misheard_when_it_may_not_be_so():
     assert diff[0]["kind"] == "word" and "name" not in diff[0] and hints == []
 
 
+def _differs(text, heard, names):
+    diff, hints = align.compare(text, heard.split(), names)
+    return "name" not in hints and any(d["kind"] == "word" and not d.get("name") for d in diff)
+
+
+def test_a_word_that_does_not_sound_like_the_name_is_a_different_word():
+    # II.1: the word said is followed — another word at a name is no name misheard
+    assert _differs("가람아 밥 먹자", "그래서 밥 먹자", NAMES)
+    assert _differs("하늘이 참 맑다", "바다가 참 맑다", ["하늘", "가람"])      # a name that is a word too
+    assert not _differs("가람아 밥 먹자", "카라마 밥 먹자", NAMES)                 # sounds like it: as before
+    assert align._sound_like("가람아", "카라마") == 1.0
+    assert align._sound_like("가람아", "그래서") < align.NAME_SOUND_MIN <= align._sound_like("오반장", "도만창")
+    assert align._sound_like("", "가람") == 0.0
+
+
+ROLE_NAMES = ["가람", "선생님", "엄마", "담임", "할아버지", "사장님", "학생들", "담임 선생님", "오 반장", "가람 엄마"]
+
+
+def test_a_speaker_named_by_a_family_word_or_a_title_is_no_name_to_mishear():
+    # slang, another word for the same person, another person: each a word said otherwise
+    for text, heard in [("선생님 이거 보세요", "쌤 이거 보세요"), ("엄마 밥 줘", "어머니 밥 줘"),
+                        ("엄마가 그랬잖아", "아빠가 그랬잖아"), ("담임이 불렀어", "교장이 불렀어"),
+                        # sounds alike, but the name is a common word the ASR knows: still a
+                        # different word, as it was before the name hint
+                        ("할아버지 오셨어요", "하라부지 오셨어요")]:
+        assert _differs(text, heard, ROLE_NAMES), text
+    keys = [k for k, _ in align._name_keys(ROLE_NAMES)]
+    assert keys == ["가람", "오반장", "가람엄마"]                 # a name in it: kept
+
+
 # ------------------------------------------------------------------ the align stage
 def _words(said: list[tuple[str, float]]) -> list[dict]:
     """[(text, start)] -> ASR words at 0.13 s per letter, 0.03 s apart."""
@@ -71,9 +101,9 @@ def _line(i, text, speaker="가람", **kw):
     return ln
 
 
-def _run(tmp_path, lines, words, t_end=60.0, chunks=None, vad=None):
+def _run(tmp_path, lines, words, t_end=60.0, chunks=None, vad=None, characters=("가람", "나래")):
     write_json(tmp_path / "project.json", {"t0": 0.0, "t1": t_end, "duration": t_end, "fps": 25.0})
-    write_json(tmp_path / "script.json", {"version": 2, "format": "lines", "timed": False, "characters": ["가람", "나래"],
+    write_json(tmp_path / "script.json", {"version": 2, "format": "lines", "timed": False, "characters": list(characters),
                                           "scenes": [], "elements": [], "lines": lines})
     got = {"words": words, "vad": vad if vad is not None else [[w["s"], w["e"]] for w in words]}
     if chunks is not None:
@@ -100,6 +130,19 @@ def test_a_line_that_differs_only_in_a_name_is_ok_with_the_name_hint(tmp_path):
     assert [x["name"] for x in one["diff"]] == [True]
     assert by["L0004"]["status"] == "differs" and "hints" not in by["L0004"]      # another word: as before
     assert by["L0002"]["status"] == by["L0003"]["status"] == "ok" and "hints" not in by["L0002"]
+
+
+def test_a_word_said_instead_of_a_role_name_or_unlike_a_name_keeps_the_line_different(tmp_path):
+    lines = [_line(1, "엄마 오늘 저녁에 바다로 가자", "나래"), _line(2, "그래 좋아 바다에서 별을 보자", "엄마"),
+             _line(3, "가람아 그럼 일곱 시에 만나자", "나래"), _line(4, "그때 꼭 와야 한다 알았지", "나래")]
+    said = [("어머니 오늘 저녁에 바다로 가자", 1.0), ("그래 좋아 바다에서 별을 보자", 6.0),
+            ("그래서 그럼 일곱 시에 만나자", 11.0), ("그때 꼭 와야 한다 알았지", 16.0)]
+    d, _ = _run(tmp_path, lines, _words(said), characters=("가람", "나래", "엄마"))
+    by = {ln["id"]: ln for ln in d["lines"]}
+    for i, heard in (("L0001", said[0][0]), ("L0003", said[2][0])):
+        assert by[i]["status"] == "differs" and "hints" not in by[i], i
+        assert not any(x.get("name") for x in by[i]["diff"]) and by[i]["asr_text"] == heard
+    assert by["L0002"]["status"] == by["L0004"]["status"] == "ok"
 
 
 # ------------------------------------------------------------------ 들린 언어
