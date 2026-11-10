@@ -1141,12 +1141,16 @@ def test_the_reveal_line_picked_stays_while_an_earlier_write_is_answered(tmp_pat
 # line or item they are made of: pos, check.notes; the export check, its lines, the summary;
 # more aside rows). A POST that window.__answer(url, body) takes (it changes __over as the server
 # would) is answered here with the server's state and __over on it, or — window.__refuse — with
-# that error and __over as it was. Every POST is kept in window.__seen as [url, body].
+# that error and __over as it was. A POST the real server answers is shown first to
+# window.__kept(url, body, state) (it puts in __over what the new server would keep of that
+# body and this one drops, e.g. the pos of a new api/added row whose id the server gives), then
+# __over goes on it. Every POST is kept in window.__seen as [url, body].
 NEW_HOOK = r"""(() => {
   const real = window.fetch.bind(window);
   window.__over = Object.assign({ lines: {}, items: {}, added: {}, people: {}, extras: {}, cells: {}, check: {}, check_lines: {}, summary: {}, aside: [] }, @OVER@);
   window.__seen = [];
   window.__answer = null;
+  window.__kept = null;
   window.__refuse = null;
   window.__dec = (id, fields) => { const o = (window.__over.lines[id] = window.__over.lines[id] || {}); o.decision = { ...(o.decision || {}), ...fields }; };
   const put = (row, o) => {
@@ -1179,8 +1183,9 @@ NEW_HOOK = r"""(() => {
   const json = (data, status = 200) => new Response(JSON.stringify(data), { status, headers: { 'Content-Type': 'application/json' } });
   window.fetch = async (url, init = {}) => {
     const u = String(url);
-    if (init.method === 'POST') {
-      const body = init.body ? JSON.parse(init.body) : null;
+    const post = init.method === 'POST';
+    const body = post && init.body ? JSON.parse(init.body) : null;
+    if (post) {
       window.__seen.push([u.replace(/^.*?(api\/)/, '$1'), body]);
       const was = JSON.stringify(window.__over);
       if (window.__answer && window.__answer(u, body || {})) {
@@ -1196,6 +1201,7 @@ NEW_HOOK = r"""(() => {
     const r = await real(url, init);
     if (!r.ok || u.includes('api/media') || u.includes('api/envelope')) return r;
     const data = await r.clone().json().catch(() => null);
+    if (post && data && window.__kept) window.__kept(u, body || {}, data.state || data);
     if (data && Array.isArray(data.lines)) return json(fix(data));
     if (data && data.state && Array.isArray(data.state.lines)) { fix(data.state); data.export_check = data.state.export_check; return json(data); }
     return r;
@@ -1283,7 +1289,9 @@ def test_a_line_is_put_in_one_cell_with_the_line_before_or_says_why_not(tmp_path
 def test_the_cell_of_a_line_a_sound_or_an_added_one_goes_up_or_down(tmp_path, browser, clips):
     # 위치 아래 · 위 on the line panel (api/lines {pos}), on a sound's panel (api/items {pos}), in
     # the 새로 넣기 dialog (api/added · api/added/{id} pos) and on a line the writer added (its
-    # api/added/{id}); a cell at the top has a mark on its row (old page: nothing to pick)
+    # api/added/{id}); a cell at the top has a mark on its row (old page: nothing to pick).
+    # The added row keeps the pos it was made or changed with (약속 나: added[].pos); this branch's
+    # server drops it, so __kept plays the one that keeps it (there it changes nothing).
     work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
     with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
         r = run_page(browser, srv.url, r"""export default async (p) => {
@@ -1295,6 +1303,11 @@ def test_the_cell_of_a_line_a_sound_or_an_added_one_goes_up_or_down(tmp_path, br
             if (u.includes('api/items/')) { window.__over.items[id] = { pos: b.pos }; window.__over.cells[id] = { pos: b.pos }; return true; }
             if (u.includes('api/added/') && Object.keys(b).length === 1) { window.__over.added[id] = { pos: b.pos }; return true; }
             return false; }`);
+          await p.ev(`window.__kept = (u, b, s) => {
+            const at = u.slice(u.indexOf('api/')).split('/');
+            if (at[1] !== 'added' || !('pos' in b)) return;
+            const id = at.length === 2 ? ((s.added || []).find((a) => a.text === b.text) || {}).id : at[2];
+            if (id) window.__over.added[id] = { pos: b.pos }; }`);
           const chips = (act) => p.ev(`[...document.querySelectorAll('#evidence [data-act="${act}"]')].map((b) => b.textContent + (b.getAttribute('aria-pressed') === 'true' ? '*' : ''))`);
           const go = async (act, v) => { await p.ev(`document.querySelector('#evidence [data-act="${act}"][data-v="${v}"]').click()`); await p.idle(); return chips(act); };
           await p.ev(`document.querySelector('#tabs [data-view="lines"]').click()`);
@@ -1330,14 +1343,15 @@ def test_the_cell_of_a_line_a_sound_or_an_added_one_goes_up_or_down(tmp_path, br
           const st = await p.ev(`fetch('api/state').then((r) => r.json())`);
           const aid = (st.added[0] || {}).id;
           const added0 = await chips('ln-pos');
-          const addedUp = await go('ln-pos', 'top');
+          const addedDown = await go('ln-pos', '');
           await p.ev(`document.querySelector('#evidence [data-act="added-edit"]').click()`);
           await p.sleep(200);
           const editRadios = await p.ev(`[...document.querySelectorAll('#modal-box input[name="add-pos"]')].map((i) => i.value + (i.checked ? '*' : ''))`);
-          await p.ev(`document.querySelector('#modal-box input[name="add-pos"][value=""]').click()`);
+          await p.ev(`document.querySelector('#modal-box input[name="add-pos"][value="top"]').click()`);
           await p.ev(`document.querySelector('#modal-box [data-act="add-save"]').click()`);
           await p.idle();
-          return { line0, lineUp, tops, nCells, ofLine, lineDown, speaker, sound0, soundUp, radios, aid, added0, addedUp, editRadios,
+          const addedEnd = await chips('ln-pos');
+          return { line0, lineUp, tops, nCells, ofLine, lineDown, speaker, sound0, soundUp, radios, aid, added0, addedDown, editRadios, addedEnd,
                    seen: await p.ev(`window.__seen.filter(([, b]) => 'pos' in b)`) };
         }""".replace("@HOOK@", new_hook()))["result"]
     assert r["line0"] == ["아래*", "위"] and r["lineUp"] == ["아래", "위*"] and r["lineDown"] == ["아래*", "위"], r
@@ -1345,13 +1359,15 @@ def test_the_cell_of_a_line_a_sound_or_an_added_one_goes_up_or_down(tmp_path, br
     assert r["speaker"] == [], r["speaker"]                                  # a speaker's line has its own
     assert r["sound0"] == ["아래*", "위"] and r["soundUp"] == ["아래", "위*"], r
     assert r["radios"] == ["*", "top"] and r["aid"], r
-    assert r["added0"] == ["아래*", "위"] and r["addedUp"] == ["아래", "위*"] and r["editRadios"] == ["", "top*"], r
+    # made with 위 it is up (the reply's added[].pos), 아래 on its panel, the dialog opens at 아래, saved at 위
+    assert r["added0"] == ["아래", "위*"] and r["addedDown"] == ["아래*", "위"] and r["editRadios"] == ["*", "top"], r
+    assert r["addedEnd"] == ["아래", "위*"], r
     seen = r["seen"]
     assert seen[0] == ["api/lines/L0002", {"pos": "top"}] and seen[1] == ["api/lines/L0002", {"pos": None}], seen
     assert seen[2] == ["api/items/S0001", {"pos": "top"}], seen
     assert seen[3][0] == "api/added" and seen[3][1]["pos"] == "top" and seen[3][1]["text"] == "지어낸 새 줄이다", seen
-    assert seen[4] == [f"api/added/{r['aid']}", {"pos": "top"}], seen
-    assert seen[5][0] == f"api/added/{r['aid']}" and seen[5][1]["pos"] is None and seen[5][1]["text"] == "지어낸 새 줄이다", seen
+    assert seen[4] == [f"api/added/{r['aid']}", {"pos": None}], seen
+    assert seen[5][0] == f"api/added/{r['aid']}" and seen[5][1]["pos"] == "top" and seen[5][1]["text"] == "지어낸 새 줄이다", seen
     assert len(seen) == 6, seen
 
 
