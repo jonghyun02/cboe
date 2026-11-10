@@ -133,7 +133,7 @@ def _rounded(fps: float) -> bool:
 # avg_frame_rate is frames over duration and wobbles a little: a 30 fps video gave 30.00001486621153
 # (5e-7 off), which the header must not write as 31 x 22198001/22937923 (4th round check). 29999/1251
 # (23.98002, 1.7e-4 off 23.976 and 8e-4 off 24) is a rate of its own and stays as it is. Over two
-# hours 1e-5 is a few hundredths of a second, and the frames of the file still read back to the
+# hours 1e-5 is under a tenth of a second, and the frames of the file still read back to the
 # draft's (``_ttml_frames``).
 RATE_TOLERANCE = 1e-5
 
