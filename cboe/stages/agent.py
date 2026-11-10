@@ -247,13 +247,13 @@ def run(p, cfg: dict) -> dict:
                           mcp_url=url, tools=TOOLS, max_turns=MAX_TURNS, timeout=900, work=p.work,
                           tag=f"agent:{it['id']}", trace=trace, prompt_version=PROMPT_VERSION)
         except Exception as e:
-            tools.log.claim(trace)                        # what the tools returned before the call failed
+            tools.log.claim(trace, since=t)               # what the tools returned before the call failed
             write_json(p.path("agent") / f"{it['id']}.json", {"prompt": q, **versions, "error": str(e)[:500],
                                                               "trace": trace})
             note("error")
             return it["id"], {"status": "error", "summary": "재확인 실패", "tools": [x["tool"] for x in trace],
                               "steps": len(trace), "evidence": [], "fp": _fp(it)}
-        tools.log.claim(trace)                            # each call's output, or the exception it raised
+        tools.log.claim(trace, since=t)                   # each call's output, or the exception it raised
         res = normalise(it, ans, trace, time.time() - t)
         res["fp"] = _fp(it)
         bad = failed_tools(trace)

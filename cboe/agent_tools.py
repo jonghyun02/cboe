@@ -85,7 +85,8 @@ class CallLog:
 
     The tool server is stateless: it cannot tell which re-check a call belongs to. ``claim``
     matches the calls a re-check made (tool name and arguments, as the model sent them) to the
-    rows here; each row is given to one call."""
+    rows here; each row is given to one call. The latest rows are matched first: when the LLM
+    call was retried, the calls of the attempt that answered are the last ones."""
     OUTPUT_MAX = 4000
 
     def __init__(self):
@@ -106,7 +107,7 @@ class CallLog:
 
     def _add(self, tool: str, args: dict, t: float, output: str | None, error: str | None) -> None:
         with self._lock:
-            self.rows.append({"tool": tool, "args": dict(args), "seconds": round(time.time() - t, 2),
+            self.rows.append({"tool": tool, "args": dict(args), "at": t, "seconds": round(time.time() - t, 2),
                               "output": output, "error": error, "claimed": False})
 
     def errors(self) -> dict[str, int]:
@@ -118,13 +119,14 @@ class CallLog:
                     out[r["tool"]] = out.get(r["tool"], 0) + 1
             return out
 
-    def claim(self, trace: list[dict]) -> None:
+    def claim(self, trace: list[dict], since: float | None = None) -> None:
         """Write ``output`` (the text returned, or the exception), ``seconds`` and ``error: True``
-        (the call raised) into the tool calls of one re-check: ``trace`` rows {"tool", "input"}."""
+        (the call raised) into the tool calls of one re-check: ``trace`` rows {"tool", "input"}.
+        ``since``: when the re-check began (time.time()); calls that started before it are not its."""
         with self._lock:
-            for call in trace:
-                row = next((r for r in self.rows if not r["claimed"] and r["tool"] == call.get("tool")
-                            and same_args(call.get("input"), r["args"])), None)
+            for call in reversed(trace):
+                row = next((r for r in reversed(self.rows) if not r["claimed"] and r["tool"] == call.get("tool")
+                            and (since is None or r["at"] >= since) and same_args(call.get("input"), r["args"])), None)
                 if row is None:
                     continue
                 row["claimed"] = True

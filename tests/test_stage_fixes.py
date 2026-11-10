@@ -676,13 +676,41 @@ def test_call_log_keeps_what_each_tool_returned():
     trace = [{"tool": "describe_sound", "input": {"start": 5, "end": "6"}},
              {"tool": "rescan_sound", "input": {"start": 1, "end": 2.5}},
              {"tool": "look_frames", "input": {"time": 3}},
-             {"tool": "scene_context", "input": {"time": 9}},                          # never reached the tool
-             {"tool": "rescan_sound", "input": {"start": 1, "end": 2.5}}]              # the row is given once
+             {"tool": "scene_context", "input": {"time": 9}}]                          # never reached the tool
     log.claim(trace)
     assert trace[0]["error"] is True and trace[0]["output"].startswith("ZeroDivisionError")
     assert trace[1]["output"] == "재검출 결과" and "error" not in trace[1]
     assert trace[2]["output"] == "프레임 2장\n00:03.0\n[사진]"
-    assert "output" not in trace[3] and "output" not in trace[4]
+    assert "output" not in trace[3]
+    again = [{"tool": "rescan_sound", "input": {"start": 1, "end": 2.5}}]              # a row is given once
+    log.claim(again)
+    assert "output" not in again[0]
+
+
+def test_call_log_pairs_the_calls_of_the_attempt_that_answered():
+    import time
+    log = agent_tools.CallLog()
+    args = {"start": 1.0, "end": 2.0, "track": "effects"}
+    old = time.time()
+    log.run("rescan_sound", {"start": 0.0, "end": 9.0}, lambda: "앞선 재확인의 호출")
+    log.rows[-1]["at"] = old - 60.0                                                    # made before this re-check
+    with pytest.raises(RuntimeError):                                                  # first attempt of the LLM call
+        log.run("describe_sound", args, lambda: (_ for _ in ()).throw(RuntimeError("메모리 부족")))
+    log.run("describe_sound", args, lambda: "소리 설명 모델: a knock")                    # the retry made the same call
+    trace = [{"tool": "describe_sound", "input": {"start": 1, "end": 2}},
+             {"tool": "rescan_sound", "input": {"start": 0, "end": 9}}]
+    log.claim(trace, since=old)
+    assert trace[0]["output"] == "소리 설명 모델: a knock" and "error" not in trace[0]
+    assert "output" not in trace[1]                                                    # not this re-check's call
+    assert agent.failed_tools(trace) == []
+    # two equal calls in one attempt keep their order: the first one raised, the second answered
+    log = agent_tools.CallLog()
+    with pytest.raises(RuntimeError):
+        log.run("describe_sound", args, lambda: (_ for _ in ()).throw(RuntimeError("메모리 부족")))
+    log.run("describe_sound", args, lambda: "소리 설명 모델: a knock")
+    trace = [{"tool": "describe_sound", "input": {"start": 1, "end": 2}} for _ in range(2)]
+    log.claim(trace)
+    assert trace[0].get("error") is True and trace[1]["output"] == "소리 설명 모델: a knock"
     assert agent_tools.same_args({"start": "1.0"}, {"start": 1, "end": 2}) and agent_tools.same_args(None, {"a": 1})
     assert not agent_tools.same_args({"x": 1}, {"start": 1})
     assert not agent_tools.same_args({"track": "mix"}, {"track": "effects"})
@@ -698,9 +726,10 @@ def test_call_log_raises_what_the_tool_raised():
     assert log.rows[0]["error"] == "RuntimeError: level_zero backend failed with error: 39" and log.rows[0]["output"] is None
 
 
-def test_tool_server_tells_the_model_little_and_the_log_the_cause():
+def test_tool_server_marks_a_raising_tool_and_the_log_keeps_the_cause():
     """The tools through the MCP library itself (in process: no network, no model). A tool that
-    raises reaches the model as a bare 'Error executing tool …'; why it failed is only in the log."""
+    raises reaches the model as an error result (mcp 2.3 passes only 'Error executing tool …');
+    why it failed is in the call log."""
     import asyncio
 
     from mcp import Client
@@ -731,7 +760,7 @@ def test_tool_server_tells_the_model_little_and_the_log_the_cause():
     names, ok, around, bad, wrong = asyncio.run(model_side())
     assert names == agent.TOOLS and set(names) == set(agent_tools.TOOL_DOCS)
     assert not ok.is_error and ok.content[0].text == "재검출 1.0~2.5" and around.content[0].text == "5.0~35.0"
-    assert bad.is_error and "OUT_OF_DEVICE_MEMORY" not in bad.content[0].text and wrong.is_error
+    assert bad.is_error and wrong.is_error
     assert [(r["tool"], r["error"]) for r in tools.log.rows] == [
         ("rescan_sound", None), ("dialogue_around", None),
         ("describe_sound", "RuntimeError: UR_RESULT_ERROR_OUT_OF_DEVICE_MEMORY")]
