@@ -25,7 +25,7 @@ import numpy as np
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-STAGES = ["ingest", "script", "separate", "cuts", "sed", "asr", "align", "sfx", "music", "speaker", "screen",
+STAGES = ["ingest", "script", "separate", "cuts", "sed", "asr", "align", "cues", "sfx", "music", "speaker", "screen",
           "dialog_ev", "recommend", "agent", "placement", "export"]
 NO_TIME = ("ingest", "script", "export")        # nothing of theirs sits at a time (--at leaves them out)
 
@@ -46,6 +46,9 @@ INFO = {
             "asr.json"),
     "align": ("5.2 대본 줄 정렬", [("cboe/stages/align.py", "def run("), ("cboe/stages/align.py", "def align_lines("),
                                 ("cboe/stages/align.py", "def _place_unaligned(")], "dialogue.json"),
+    "cues": ("대본 단서 (지문에 적힌 소리·음악·침묵, 말하는 사람의 소리)",
+             [("cboe/stages/cues.py", "def run("), ("cboe/cues.py", "def extract("), ("cboe/cues.py", "def match_sounds(")],
+             "cues.json (실행마다 다시 만듦; 추천은 같은 단서를 다시 계산해 씀)"),
     "sfx": ("5.3 효과음 후보", [("cboe/stages/sfx.py", "def run("), ("cboe/stages/sfx.py", "T_ON, T_OFF =")],
             "sfx.json"),
     "music": ("5.4 음악 후보 (SED 'Music' + AST)", [("cboe/stages/music.py", "def run(")], "music.json"),
@@ -162,6 +165,20 @@ class Ctx:
             return phrases.ko(cls)
         except Exception:
             return cls
+
+    def name(self, cls, ko=None):
+        """The Korean name of a class for a list; one the table does not describe is only '소리'
+        in Korean, so its English name goes with it ('소리(Human sounds)')."""
+        ko = self.ko(cls) if ko is None else ko
+        return f"{ko}({cls})" if ko == _plain_sound() and cls else ko
+
+
+def _plain_sound() -> str:
+    try:
+        from cboe import phrases
+        return phrases.SOUND
+    except Exception:
+        return "소리"
 
 
 def head(name: str):
@@ -297,7 +314,7 @@ def st_sed(c: Ctx, a, b, full):
         if a is None:
             on = (P >= 0.3).sum(axis=0) / fps
             idx = np.argsort(-on)[:8]
-            print(f"  {ko}: 0.3 넘은 시간 상위 — " + ", ".join(f"{c.ko(names[i])} {on[i]:.0f}초" for i in idx))
+            print(f"  {ko}: 0.3 넘은 시간 상위 — " + ", ".join(f"{c.name(names[i])} {on[i]:.0f}초" for i in idx))
             continue
         i0, i1 = int((a - t0) * fps), int((b - t0) * fps)
         print(f"  {ko} (구간 최대 상위 6): {_top(P, names, i0, i1, 6, c)}")
@@ -373,11 +390,56 @@ def st_align(c: Ctx, a, b, full):
             print(f"      {cut(ln['text'], 100)}")
 
 
+CUE_KO = {"sfx": "소리", "music": "음악", "silence": "침묵", "vocal": "말하는 사람의 소리"}
+
+
+def _cue_row(q: dict) -> None:
+    w = q.get("window")
+    where = f"{ft(w[0])}~{ft(w[1])} ({'·'.join(q.get('window_by') or []) or '-'})" if w else "시각 범위 없음"
+    who = f" [{q['speaker']}]" if q.get("speaker") else ""
+    print(f"  {q['id']} {CUE_KO.get(q.get('type'), q.get('type'))}{who} {q.get('scene_id') or '-'} {where} "
+          f"→ {q.get('phrase') or '-'}")
+    print(f"      {cut(q.get('text'), 90)}")
+
+
+def st_cues(c: Ctx, a, b, full):
+    d = c.j("cues.json")
+    if d is None:
+        missing(c, "cues.json")
+        return
+    cues = d.get("cues") or []
+    if a is None:
+        kinds = Counter(q.get("type") for q in cues)
+        windowed = [q for q in cues if q.get("window")]
+        try:
+            from cboe import cues as cue_mod
+            wide_s = cue_mod.WIDE_S
+        except Exception:
+            wide_s = 30.0
+        wide = sum(1 for q in windowed if q["window"][1] - q["window"][0] > wide_s)
+        by = Counter(k for q in windowed for k in q.get("window_by") or [])
+        print(f"  단서 {len(cues)} · " + (", ".join(f"{CUE_KO.get(k, k)} {v}" for k, v in kinds.items()) or "없음")
+              + f" | 시각 범위 있음 {len(windowed)} (범위 끝을 정한 것: 대사 시각 {by.get('line', 0)}, "
+              f"장면 시각 {by.get('scene', 0)}; {wide_s:.0f}초보다 넓음 {wide})")
+        items = c.items()
+        if items:
+            hit = [it for it in items if it.get("cue_id") and it.get("origin") != "script"]
+            new = [it for it in items if it.get("origin") == "script"]
+            print(f"  추천(items.json)에서: 검출 후보에 붙음 {len(hit)} (이름을 대본에서 받음 "
+                  f"{sum(1 for it in hit if it.get('named_by') == 'script')}) · 대본만으로 만든 확인 필요 후보 {len(new)}")
+        if not full:
+            return
+    for q in cues:
+        w = q.get("window")
+        if a is None or (w and overlap(w[0], w[1], a, b)):
+            _cue_row(q)
+
+
 def _sfx_row(x, c: Ctx):
     lab = x["label"]
     st = "목록 밖" if lab.get("unknown") else ("확실" if lab.get("confident") else "불확실")
     comp = (" · 경쟁 " + ", ".join(f"{k['ko']} {k['score']:.2f}" for k in lab.get("competing", [])[:2])) if lab.get("competing") else ""
-    top = ", ".join(f"{k['ko']} {k['score']:.2f}" for k in lab.get("top", [])[:3])
+    top = ", ".join(f"{c.name(k.get('class'), k['ko'])} {k['score']:.2f}" for k in lab.get("top", [])[:3])
     rep = f" · 반복 {x['repeats']}" if x.get("repeats") else ""
     print(f"  {x['id']} {ft(x['onset'])}~{ft(x['t1'])} [{x.get('category')}] {lab['ko']}({lab['class']}) {lab['score']:.2f} "
           f"{st}{comp}{rep}")
@@ -393,7 +455,8 @@ def st_sfx(c: Ctx, a, b, full):
         print(f"  후보 {len(cands)} | 종류별 " + ", ".join(f"{k} {v}" for k, v in Counter(x['category'] for x in cands).items()))
         print(f"  목록 밖 {sum(x['label'].get('unknown', False) for x in cands)} · 종류 불확실 "
               f"{sum(not x['label'].get('confident') for x in cands)} · 경쟁 종류 있음 {sum(bool(x['label'].get('competing')) for x in cands)}")
-        print("  많이 나온 종류: " + ", ".join(f"{k} {v}" for k, v in Counter(x['label']['ko'] for x in cands).most_common(10)))
+        print("  많이 나온 종류: " + ", ".join(f"{k} {v}" for k, v in Counter(
+            c.name(x['label'].get('class'), x['label']['ko']) for x in cands).most_common(10)))
         print("  찾은 방법: " + ", ".join(f"{'+'.join(k)} {v}" for k, v in Counter(tuple(x.get('onset_by', [])) for x in cands).items()))
         if not full:
             return
@@ -636,6 +699,10 @@ def trace_item(c: Ctx, iid: str):
         head("speaker")
         print("  " + json.dumps(next((r for r in c.j("speaker.json", {}).get("lines", []) if r["line_id"] == lid), None),
                                 ensure_ascii=False))
+    if it.get("cue_id"):                       # the script cue it carries (or that made it, origin 'script')
+        head("cues")
+        q = next((q for q in c.j("cues.json", {}).get("cues", []) if q.get("id") == it["cue_id"]), None)
+        _cue_row(q) if q else print("  (cues.json 에 없음)")
     if it["kind"] != "speaker":
         head("dialog_ev")
         print("  " + json.dumps(c.j("dialog_ev.json", {}).get("items", {}).get(iid), ensure_ascii=False))

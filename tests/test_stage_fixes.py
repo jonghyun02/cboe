@@ -1098,6 +1098,51 @@ def test_agent_counts_a_raising_tool_when_the_call_then_fails(tmp_path, monkeypa
     assert {v["status"] for v in read_json(p.path("agent_results.json"))["failed"].values()} == {"error"}
 
 
+# ================================================================== tools/inspect_stages.py
+def _inspect_tool():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("inspect_stages_fa", Path(__file__).resolve().parents[1] / "tools"
+                                                  / "inspect_stages.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_inspect_tool_shows_the_cues_and_names_plain_sounds(tmp_path, capsys):
+    ins = _inspect_tool()
+    assert ins.STAGES.index("cues") == ins.STAGES.index("align") + 1 and set(ins.SHOW) == set(ins.STAGES)
+    p = _project(tmp_path, sfx={"candidates": [_unnamed()]})
+    write_json(p.path("cues.json"), {"version": 1, "counts": {}, "cues": [
+        {"id": "C0001", "type": "sfx", "scene_id": "SC001", "text": "탁자 위의 컵이 쨍그랑 깨진다.", "phrase": "[쨍그랑 - 유리]",
+         "window": [12.0, 20.0], "window_by": ["line", "line"]},
+        {"id": "C0002", "type": "vocal", "scene_id": "SC001", "speaker": "가온", "text": "한숨", "phrase": "[한숨]",
+         "window": [40.0, 80.0], "window_by": ["scene", "line"]},
+        {"id": "C0003", "type": "music", "scene_id": "SC009", "text": "지어낸 노래가 흐른다.", "phrase": "[음악]", "window": None}]})
+    write_json(p.path("items.json"), {"items": [
+        {**_unnamed(), "cue_id": "C0001", "named_by": "script", "rec": "check", "reason": "x", "evidence": []},
+        {"id": "C0002", "kind": "sfx", "origin": "script", "cue_id": "C0002", "onset": 41.0, "t0": 41.0, "t1": 42.5,
+         "rec": "check", "reason": "x", "evidence": [], "label": {"class": "", "ko": "한숨"}}]})
+    c = ins.Ctx(tmp_path)
+    ins.SHOW["cues"](c, None, None, False)
+    out = capsys.readouterr().out
+    assert "단서 3 · 소리 1, 말하는 사람의 소리 1, 음악 1" in out and "시각 범위 있음 2 (범위 끝을 정한 것: 대사 시각 3, 장면 시각 1;" in out
+    assert "넓음 1)" in out and "검출 후보에 붙음 1 (이름을 대본에서 받음 1) · 대본만으로 만든 확인 필요 후보 1" in out
+    ins.SHOW["cues"](c, 10.0, 15.0, False)                 # around a time: the cues whose window meets it
+    out = capsys.readouterr().out
+    assert "C0001" in out and "[쨍그랑 - 유리]" in out and "C0002" not in out
+    ins.SHOW["cues"](c, None, None, True)                  # the whole stage: also the cue without a window
+    out = capsys.readouterr().out
+    assert "C0003" in out and "시각 범위 없음" in out
+    ins.trace_item(c, "C0002")
+    assert "■ cues" in capsys.readouterr().out
+    # a class the table does not describe is '소리' in Korean: the list shows which one it is
+    assert c.name("Not a class at all") == "소리(Not a class at all)" and c.name("Thunder") == phrases.ko("Thunder")
+    assert c.name("Gunshot, gunfire", "총소리") == "총소리"
+    (tmp_path / "gone").mkdir()
+    ins.SHOW["cues"](ins.Ctx(tmp_path / "gone"), None, None, False)
+    assert "결과 없음: cues.json" in capsys.readouterr().out
+
+
 # ================================================================== 받아쓰기 (1-10, 6-m3, 5-02)
 def test_hotwords_are_the_names_said_in_the_dialogue():
     script = {"characters": ["가온", "나래", "친구1", "군인 2", "다솜이", "박 선생님", "솔", "가온"],
