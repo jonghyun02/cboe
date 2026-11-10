@@ -9,25 +9,31 @@ When the name is told (``revealed_at``): the first line, in film order, in which
 person says the name as a word — from the start of a word, followed by the end of the word or by
 a vocative, an honorific, a particle or a copula ('가온아', '가온 씨', '가온이가', '가온한테',
 '가온이라는', '가온이었어', '가온보다'); a name inside a longer word ('운전기사' for '기사') does not
-count — or in which the person says it of themselves ('가온입니다', '제 이름은 가온'). A name of
+count — or in which the person says it of themselves ('가온입니다', '제 이름은 가온'). A name said
+only with a copula or a comparison ('가온이라는', '가온이었어', '가온보다', '가온이나') follows a common
+word just as well ('사랑이라는', '영화보다'): such a line tells the name only when another line calls
+it in a sure form (as it is, a vocative, an honorific, a particle) or the person tells it. A name of
 one letter is in too many words ('수' in '할 수 있어'): it counts only with a vocative or an
-honorific ('수야', '수 씨') or as a plain self-introduction ('수입니다'). Only the lines given are
-read: the caller leaves out lines that are not in the film or that the writer took out.
+honorific ('수야', '수 씨'; not '씨' written onto it with a particle: '날씨가') or as a plain
+self-introduction ('수입니다'). Only the lines given are read: the caller leaves out lines that
+are not in the film or that the writer took out.
 
 The label shown (``display``): until the name is told, II.8 asks for a generic ID ('[남자]',
 '[여자]': "so as not to provide information that is not yet present in the narrative"). Whether
 a person is a man or a woman is nowhere in the script, so the writer decides, per person:
 ``{"mode": "generic", "before": "남자"}`` (that label before the name is told, the name after) or
 ``{"mode": "name"}`` (the name all along — role names such as 경찰1 · 직원 · 노파; a name that ends
-in a digit is a role name by default). ``reveal`` moves the line from which the name is shown:
+in a digit, and a speaker the script calls by a generic label itself — '남자', '여자', or a label
+the writer gives people — is a role name by default). ``reveal`` moves the line from which the name is shown:
 "auto" (the line after the one that tells it), "line" (``reveal_line``, from that line on: a name
 shown on screen), "never". A person the writer has not decided keeps the name, and when that name
 is shown before it is told the person is listed in ``early`` (for the review screen and the
 export check). Two people under the same label in one scene — a generic one, or a speaker the
 script itself calls '남자' next to a person the writer labels '남자' — are numbered in the order
 they first speak there ('[남자1]', '[남자2]'; counting restarts with the scene; no '1' for one
-person; a number another label of the scene already shows is skipped); without scenes the count
-runs over the whole film. Labels are never stored: they are made again
+person, unless the scene also shows that label with a number — '남자1' of the script and one
+person labelled '남자' are [남자1] [남자2]; a number another label of the scene already shows is
+skipped); without scenes the count runs over the whole film. Labels are never stored: they are made again
 every time from the lines and the decisions.
 
 ``scope_lines`` picks the lines a speaker change applies to — by person, never by the label text
@@ -49,10 +55,14 @@ PARTICLES = ("이한테", "이에게", "이랑은", "이라도", "이처럼", "�
              "이요", "이지", "이네", "이냐", "이니", "이만", "이고", "께서", "께", "아", "야", "이", "가", "은",
              "는", "을", "를", "도", "랑", "의", "와", "과", "요", "만", "고")
 # the name as a word in a sentence: '가온이라는 애', '가온이래', '가온이었어', '가온보다', '가온에게서',
-# '가온이나' (the forms after a final consonant start with 이)
-COPULA = (r"(?:이)?(?:었|였)[가-힣]{0,3}", r"(?:이)?라(?:는|고|서|면|니|도)?", r"(?:이)?란",
+# '가온이나' (the forms after a final consonant start with 이). These forms follow common words just
+# as well ('사랑이라는 게', '영화보다', '하늘이나 보자', '보람이었어'): a name said only so tells it
+# when it is also called in a surer form (``revealed_at``)
+COPULA = (r"(?:이)?(?:었|였)[가-힣]{0,3}", r"(?:이)?라(?:는|고|서|면|니)?", r"(?:이)?란",
           r"(?:이)?래(?:요)?", r"이에요", r"예요", r"이세요", r"세요")
 MORE = ("이한테서", "이에게서", "한테서", "에게서", "이보다", "보다", "이나", "나")
+# words the writer uses as generic labels: a speaker the script calls so is a role, not a name to tell
+GENERIC_WORDS = ("남자", "여자")
 # a person telling their own name: '가온입니다', '가온이에요', '가온이요', '가온이라고 해요'
 SELF = ("이라고", "이랍니다", "입니다", "이에요", "이예요", "인데요", "이고요", "라고", "랍니다", "예요",
         "이요", "이야", "이다", "인데", "요", "야", "다", "라")
@@ -77,9 +87,11 @@ def parts(name) -> list[str]:
     return list(dict.fromkeys(p.strip() for p in str(name or "").split(SPLIT) if p.strip()))
 
 
-def is_role(name) -> bool:
-    """A role name by default (no reveal to wait for): one that ends in a digit."""
-    return bool(ROLE.search(str(name or "").strip()))
+def is_role(name, generic=()) -> bool:
+    """A role name by default (no reveal to wait for): one that ends in a digit, or a generic label
+    itself ('남자', '여자', or one of ``generic``: the labels the writer gives people)."""
+    name = str(name or "").strip()
+    return bool(ROLE.search(name)) or name in GENERIC_WORDS or name in set(generic or ())
 
 
 def keys(name) -> list[str]:
@@ -90,12 +102,20 @@ def keys(name) -> list[str]:
 
 
 @lru_cache(maxsize=4096)
-def _called(key: str):
+def _called(key: str, weak: bool = True):
+    """The name said as a word: as it is, with an honorific or a particle (sure), and with
+    ``weak`` also with a copula or a comparison (``COPULA``, ``MORE``)."""
     k, hon = re.escape(key), _alt(HONORIFICS)
     if len(key) == 1:
-        return re.compile(rf"(?<![{LETTER}]){k}(?:\s?(?:{hon})(?:{_alt(PARTICLES)})?|{_alt(VOCATIVES)})(?![{LETTER}])")
-    tails = "|".join(list(COPULA) + [_alt(MORE), _alt(PARTICLES)])
-    return re.compile(rf"(?<![{LETTER}]){k}(?:{hon})?(?:{tails})?(?![{LETTER}])")
+        # '수 씨', '수님', '수야'; '씨' written onto the letter and followed by a particle is a word
+        # of its own ('날씨가', '솜씨는')
+        attached = _alt([h for h in HONORIFICS if h != "씨"])
+        return re.compile(rf"(?<![{LETTER}]){k}(?:\s(?:{hon})(?:{_alt(PARTICLES)})?|(?:{attached})(?:{_alt(PARTICLES)})?"
+                          rf"|씨|{_alt(VOCATIVES)})(?![{LETTER}])")
+    weak_tails = "|".join(list(COPULA) + [_alt(MORE)])
+    sure = rf"(?:{hon})(?:{weak_tails}|{_alt(PARTICLES)})?|(?:{_alt(PARTICLES)})"
+    tails = f"{sure}|{weak_tails}" if weak else sure
+    return re.compile(rf"(?<![{LETTER}]){k}(?:{tails})?(?![{LETTER}])")
 
 
 @lru_cache(maxsize=4096)
@@ -106,10 +126,11 @@ def _self(key: str):
                       rf"|이름[은이]\s*{k}(?![{LETTER}])|이름[은이]\s*{k}(?:{own})(?![{LETTER}])")
 
 
-def mentions(text, name) -> bool:
-    """Whether ``text`` says ``name`` as a word (module doc)."""
+def mentions(text, name, weak: bool = True) -> bool:
+    """Whether ``text`` says ``name`` as a word (module doc); ``weak=False``: only in the sure
+    forms (as it is, with an honorific, a vocative or a particle — not only a copula or '보다')."""
     t = str(text or "")
-    return any(k in t and _called(k).search(t) for k in keys(name))
+    return any(k in t and _called(k, weak).search(t) for k in keys(name))
 
 
 def introduces(text, name) -> bool:
@@ -121,36 +142,48 @@ def introduces(text, name) -> bool:
 def revealed_at(lines, name, key: str = "person"):
     """The first of ``lines`` (in the order given) that tells ``name``:
     ``{"line": id, "index": i, "by": speaker, "how": "called" | "self"}``, or None.
-    ``line[key]`` is who speaks it (a name, or 'A/B' for two)."""
+    ``line[key]`` is who speaks it (a name, or 'A/B' for two). A line that says the name only
+    with a copula or a comparison ('하늘이나 보자', '보람이었어') tells it only when another line
+    calls the name in a sure form or the person tells it (then from that first line on)."""
     if not name or not keys(name):
         return None
+    first_weak = None
     for i, ln in enumerate(lines):
         who = parts(ln.get(key))
         text = ln.get("text")
         if name in who:
             if introduces(text, name):
-                return {"line": ln.get("id"), "index": i, "by": ln.get(key), "how": "self"}
-        elif mentions(text, name):
-            return {"line": ln.get("id"), "index": i, "by": ln.get(key), "how": "called"}
+                return first_weak or {"line": ln.get("id"), "index": i, "by": ln.get(key), "how": "self"}
+        elif mentions(text, name, weak=False):
+            return first_weak or {"line": ln.get("id"), "index": i, "by": ln.get(key), "how": "called"}
+        elif first_weak is None and mentions(text, name):
+            first_weak = {"line": ln.get("id"), "index": i, "by": ln.get(key), "how": "called"}
     return None
 
 
-def table(script_people=(), names=()) -> list[dict]:
+def generic_labels(decisions) -> set:
+    """The generic labels the writer gives people (``before`` of the people labelled 'generic')."""
+    return {" ".join(str(d.get("before")).split()) for d in (decisions or {}).values()
+            if isinstance(d, dict) and d.get("mode") == "generic" and str(d.get("before") or "").strip()}
+
+
+def table(script_people=(), names=(), generic=()) -> list[dict]:
     """The people: ``script.json`` ``people`` ({id, name, cues}) first, then every other name of
     ``names`` (speaker names of the lines, the writer's names) split into people. Each:
-    ``{"id", "name", "cues", "role"}``; a name not in the script gets the id ``N:<name>``."""
+    ``{"id", "name", "cues", "role"}``; a name not in the script gets the id ``N:<name>``.
+    ``generic``: the generic labels in use (``is_role``)."""
     out, seen = [], set()
     for p in script_people or ():
         if not isinstance(p, dict) or not p.get("name") or p["name"] in seen:
             continue
         seen.add(p["name"])
         out.append({"id": p.get("id") or f"N:{p['name']}", "name": p["name"], "cues": list(p.get("cues") or []),
-                    "role": is_role(p["name"])})
+                    "role": is_role(p["name"], generic)})
     for n in names or ():
         for one in parts(n):
             if one not in seen:
                 seen.add(one)
-                out.append({"id": f"N:{one}", "name": one, "cues": [], "role": is_role(one)})
+                out.append({"id": f"N:{one}", "name": one, "cues": [], "role": is_role(one, generic)})
     return out
 
 
@@ -176,6 +209,7 @@ def display(lines, decisions=None, script_people=()) -> dict:
     decisions = decisions or {}
     index_of = {ln.get("id"): i for i, ln in enumerate(lines)}
     names = list(dict.fromkeys(n for ln in lines for n in parts(ln.get("person"))))
+    befores = generic_labels(decisions)
     info = {}
     for n in names:
         dec = decisions.get(n) or {}
@@ -183,7 +217,7 @@ def display(lines, decisions=None, script_people=()) -> dict:
         if mode == "generic" and not str(dec.get("before") or "").strip():
             mode = None
         rev = revealed_at(lines, n)
-        info[n] = {"name": n, "role": is_role(n), "mode": mode, "before": dec.get("before") if mode == "generic" else None,
+        info[n] = {"name": n, "role": is_role(n, befores), "mode": mode, "before": dec.get("before") if mode == "generic" else None,
                    "reveal": dec.get("reveal") or "auto", "reveal_line": dec.get("reveal_line"), "told": rev,
                    "switch": _switch(n, dec, rev, index_of), "from_line": None, "early": None}
     shown: dict = {}                      # line id -> [label of each person]
@@ -217,9 +251,11 @@ def display(lines, decisions=None, script_people=()) -> dict:
                 seen.append(n)
     number: dict = {}
     for (scene, lab), who in order.items():
-        if len(who) < 2:
+        # one person under the label, unless the scene also shows it with a number ('남자1' of the
+        # script next to a person the writer labels '남자': [남자1] [남자2], never [남자1] [남자])
+        if len(who) < 2 and not any(sc == scene and re.fullmatch(rf"{re.escape(lab)}\d+", lb) for sc, lb in order):
             continue
-        taken = {lb for (sc, lb), w in order.items() if sc == scene and len(w) == 1}
+        taken = {lb for (sc, lb), w in order.items() if sc == scene and len(w) == 1 and lb != lab}
         k = 0
         for n in who:
             k += 1
@@ -260,6 +296,8 @@ def scope_lines(lines, line_id, which="line") -> list[str]:
         if me.get("voice") is None:
             return [line_id]
         return [ln["id"] for ln in lines if ln.get("voice") == me.get("voice")]
+    if not me.get("person"):                  # a line nobody is named for: no 'same person' to go by
+        return [line_id]
     same = [(i, ln) for i, ln in enumerate(lines) if ln.get("person") == me.get("person")]
     if which == "from_here":
         return [ln["id"] for i, ln in same if i >= idx]

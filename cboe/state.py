@@ -118,6 +118,28 @@ def _check_len(text, most: int, what: str):
     return text
 
 
+def _check_name(name, what: str = "이름"):
+    """``name`` when the label '[name]' fits in one line of a cell (II.2: 16 letters), else
+    ReviewError — a name of 300 letters would make a one-second line a cell of 19 lines."""
+    from .style import MAX_UNITS
+    from .textutil import units
+    if name and units(f"[{name}]") > MAX_UNITS + 1e-9:
+        most = int(MAX_UNITS - units("[]"))
+        raise ReviewError(f"{what}: 한글 {most}자까지 쓸 수 있습니다 (화자 표시가 한 줄 {MAX_UNITS:g}자 안에 들어야 함)")
+    return name
+
+
+def _breaks(v, n: int) -> list[int]:
+    """The writer's cut points of a line of ``n`` eojeol: whole numbers 1 … n-1 (ReviewError)."""
+    if n <= 1:
+        raise ReviewError("한 어절 줄은 끊을 수 없습니다")
+    if not isinstance(v, (list, tuple)) or any(isinstance(x, bool) or not isinstance(x, int) for x in v):
+        raise ReviewError("끊을 자리는 어절 번호(정수) 목록입니다")
+    if any(x <= 0 or x >= n for x in v):
+        raise ReviewError(f"끊을 자리는 1~{n - 1} 사이 어절 번호입니다 (이 줄은 {n}어절)")
+    return sorted(set(v))
+
+
 def _line_base(ln: dict) -> str:
     return f"line@{ln.get('speaker') or ''}:{_norm(ln.get('text'))}"
 
@@ -653,7 +675,7 @@ class Project:
                 if v is None:
                     cur.pop(k, None)
                 else:
-                    cur[k] = _norm(v)                      # language "": spoken in Korean (no label)
+                    cur[k] = _check_name(_norm(v), "이름" if k == "name" else "언어")   # language "": in Korean
                     if k == "name" and not cur[k]:
                         cur.pop(k)
         if "source" in f:
@@ -679,14 +701,7 @@ class Project:
             if not v:
                 cur.pop("breaks", None)
             else:
-                n = len((_norm(cur.get("text")) or _norm(ln.get("text"))).split())
-                try:
-                    b = sorted({int(x) for x in v})
-                except (TypeError, ValueError):
-                    raise ReviewError("끊을 자리는 어절 번호 목록입니다") from None
-                if any(x <= 0 or x >= n for x in b):
-                    raise ReviewError(f"끊을 자리는 1~{n - 1} 사이 어절 번호입니다 (이 줄은 {n}어절)")
-                cur["breaks"] = b
+                cur["breaks"] = _breaks(v, len((_norm(cur.get("text")) or _norm(ln.get("text"))).split()))
         if f:
             raise ReviewError(f"모르는 칸입니다: {', '.join(sorted(f))}")
         if cur.get("include") is True and (ln.get("status") in NO_TIME or ln.get("start") is None) \
@@ -807,9 +822,14 @@ class Project:
         """Give the lines of ``scope`` (``cboe.people.SCOPES``, by person) the name ``name`` (None:
         back to the script's). Changes ``review``; returns the line ids."""
         from . import people as people_mod
+        _check_name(_norm(name))
         comp = self.compose(review)
         order = [{"id": ln["id"], "person": ln["name"], "scene_id": ln.get("scene_id"), "voice": ln.get("voice")}
                  for ln in comp["lines"]]
+        me = next((x for x in order if x["id"] == line_id), None)
+        if me is not None and not me["person"] and people_mod.scope(scope) not in ("line", "voice"):
+            # every line without a name would be 'the same person' (감사 3-m2: by person, never by label)
+            raise ReviewError("화자 이름이 없는 줄은 '이 줄'만 바꿀 수 있습니다")
         targets = people_mod.scope_lines(order, line_id, scope)
         dlg = self.dialogue()
         index = self._normalise_lines(review, dlg)
@@ -854,7 +874,7 @@ class Project:
                 if v is None or (k == "name" and not _norm(v)):
                     a.pop(k, None)
                 else:
-                    a[k] = _norm(v)
+                    a[k] = _check_name(_norm(v), "이름" if k == "name" else "언어")
         for k in ("sung", "show_name", "keep"):
             if k in f:
                 v = f.pop(k)
@@ -870,10 +890,12 @@ class Project:
             a["phrase"] = style.bracket(_check_len(_norm(f.pop("phrase")), MAX_PHRASE, "문구"))  # a label: [일어로 말한다]
         if "breaks" in f:
             v = f.pop("breaks") or []
-            n = len(_norm(a.get("text")).split())
-            if any(not isinstance(x, int) or x <= 0 or x >= n for x in v):
-                raise ReviewError(f"끊을 자리는 1~{n - 1} 사이 어절 번호입니다")
-            a["breaks"] = sorted(set(v))
+            if v and kind != "line":
+                raise ReviewError("끊을 자리는 대사 줄에만 정합니다")
+            if v:
+                a["breaks"] = _breaks(v, len(_norm(a.get("text")).split()))
+            else:
+                a.pop("breaks", None)
         if f:
             raise ReviewError(f"모르는 칸입니다: {', '.join(sorted(f))}")
         if a.get("start") is None or a.get("end") is None:
@@ -972,7 +994,7 @@ class Project:
         if "before" in f:
             b = _norm(f.pop("before")).strip("[] ")
             if b:
-                d["before"] = b
+                d["before"] = _check_name(b, "일반 표시")
             else:
                 d.pop("before", None)
         if "reveal" in f or "reveal_line" in f:
@@ -1222,7 +1244,7 @@ class Project:
             for n in people_mod.parts(ln["name"]):
                 count[n] = count.get(n, 0) + 1
         prow = []
-        for p in people_mod.table(script.get("people") or (), names):
+        for p in people_mod.table(script.get("people") or (), names, people_mod.generic_labels(pdec)):
             info = disp["people"].get(p["name"]) or {}
             told = info.get("told")
             prow.append(dict(p, lines=count.get(p["name"], 0), told=told, from_line=info.get("from_line"),
@@ -1362,7 +1384,8 @@ class Project:
         ``writer_excluded``, ``no_room`` (no cell: a guessed line squeezed between two others),
         ``unsettled`` (placement did not settle: the draft may show the name otherwise, ``settle``),
         ``aside`` (keys of the writer's line decisions on no line since the script changed).
-        ``extras_open``: '대본에 없는 말' not decided yet. ``names_early``: people whose name is
+        ``extras_open``: '대본에 없는 말' not decided yet (``extras_suspect``: those of them marked
+        ``suspect`` — a credit, a greeting, a repeat). ``names_early``: people whose name is
         shown before it is told (``{"person", "line", "told"}``; told None = never called)."""
         from . import check, style
         draft = draft if draft is not None else self.draft()
@@ -1403,7 +1426,10 @@ class Project:
                 "exclude_recommended": undecided_ex, "unnamed": unnamed,
                 "violations": [{"cell": c["id"], "violations": c["check"]["violations"]} for c in viol],
                 "guide": guide, "flags": flags, "profile": profile, "lines": lines,
-                "extras_open": [x["id"] for x in comp["extras"] if x["state"] == "open"], "names_early": early}
+                "extras_open": [x["id"] for x in comp["extras"] if x["state"] == "open"],
+                # of those, the ones the align stage suspects (credit | greeting | repeat: dialogue.json suspect)
+                "extras_suspect": [x["id"] for x in comp["extras"] if x["state"] == "open" and x.get("suspect")],
+                "names_early": early}
 
     def export(self, fmt: str = "srt", report: bool = False):
         """Write the draft as ``fmt`` (srt | vtt | ttml) into the work folder's ``export``.
@@ -1498,9 +1524,10 @@ def _speaker_runs(lines: list[dict], eff: list[dict], decide, unplaced=()) -> No
                 if cont and decide(s2, last)[0] == "exclude" and face == "not_visible":
                     rec, follows = "exclude", last["root"]
                     reason = f"{CONTINUES} · " + ("앞 줄에 이름 표시" if last["shown"] else "앞 줄에서 이미 식별됨")
-                elif same and last["pending"]:
+                elif same and last["pending"] and face != "visible":
                     # the same speaker goes on after a line still 확인 필요: this line keeps its own
-                    # recommendation until the writer decides that one (recommend: '앞 줄을 먼저 정해야 함')
+                    # recommendation until the writer decides that one (recommend: '앞 줄을 먼저 정해야 함';
+                    # a face seen needs no name whatever the line before gets)
                     follows, reason = last["pending"], f"{reason} · {WAITS}"
                 if (rec, reason, follows) != (it.get("rec"), it.get("reason"), it.get("follows")):
                     it["rec_stage"] = it.get("rec_stage", it.get("rec"))

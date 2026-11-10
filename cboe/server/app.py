@@ -54,7 +54,7 @@ from typing import Literal
 from fastapi import FastAPI, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel
+from pydantic import BaseModel, StrictInt
 
 from .. import export as export_mod
 from .. import proxy, style
@@ -90,7 +90,7 @@ class LineUpdate(BaseModel):
     sung: bool | None = None
     start: float | None = None
     end: float | None = None
-    breaks: list[int] | None = None
+    breaks: list[StrictInt] | None = None
     keep: bool | None = None
     show_name: bool | None = None          # only for a line without a speaker item
     source: str | None = None              # state.SOURCES (inner, phone …) or "" for none; null: the script's
@@ -131,7 +131,7 @@ class AddedNew(BaseModel):
     language: str | None = None
     sung: bool | None = None
     show_name: bool | None = None
-    breaks: list[int] | None = None
+    breaks: list[StrictInt] | None = None
     keep: bool | None = None
 
 
@@ -144,7 +144,7 @@ class AddedUpdate(BaseModel):
     language: str | None = None
     sung: bool | None = None
     show_name: bool | None = None
-    breaks: list[int] | None = None
+    breaks: list[StrictInt] | None = None
     keep: bool | None = None
 
 
@@ -305,7 +305,9 @@ def export_warnings(chk: dict) -> list[str]:
         if ln.get(key):
             out.append(text.format(len(ln[key])))
     if chk.get("extras_open"):
-        out.append(f"아직 정하지 않은 '대본에 없는 말' {len(chk['extras_open'])}개 (자막에 넣지 않음)")
+        sus = len(chk.get("extras_suspect") or [])
+        out.append(f"아직 정하지 않은 '대본에 없는 말' {len(chk['extras_open'])}개 (자막에 넣지 않음"
+                   + (f" · 그중 크레디트·인사·반복 의심 {sus}개)" if sus else ")"))
     if chk.get("names_early"):
         out.append(f"이름이 밝혀지기 전에 이름 표시가 나가는 인물 {len(chk['names_early'])}명")
     return out
@@ -616,9 +618,15 @@ class ReviewService:
                 "differs_open": len(((chk or {}).get("lines") or {}).get("differs_open") or [])}
             summary["extras"] = {s: sum(1 for x in comp["extras"] if x["state"] == s) for s in ("open", "line", "ignored")}
             summary["extras"]["total"] = len(comp["extras"])
+            # suspects among those not decided yet (dialogue.json suspect: credit | greeting | repeat)
+            sus = [x["suspect"] for x in comp["extras"] if x["state"] == "open" and x.get("suspect")]
+            summary["extras"]["suspect"] = len(sus)
+            summary["extras"]["by_suspect"] = {k: sus.count(k) for k in ("credit", "greeting", "repeat")}
+            # decided = a way of labelling chosen (the screen counts the same); a reveal line alone is not
             summary["people"] = {"total": len(comp["people"]),
                                  "early": sum(1 for x in comp["people"] if x.get("early")),
-                                 "decided": sum(1 for x in comp["people"] if x.get("decision"))}
+                                 "decided": sum(1 for x in comp["people"] if x.get("mode")),
+                                 "reveal_only": sum(1 for x in comp["people"] if x.get("decision") and not x.get("mode"))}
 
             video = meta.get("video")
             project = {"title": meta.get("title") or p.work.name, "fps": fps, "t0": t0, "t1": t1,
@@ -716,7 +724,10 @@ def create_app(work, media=None) -> FastAPI:
                 fields.setdefault("short", None)          # back to the pipeline's phrase pair
             if fields.get("scope") is None:
                 fields.pop("scope", None)
-            svc.project.set_decision(item_id, **fields)
+            try:
+                svc.project.set_decision(item_id, **fields)
+            except ReviewError as exc:                    # a name too long, a scope a nameless line cannot take
+                raise HTTPException(409 if isinstance(exc, Conflict) else 400, str(exc)) from None
             return svc.state(recompute=True)
 
     @app.post("/api/placement/{item_id}")

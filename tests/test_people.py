@@ -185,3 +185,48 @@ def test_scope_never_reaches_another_person_under_the_same_label():
         people.scope_lines(lines, "L1", "everyone")
     with pytest.raises(KeyError):
         people.scope_lines(lines, "L9", "line")
+
+
+# ------------------------------------------------------------------ 4차: 흔한 낱말과 겹치는 이름, 역할, 번호
+@pytest.mark.parametrize("text, name", [("하나였어 그때는", "하나"), ("영화보다 책이 좋아", "영화"),
+                                        ("사랑이라는 게 뭔데", "사랑"), ("하늘이나 보자", "하늘"),
+                                        ("바다보다 넓어", "바다"), ("보람이었어 그 일이", "보람")])
+def test_a_common_word_said_with_a_copula_or_a_comparison_tells_no_name(text, name):
+    assert not people.mentions(text, name, weak=False)
+    assert people.revealed_at([ln("L1", "구름", text), ln("L2", name, "응")], name) is None
+
+
+def test_such_a_line_tells_the_name_once_another_line_calls_it():
+    lines = [ln("L1", "구름", "하늘이나 불러"), ln("L2", "바다", "뭐?"), ln("L3", "바다", "하늘아 이리 와")]
+    assert people.revealed_at(lines, "하늘")["line"] == "L1"
+    assert people.revealed_at(lines[:2], "하늘") is None
+    intro = [ln("L1", "구름", "하늘이라는 애 알아?"), ln("L2", "하늘", "저는 하늘입니다")]
+    assert people.revealed_at(intro, "하늘")["line"] == "L1"
+
+
+@pytest.mark.parametrize("text, name", [("하나라도 남겨 둬", "하나"), ("날씨가 좋다", "날"), ("솜씨는 좋네", "솜")])
+def test_words_that_only_look_like_a_name_with_a_tail(text, name):
+    assert not people.mentions(text, name)
+
+
+def test_a_speaker_the_script_calls_by_a_generic_label_is_a_role():
+    assert people.is_role("남자") and people.is_role("여자") and people.is_role("노인", {"노인"})
+    assert not people.is_role("하늘")
+    d = people.display([ln("L1", "남자", "거기 서 봐요"), ln("L2", "하늘", "그 남자가 왜 저래"),
+                        ln("L3", "남자", "잠깐 얘기 좀 해요")])
+    assert d["people"]["남자"]["early"] is None and d["people"]["남자"]["role"]
+    t = people.table([], ["남자", "가람", "노인"], generic={"노인"})
+    assert [p["role"] for p in t] == [True, False, True]
+
+
+def test_a_role_name_with_a_number_and_one_person_under_the_same_label_are_both_numbered():
+    lines = [ln("L1", "남자1", "여기 누구 없어요"), ln("L2", "가람", "저쪽으로 가 봐요"),
+             ln("L3", "가람", "또 보네요", "SC002")]
+    d = people.display(lines, {"가람": {"mode": "generic", "before": "남자"}})
+    assert [d["labels"][x["id"]] for x in lines] == ["남자1", "남자2", "남자"]       # alone in the next scene
+
+
+def test_a_line_nobody_is_named_for_has_no_same_person():
+    lines = [ln("L1", None, "a"), ln("L2", "가람", "b"), ln("L3", None, "c")]
+    for which in ("from_here", "before", "scene", "person"):
+        assert people.scope_lines(lines, "L1", which) == ["L1"]

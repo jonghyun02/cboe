@@ -648,7 +648,8 @@ def test_state_carries_lines_extras_scenes_people_and_counts(client):
     sm = st["summary"]["lines"]
     assert sm["status"] == {"ok": 4, "differs": 1, "unheard": 1, "absent": 1, "out_of_range": 1}
     assert sm["excluded"]["absent"] == 1 and sm["excluded"]["out_of_range"] == 1 and sm["included"] == 6
-    assert st["summary"]["extras"] == {"open": 2, "line": 0, "ignored": 0, "total": 2}
+    assert st["summary"]["extras"] == {"open": 2, "line": 0, "ignored": 0, "total": 2, "suspect": 0,
+                                       "by_suspect": {"credit": 0, "greeting": 0, "repeat": 0}}
     assert st["summary"]["people"]["early"] == 2
     assert {x["id"] for x in st["scenes"]} == {"SC001", "SC002", "SC003"}
     chk = st["export_check"]
@@ -1021,3 +1022,63 @@ def test_where_a_line_comes_from_goes_with_the_name(tmp_path):
         assert c.post("/api/lines/L0001", json={"source": "telepathy"}).status_code == 400
         st = c.post("/api/lines/L0001", json={"source": None}).json()             # back to the script's
         assert by_id(st["lines"])["L0001"]["label"] == "[하늘/속마음]"
+
+
+# =================================================================== 4차: 서버 글·수·상한
+def test_cut_points_messages_and_strict_numbers(client):
+    c, p = client
+    r = c.post("/api/added", json={"kind": "sfx", "start": 30.0, "end": 31.0, "phrase": "쿵", "breaks": [1]})
+    assert r.status_code == 400 and r.json()["detail"] == "끊을 자리는 대사 줄에만 정합니다"
+    assert c.post("/api/added", json={"kind": "sfx", "start": 30.0, "end": 31.0, "phrase": "쿵", "breaks": []}).status_code == 200
+    r = c.post("/api/added", json={"kind": "line", "start": 32.0, "end": 33.0, "text": "가자", "breaks": [1]})
+    assert r.status_code == 400 and r.json()["detail"] == "한 어절 줄은 끊을 수 없습니다"
+    assert c.post("/api/added", json={"kind": "line", "start": 32.0, "end": 33.0, "text": "하나 둘",
+                                      "breaks": [True]}).status_code == 422
+    c.post("/api/lines/L0007", json={"text": "꼼짝마"})
+    r = c.post("/api/lines/L0007", json={"breaks": [1]})
+    assert r.status_code == 400 and r.json()["detail"] == "한 어절 줄은 끊을 수 없습니다"
+    assert c.post("/api/lines/L0004", json={"breaks": [True]}).status_code == 422
+    with pytest.raises(ReviewError):
+        p.set_line("L0004", breaks=[True])
+    assert c.post("/api/lines/L0004", json={"breaks": [1]}).status_code == 200
+
+
+def test_names_and_generic_labels_fit_in_one_line(client):
+    c, p = client
+    r = c.post("/api/lines/L0005", json={"name": "가" * 300})
+    assert r.status_code == 400 and "15자까지" in r.json()["detail"]
+    assert c.post("/api/lines/L0005", json={"name": "가" * 15}).status_code == 200
+    assert c.post("/api/lines/L0005/speaker", json={"name": "가" * 16, "scope": "line"}).status_code == 400
+    assert c.post("/api/items/P0005", json={"name": "가" * 16}).status_code == 400
+    assert c.post("/api/added", json={"kind": "line", "start": 32.0, "end": 33.0, "text": "가자",
+                                      "name": "나" * 40}).status_code == 400
+    r = c.post("/api/people", json={"names": ["하늘"], "mode": "generic", "before": "남" * 400})
+    assert r.status_code == 400 and r.json()["detail"].startswith("일반 표시:")
+
+
+def test_people_and_extras_counts(tmp_path):
+    ex = [dict(EXTRAS[0]), dict(EXTRAS[1], suspect="greeting", suspect_by={"speech": 0.1, "music": 0.6})]
+    p = make(tmp_path, extras=ex)
+    with TestClient(create_app(p.work)) as c:
+        st = c.post("/api/people", json={"names": ["바다"], "reveal": "line", "reveal_line": "L0004"}).json()
+        assert st["summary"]["people"]["decided"] == 0 and st["summary"]["people"]["reveal_only"] == 1
+        st = c.post("/api/people", json={"names": ["하늘"], "mode": "name"}).json()
+        assert st["summary"]["people"]["decided"] == 1
+        x2 = by_id(st["extras"])["X0002"]
+        assert x2["suspect"] == "greeting" and x2["suspect_by"]
+        assert (st["summary"]["extras"]["suspect"], st["summary"]["extras"]["by_suspect"]["greeting"]) == (1, 1)
+        assert st["export_check"]["extras_suspect"] == ["X0002"]
+        assert any("그중 크레디트·인사·반복 의심 1개" in w for w in export_warnings(st["export_check"]))
+        st = c.post("/api/extras/X0002", json={"action": "ignore"}).json()
+        assert st["summary"]["extras"]["suspect"] == 0
+
+
+def test_a_scope_on_a_line_without_a_name_is_this_line_only(tmp_path):
+    ls = [line("L0001", None, "누구야", 10.0, 11.0), line("L0002", None, "나야", 12.0, 13.0),
+          line("L0003", "하늘", "가자", 14.0, 15.0)]
+    p = make(tmp_path, lines=ls, items=[], extras=[])
+    with pytest.raises(ReviewError):
+        p.set_speaker("L0001", "구름", "person")
+    p.set_speaker("L0001", "구름", "line")
+    names = {k: v["name"] for k, v in by_id(p.effective_lines()).items()}
+    assert names == {"L0001": "구름", "L0002": None, "L0003": "하늘"}
