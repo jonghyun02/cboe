@@ -8,6 +8,7 @@ from pathlib import Path
 
 import pytest
 
+from cboe import check
 from cboe.placement import place
 from cboe.textutil import units
 
@@ -140,11 +141,31 @@ def test_end_never_past_next_cell_minus_two_frames():
     assert "초당 14자 초과" in a["check"]["violations"]        # no room: reported, text unchanged
 
 
-def test_gap_under_half_second_closed_to_two_frames():
-    d = run([L("L1", "안녕하세요", 10.0, 11.0), L("L2", "반가워요", 11.8, 12.6)])
+def test_gap_under_half_second_is_half_a_second_after_the_tail_else_two_frames():
+    # audit 2-08, TG5: "If an out-time has been extended by half a second beyond the end of the audio,
+    # avoid extending this further to close gaps … ensuring that the gap is half a second or more".
+    # The cell has had its half second after the speech: it is not made longer, it comes forward
+    for nxt in (11.8, 11.9):                        # (it used to end 2 frames before L2: speech + 0.8 s)
+        d = run([L("L1", "안녕하세요", 10.0, 11.0), L("L2", "반가워요", nxt, nxt + 0.8)])
+        a, b = one(d, "L1"), one(d, "L2")
+        assert a["end"] == sec(F(nxt) - 12) and nframes(a["end"], b["start"]) == 12, (nxt, a)
+        assert F(11.0) < F(a["end"]) < F(11.0) + 12 and a["check"]["violations"] == []
+        res = check.run(d, cuts=[])                 # the checker's gap rules (short_gap) agree
+        assert res["summary"]["must"] == 0 and not any("gap" in v["code"] for v in res["violations"])
+    # the half second after the speech was cut short by the next line: the gap is closed to 2 frames
+    d = run([L("L1", "안녕하세요", 10.0, 11.0), L("L2", "반가워요", 11.3, 12.0)])
+    assert nframes(one(d, "L1")["end"], one(d, "L2")["start"]) == 2
+    assert one(d, "L1")["check"]["gap_next"] in (0.083, 0.084)
+    # 5/6 s comes first: half a second before L2 would leave '응' under 5/6 s, so the gap is closed
+    d = run([L("L1", "응", 10.0, 10.1), L("L2", "반가워요", 11.2, 12.0)])
     a, b = one(d, "L1"), one(d, "L2")
-    assert nframes(a["end"], b["start"]) == 2
-    assert a["check"]["gap_next"] in (0.083, 0.084)
+    assert nframes(a["end"], b["start"]) == 2 and nframes(a["start"], a["end"]) > MIN_F
+    assert d["summary"]["violations"] == 0
+    # a shot change in the gap: the shot change rules decide, as before (2 frames before the cut,
+    # the next line starts on it)
+    d = run([L("L1", "안녕하세요", 10.0, 11.0), L("L2", "반가워요", 11.8, 12.6)], cuts=[11.75])
+    a, b = one(d, "L1"), one(d, "L2")
+    assert a["end"] == sec(F(11.75) - 2) and b["start"] == sec(F(11.75))
     d = run([L("L1", "안녕하세요", 10.0, 11.0), L("L2", "반가워요", 12.2, 12.8)])
     a = one(d, "L1")
     assert a["end"] == sec(F(11.0) + 12)          # 0.7 s gap stays
@@ -667,11 +688,14 @@ def test_window_clamps_cells_and_reports_sounds_outside():
 
 
 def test_other_frame_rates_keep_two_frames_and_half_seconds():
-    for fps in (25.0, 29.97, 60.0):
+    for fps, half in ((25.0, 13), (29.97, 15), (60.0, 30)):         # half a second: 12.5 -> 13 frames
         d = place([L("L1", "안녕하세요", 10.0, 11.0), L("L2", "반가워요", 11.8, 12.6)], [], [], fps)
         a, b = d["cells"]
-        assert round((b["start"] - a["end"]) * fps) == 2
+        assert round((b["start"] - a["end"]) * fps) == half          # after the tail: half a second (TG5)
         assert abs(a["start"] * fps - round(a["start"] * fps)) < 0.06
+        d = place([L("L1", "안녕하세요", 10.0, 11.0), L("L2", "반가워요", 11.3, 12.0)], [], [], fps)
+        a, b = d["cells"]
+        assert round((b["start"] - a["end"]) * fps) == 2             # the tail cut short: 2 frames
 
 
 def test_a_frame_rate_a_hair_off_a_whole_rate_counts_its_limits_at_that_rate():

@@ -151,13 +151,20 @@ in a cell or in ``no_room``. A sound phrase of an older work folder ('♬ 무서
 today's notation ('[무서운 음악]').
 
 End adjustment (memo 5.2 끝 조정, TG1, 2, 4, 5), every cell in time order: ① a gap under half a
-second to the next cell is closed to 2 frames; ② an out-time within half a second before a shot
+second to the next cell is closed to 2 frames, except after a cell with dialogue that already stays
+half a second after its audio: that one is not made longer and ends half a second before the next
+cell instead (TG5 "If an out-time has been extended by half a second beyond the end of the audio,
+avoid extending this further to close gaps … ensuring that the gap is half a second or more",
+audit 2-08), unless that leaves it under 5/6 s or over the reading speed (closed to 2 frames: the
+musts first) or a shot change is within half a second before that out-time or in the gap (the
+shot change rules decide, as before: TG2 applies them after the half second too); ② an out-time
+within half a second before a shot
 change moves to 2 frames before it (when the next cell starts after the cut); ③ a cell whose audio
 is over before a shot change it crosses ends 2 frames before the cut when 5/6 s and 14 units/s
 still hold (a dialogue cell that cannot stays at least half a second into the new shot); a dialogue
 cell whose speech crosses the cut runs at least half a second past it where there is room; a sound
 that goes on past the cut may cross it. A gap of 3 frames to half a second that ③ leaves without a
-cut in it is closed again (or, when 7 s forbids it, widened to half a second). ④ a dialogue cell
+cut in it is closed again as in ① (or, when 7 s forbids it, widened to half a second). ④ a dialogue cell
 that starts less than half a second after a cut the cell before ends 2 frames before (or on) starts
 on the cut (TG2), which closes that gap to 2 frames (TG5). A gap with a cut in it that is left
 (a sound starts on its onset, BBC 5.5) is not reported by placement; any other is ("빈틈 0.5초 미만").
@@ -1333,8 +1340,11 @@ def _adjust_ends(cells: list[_Cell], cuts: list[int], P: _P, w1) -> None:
             limit = min(limit, w1)
         limit = min(limit, caps.get(id(c), INF))       # never over a scene change (TG 4)
         cap = min(limit, c.start + P.max_f)
-        if nxt is not None and P.gap < nxt - c.end < P.half_exact - 1e-9 and nxt - P.gap <= cap:
-            c.end = nxt - P.gap                      # ① close a gap under half a second (TG5)
+        if nxt is not None and P.gap < nxt - c.end < P.half_exact - 1e-9:
+            if _rested(c, nxt, cuts, P):             # ① its half second after the audio: no longer (TG5)
+                c.end = _half_before(nxt, P)
+            elif nxt - P.gap <= cap:
+                c.end = nxt - P.gap                  # ① close a gap under half a second (TG5)
         ahead = [x for x in cuts if c.end < x <= c.end + P.half]
         if ahead:                                    # ② out-time just before a cut (TG2)
             x = ahead[0]
@@ -1344,13 +1354,38 @@ def _adjust_ends(cells: list[_Cell], cuts: list[int], P: _P, w1) -> None:
         c.end = max(min(c.end, limit), c.start + 1)
         if nxt is not None and P.gap < nxt - c.end < P.half_exact - 1e-9 \
                 and not any(c.end <= x <= nxt for x in cuts):
-            if nxt - P.gap <= cap:                   # ③ moved the end: close the gap again,
+            if _rested(c, nxt, cuts, P):             # ③ moved the end: as ①,
+                c.end = _half_before(nxt, P)
+            elif nxt - P.gap <= cap:                 # close the gap again,
                 c.end = nxt - P.gap
             else:                                    # or, at 7 s, make it half a second (TG5)
-                half_gap = nxt - int(math.ceil(P.half_exact - 1e-9))
+                half_gap = _half_before(nxt, P)
                 if half_gap >= _floor(c, P):
                     c.end = max(half_gap, c.start + 1)
     _start_on_cut(cells, cuts, P)
+
+
+def _half_before(nxt: int, P: _P) -> int:
+    """The out-time that leaves a gap of half a second before ``nxt`` (12 frames at 24 fps)."""
+    return nxt - int(math.ceil(P.half_exact - 1e-9))
+
+
+def _rested(c: _Cell, nxt: int, cuts: list[int], P: _P) -> bool:
+    """① of the end adjustment for a gap under half a second before ``nxt``: whether ``c`` ends half a
+    second before ``nxt`` instead of closing the gap. TG5 "If an out-time has been extended by half a
+    second beyond the end of the audio, avoid extending this further to close gaps. Instead, consider
+    either re-segmenting or merging subtitles, or ensuring that the gap is half a second or more"
+    (끝 시각을 이미 소리 끝 뒤 0.5초까지 늘렸으면 빈틈을 닫으려고 더 늘리지 않는다. 대신 다시 나누거나
+    합치거나, 빈틈이 0.5초 이상이 되게 한다; audit 2-08): a cell with dialogue that stays half a second
+    after its audio (TG1) comes forward to half a second before the next cell. Not when that leaves it
+    under 5/6 s or over the reading speed (GR 1, II.3, musts: first; the gap is then closed to 2
+    frames as before), nor when a shot change lies within half a second before that out-time or in
+    the gap: there the shot change rules decide (② ③; TG2 "These rules can be applied when the
+    out-time has already been extended by half a second past the audio"), as before."""
+    if not c.dialogue() or c.end - c.audio_end() < P.tail:
+        return False
+    half_gap = _half_before(nxt, P)
+    return half_gap >= _floor(c, P) and not any(half_gap - P.half < x <= nxt for x in cuts)
 
 
 def _start_on_cut(cells: list[_Cell], cuts: list[int], P: _P) -> None:
