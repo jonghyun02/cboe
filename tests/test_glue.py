@@ -471,20 +471,25 @@ def test_a_speakers_sound_without_words_keeps_its_place_in_the_file(tmp_path):
 def test_a_row_that_names_another_speaker_is_that_speakers_line(tmp_path):
     """'- [가람] 가자.' / '[나래] 응.' (no hyphen on the second row): one speaker per row (I.6), a
     speaker ID where a speaker starts (II.8) — two lines of the cell, not 가람's '가자. 응.' with
-    나래 as his manner of speech. The same speaker named again, or a sound row, splits nothing."""
+    나래 as his manner of speech. The same speaker named again, a sound row, or a label that
+    starts nobody's words in the file (a manner: '[화내며]') splits nothing."""
     f = tmp_path / "mixed.srt"
     f.write_text("1\n00:00:01,000 --> 00:00:03,000\n- [가람] 가자.\n[나래] 응.\n\n"
                  "2\n00:00:04,000 --> 00:00:06,000\n[가람] 됐어.\n[나래] [웃음]\n\n"
                  "3\n00:00:07,000 --> 00:00:09,000\n- [가람] 가자.\n[김나래/속마음]\n응.\n\n"
                  "4\n00:00:10,000 --> 00:00:12,000\n[가람] 가자.\n[가람/속삭이며] 응.\n\n"
-                 "5\n00:00:13,000 --> 00:00:15,000\n[가람] 가자.\n[쾅]\n응.\n", encoding="utf-8")
+                 "5\n00:00:13,000 --> 00:00:15,000\n[가람] 가자.\n[쾅]\n응.\n\n"
+                 "6\n00:00:16,000 --> 00:00:18,000\n[가람] 가자.\n[화내며] 빨리 와.\n\n"
+                 "7\n00:00:19,000 --> 00:00:21,000\n[나래] 그래.\n", encoding="utf-8")
     doc = script.read(f)
     got = [(ln["speaker"], ln["text"], ln.get("turn"), ln["delivery"], ln["source"]) for ln in doc["lines"]]
     assert got == [("가람", "가자.", "1-1", [], None), ("나래", "응.", "1-2", [], None),
                    ("가람", "됐어.", "2-1", [], None),
                    ("가람", "가자.", "3-1", [], None), ("김나래", "응.", "3-2", [], "inner"),
                    ("가람", "가자. 응.", None, ["속삭이며"], None),
-                   ("가람", "가자. 응.", None, [], None)]
+                   ("가람", "가자. 응.", None, [], None),
+                   ("가람", "가자. 빨리 와.", None, ["화내며"], None),
+                   ("나래", "그래.", None, [], None)]
     assert [(w["speaker"], w["vocal"], w.get("turn")) for w in doc["wordless"]] == [("나래", ["웃음"], "2-2")]
 
 
