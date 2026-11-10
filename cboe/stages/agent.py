@@ -18,7 +18,8 @@ longer made.
 A re-check in which a tool raised and never answered (the sound description model out of
 GPU memory, say) is not a finished re-check: it is kept as ``tool_error`` under "failed" in
 agent_results.json, is not counted against ``agent_limit`` and is asked again by the next
-run (감사 4-m1).
+run (감사 4-m1). After TOOL_ERROR_STOP such re-checks in a row the rest of the queue is not
+asked in this run (it would be asked for nothing) and stays for the next one.
 
 Writes agent/<id>.json (prompt, the tool calls with what each returned, answer),
 agent_results.json, updates items.json.
@@ -39,6 +40,10 @@ PROMPT_VERSION = 2          # 2: source_ko added, no single example phrase (llm_
 TOOLS = ["rescan_sound", "describe_sound", "look_frames", "dialogue_around", "search_dialogue", "scene_context"]
 MAX_TOOL_CALLS = 6          # 확인 한도 (told to the model)
 MAX_TURNS = 14              # hard stop of the CLI; reaching it is an error that is retried next run
+# A tool that raises for this many re-checks in a row is broken for this run (in one stored run the
+# sound description model was out of GPU memory on all 19 calls): the rest of the queue is not asked
+# now — every such re-check would be thrown away and asked again — and stays for the next run.
+TOOL_ERROR_STOP = 3
 NO_NAME = ("소리", "알 수 없는 소리", "효과음", "모름", "없음", "알 수 없음", "불명")
 SYSTEM = (
     "너는 청각장애인용(SDH) 자막 작가를 돕는 재확인 에이전트다. 자동 판정이 애매했던 후보 하나를 도구로 다시 확인한다. "
@@ -189,7 +194,11 @@ def run(p, cfg: dict) -> dict:
     """Re-check the queue, continuing from earlier runs until ``agent_limit`` candidates in
     total have a finished result. Failed checks — the LLM call failed, or a tool raised and
     never answered — are retried on the next run and do not count against the limit; results
-    whose candidate changed (fingerprint) are dropped. items.json is always rebuilt."""
+    whose candidate changed (fingerprint) are dropped. items.json is always rebuilt.
+    agent_done.json: "ran" (asked in this run), "failed" (ids asked without a finished result),
+    "tool_failed" (those of them a raising tool left unfinished), "stopped" (the queue was cut
+    short after TOOL_ERROR_STOP of them in a row), "left" (ids not asked: over the limit, or
+    after the stop)."""
     from ..util import gpu_lock
     items = recommend.build(p, {})                       # rule-only decisions make the queue
     fps = {it["id"]: _fp(it) for it in items}
@@ -213,10 +222,23 @@ def run(p, cfg: dict) -> dict:
              len(queue), limit, len(previous), len(rest), url)
     results: dict[str, dict] = dict(previous)
     unfinished: dict[str, dict] = {}                      # this run's failed re-checks, for the record only
+    not_asked: list[str] = []                             # queued, but skipped after a tool kept raising
     (p.path("agent")).mkdir(exist_ok=True)
     versions = {"prompt_version": PROMPT_VERSION, "describe_prompt_version": DESCRIBE_PROMPT_VERSION}
+    broken = threading.Event()                            # set when a tool keeps raising (TOOL_ERROR_STOP)
+    streak, streak_lock = [0], threading.Lock()           # re-checks in a row left unfinished by a raising tool
+
+    def note(status: str) -> None:
+        with streak_lock:
+            streak[0] = streak[0] + 1 if status == "tool_error" else 0
+            if streak[0] >= TOOL_ERROR_STOP and not broken.is_set():
+                broken.set()
+                log.warning("agent: a tool raised in %d re-checks in a row (%s); the rest of the queue is left for "
+                            "the next run", streak[0], tools.log.errors())
 
     def one(it):
+        if broken.is_set():                               # not asked in this run: left for the next one
+            return it["id"], None
         trace: list[dict] = []
         t = time.time()
         q = prompt(it)
@@ -228,6 +250,7 @@ def run(p, cfg: dict) -> dict:
             tools.log.claim(trace)                        # what the tools returned before the call failed
             write_json(p.path("agent") / f"{it['id']}.json", {"prompt": q, **versions, "error": str(e)[:500],
                                                               "trace": trace})
+            note("error")
             return it["id"], {"status": "error", "summary": "재확인 실패", "tools": [x["tool"] for x in trace],
                               "steps": len(trace), "evidence": [], "fp": _fp(it)}
         tools.log.claim(trace)                            # each call's output, or the exception it raised
@@ -240,6 +263,7 @@ def run(p, cfg: dict) -> dict:
                                   if c.get("error") and c["tool"] in bad]
         write_json(p.path("agent") / f"{it['id']}.json", {"prompt": q, **versions, "answer": ans, "trace": trace,
                                                           "result": res})
+        note(res["status"])
         return it["id"], res
 
     def save(calls: dict, **more) -> None:
@@ -254,6 +278,9 @@ def run(p, cfg: dict) -> dict:
                     threading.Thread(target=tools.preload, daemon=True).start()
                 for k, (iid, res) in enumerate(ex.map(one, queue), 1):
                     progress("agent", k, len(queue), iid)
+                    if res is None:
+                        not_asked.append(iid)
+                        continue
                     if res.get("status") == "done":
                         results[iid] = res
                     else:
@@ -271,14 +298,16 @@ def run(p, cfg: dict) -> dict:
     save(calls, tool_errors=raised)
     new_items = recommend.build(p, results)
     write_json(p.path("items.json"), {"items": new_items})
-    failed = [it["id"] for it in queue if it["id"] not in results]
+    asked = [it["id"] for it in queue if it["id"] not in not_asked]
+    failed = [i for i in asked if i not in results]
     tool_failed = [i for i in failed if unfinished.get(i, {}).get("status") == "tool_error"]
     if tool_failed:
         log.warning("agent: %d re-checks left unfinished because a tool raised (%s); they are asked again by the next "
                     "run and do not count against the limit", len(tool_failed), raised)
-    write_json(p.path("agent_done.json"), {"ran": len(queue), "total": len(results), "failed": failed,
-                                           "tool_failed": tool_failed, "left": [it["id"] for it in rest],
+    write_json(p.path("agent_done.json"), {"ran": len(asked), "total": len(results), "failed": failed,
+                                           "tool_failed": tool_failed, "stopped": broken.is_set(),
+                                           "left": not_asked + [it["id"] for it in rest],
                                            "tool_calls": calls, "tool_errors": raised})
     changed = sum(1 for a, b in zip(items, new_items) if a.get("rec") != b.get("rec"))
-    return {"ran": len(queue), "failed": len(failed), "tool_failed": len(tool_failed), "tool_calls": calls,
-            "rec_changed": changed}
+    return {"ran": len(asked), "failed": len(failed), "tool_failed": len(tool_failed), "stopped": broken.is_set(),
+            "tool_calls": calls, "rec_changed": changed}

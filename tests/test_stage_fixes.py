@@ -698,6 +698,50 @@ def test_call_log_raises_what_the_tool_raised():
     assert log.rows[0]["error"] == "RuntimeError: level_zero backend failed with error: 39" and log.rows[0]["output"] is None
 
 
+def test_tool_server_tells_the_model_little_and_the_log_the_cause():
+    """The tools through the MCP library itself (in process: no network, no model). A tool that
+    raises reaches the model as a bare 'Error executing tool …'; why it failed is only in the log."""
+    import asyncio
+
+    from mcp import Client
+
+    class Stub:
+        def __init__(self):
+            self.log = agent_tools.CallLog()
+
+        def rescan_sound(self, start, end):
+            return f"재검출 {start}~{end}"
+
+        def describe_sound(self, start, end, track="effects"):
+            raise RuntimeError("UR_RESULT_ERROR_OUT_OF_DEVICE_MEMORY")
+
+        def dialogue_around(self, time, before=15.0, after=15.0):
+            return f"{time - before}~{time + after}"
+
+    tools = Stub()
+
+    async def model_side():
+        async with Client(agent_tools.make_server(tools)) as client:
+            names = [t.name for t in (await client.list_tools()).tools]
+            ok = await client.call_tool("rescan_sound", {"start": "1", "end": 2.5})        # '1' is read as a number
+            around = await client.call_tool("dialogue_around", {"time": 20})              # the defaults are filled in
+            bad = await client.call_tool("describe_sound", {"start": 1, "end": 2})
+            wrong = await client.call_tool("describe_sound", {"start": "어제", "end": 2})   # never reaches the tool
+            return names, ok, around, bad, wrong
+    names, ok, around, bad, wrong = asyncio.run(model_side())
+    assert names == agent.TOOLS and set(names) == set(agent_tools.TOOL_DOCS)
+    assert not ok.is_error and ok.content[0].text == "재검출 1.0~2.5" and around.content[0].text == "5.0~35.0"
+    assert bad.is_error and "OUT_OF_DEVICE_MEMORY" not in bad.content[0].text and wrong.is_error
+    assert [(r["tool"], r["error"]) for r in tools.log.rows] == [
+        ("rescan_sound", None), ("dialogue_around", None),
+        ("describe_sound", "RuntimeError: UR_RESULT_ERROR_OUT_OF_DEVICE_MEMORY")]
+    assert tools.log.rows[1]["args"] == {"time": 20.0, "before": 15.0, "after": 15.0}
+    # ... which is how the stage tells the unfinished re-check apart
+    trace = [{"tool": "describe_sound", "input": {"start": 1, "end": 2}}]
+    tools.log.claim(trace)
+    assert agent.failed_tools(trace) == ["describe_sound"]
+
+
 def test_sound_description_prompt_gives_no_phrase_to_copy():
     q = agent_tools.DESCRIBE_PROMPT.lower()
     assert "for example" not in q and "heavy object" not in q and "falling" not in q
@@ -805,6 +849,48 @@ def test_agent_stage_asks_again_when_a_tool_raised(tmp_path, monkeypatch):
     assert sorted(stored["items"]) == ["S0001", "S0002"] and stored["failed"] == {}
     asked_ids.clear()
     assert agent.run(p, {"agent_limit": 2, "jobs": 1})["ran"] == 0 and asked_ids == []
+
+
+def test_agent_stage_stops_asking_when_a_tool_keeps_raising(tmp_path, monkeypatch):
+    sounds = [_sound(f"S{i:04d}", float(i), confident=False, unknown=True, level_jump_db=20.0) for i in range(1, 7)]
+    p = _project(tmp_path, sfx={"candidates": sounds})
+    made, asked_ids = [], []
+
+    def fake_serve(tools):
+        made.append(tools)
+        return "http://127.0.0.1:0/mcp", SimpleNamespace(should_exit=False)
+
+    def fake_ask(parts, schema, **kw):
+        iid = kw["tag"].split(":")[1]
+        asked_ids.append(iid)
+        kw["trace"].append({"tool": "describe_sound", "input": {"start": float(iid[1:]), "end": float(iid[1:]) + 1}})
+        try:
+            agent_tools.tool_functions(made[-1])["describe_sound"](**kw["trace"][-1]["input"])
+        except RuntimeError:
+            pass
+        return {"label_ok": False, "label_ko": "", "ono": "", "source_ko": "", "mood": "", "visible": "애매",
+                "visible_note": "", "plot": "모름", "plot_note": "", "recommendation": "check", "short_reason": "",
+                "summary": "도구 오류", "evidence": []}
+    monkeypatch.setattr(agent, "Tools", _FakeTools)
+    monkeypatch.setattr(agent, "serve", fake_serve)
+    monkeypatch.setattr(llm, "available", lambda: True)
+    monkeypatch.setattr(llm, "ask", fake_ask)
+    _null_lock(monkeypatch)
+    _FakeTools.broken = True                         # describe_sound raises for every one of them (onsets under 20 s)
+    res = agent.run(p, {"agent_limit": 5, "jobs": 1})
+    # three in a row were asked for nothing: the other two of the five are not asked in this run
+    assert len(asked_ids) == agent.TOOL_ERROR_STOP == 3 and res["ran"] == 3 and res["stopped"] is True
+    done = read_json(p.path("agent_done.json"))
+    assert sorted(done["failed"]) == sorted(asked_ids) == sorted(done["tool_failed"]) and done["stopped"] is True
+    assert len(done["left"]) == 3 and not set(done["left"]) & set(asked_ids)      # 2 not asked + 1 over the limit
+    assert read_json(p.path("agent_results.json"))["items"] == {}
+    assert all(it["rec"] == "check" and "agent" not in it for it in read_json(p.path("items.json"))["items"])
+    # the next run starts again from the whole queue
+    _FakeTools.broken = False
+    asked_ids.clear()
+    res = agent.run(p, {"agent_limit": 5, "jobs": 1})
+    assert len(asked_ids) == 5 and res["ran"] == 5 and res["failed"] == 0 and res["stopped"] is False
+    assert len(read_json(p.path("agent_results.json"))["items"]) == 5
 
 
 # ================================================================== 받아쓰기 (1-10, 6-m3, 5-02)
@@ -948,6 +1034,32 @@ def test_stream_gives_the_model_id_and_what_the_tools_returned():
     assert llm.parse_stream(_stream(done))[1] is None and llm.parse_stream("")[0] is None
     with pytest.raises(llm.LLMError):
         llm.parse_stream(_stream({**init, "mcp_servers": [{"name": "cboe", "status": "failed"}]}), [], require_mcp="cboe")
+
+
+def test_ask_reads_the_cli_output_into_answer_trace_and_log(tmp_path, monkeypatch):
+    """llm.ask with the CLI replaced by canned stream-json output (no process is started)."""
+    stream = _stream(
+        {"type": "system", "subtype": "init", "model": "claude-test-4-20260101",
+         "mcp_servers": [{"name": "cboe", "status": "connected"}]},
+        {"type": "assistant", "message": {"content": [
+            {"type": "tool_use", "id": "tu_1", "name": "mcp__cboe__rescan_sound", "input": {"start": 1.0, "end": 2.0}}]}},
+        {"type": "user", "message": {"content": [{"type": "tool_result", "tool_use_id": "tu_1", "content": "재검출 결과"}]}},
+        {"type": "result", "subtype": "success", "structured_output": {"summary": "끝"}, "num_turns": 3,
+         "usage": {"input_tokens": 5, "output_tokens": 7}, "total_cost_usd": 0.01})
+    started = []
+
+    def fake_process(cmd, **kw):
+        started.append(cmd)
+        return SimpleNamespace(stdout=stream.encode("utf-8"), stderr=b"", returncode=0)
+    monkeypatch.setattr(llm.subprocess, "run", fake_process)
+    trace: list = []
+    ans = llm.ask(["질문"], {"type": "object"}, mcp_url="http://127.0.0.1:1/mcp", tools=["rescan_sound"], work=tmp_path,
+                  tag="agent:S0001", trace=trace, prompt_version=2)
+    assert ans == {"summary": "끝"} and len(started) == 1 and started[0][:2] == ["claude", "-p"]
+    assert trace == [{"tool": "rescan_sound", "input": {"start": 1.0, "end": 2.0}, "output": "재검출 결과"}]
+    row = json.loads((tmp_path / "llm_log.jsonl").read_text(encoding="utf-8"))
+    assert (row["model"], row["model_id"], row["prompt"], row["ok"]) == ("sonnet", "claude-test-4-20260101", "agent/2", True)
+    assert (row["turns"], row["in"], row["out"], row["cost_usd"]) == (3, 5, 7, 0.01)
 
 
 def test_llm_log_has_the_model_id_and_the_prompt_version(tmp_path, monkeypatch):
