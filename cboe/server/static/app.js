@@ -1,8 +1,9 @@
 /* CBoE 검수 화면 (deck 3.1~3.5, 5.10). Vanilla JS, no build step.
    Every change is POSTed; list, evidence, timeline and the video overlay are all
    re-rendered from the state the server answers with (placement recomputed). A field the
-   writer is filling in and a value still on its way to the server survive that re-render; a
-   write the server refuses puts the panel back to what is stored.
+   writer is filling in and a value still on its way to the server survive that re-render (the
+   focus too, but only in a text field being typed in: a switch or a select that stored its value
+   leaves the keys to the page); a write the server refuses puts the panel back to what is stored.
    The page works in film time. project.media says which file /media/video gives: the source
    (film time = video time) or the 재생용 영상 of the processed part (film time = video time +
    media.t0); while that copy is being made the stage shows stills (/api/frame, film time). */
@@ -1870,7 +1871,11 @@
   const isText = (el) => el.tagName === 'TEXTAREA' || (el.tagName === 'INPUT' && !['checkbox', 'radio', 'button', 'submit'].includes(el.type));
   /** The fields the writer is filling in (typed, picked, ticked and not stored yet) and the one that
       has the focus. A field that stores as soon as it changes (data-change) is kept only while the
-      writer is still typing in it: once sent, the server's value is what the panel shows. */
+      writer is still typing in it: once sent, the server's value is what the panel shows.
+      The focus comes back only to a text field the writer is typing in (one that stores as it
+      changes: while its text is not sent). A switch, a tick box or a select keeps no focus once
+      drawn again (the body has it, as before): Space and ↑↓ are the page's keys again, not
+      another write of the writer's decision through that control. */
   function grabFields(root) {
     const out = new Map(), seen = new Map();
     for (const el of root.querySelectorAll('input, textarea, select')) {
@@ -1878,10 +1883,10 @@
       const n = seen.get(k) || 0;
       seen.set(k, n + 1);
       if (n) k += `#${n}`;
-      const focused = document.activeElement === el;
+      const focused = document.activeElement === el && isText(el) && (!el.dataset.change || el.value !== el._sent);
       const dirty = el.tagName === 'SELECT' ? [...el.options].some((o) => o.selected !== o.defaultSelected)
         : isText(el) ? el.value !== el.defaultValue : el.checked !== el.defaultChecked;
-      const keep = el.dataset.change ? focused && dirty && isText(el) && el.value !== el._sent : dirty;
+      const keep = el.dataset.change ? focused && dirty : dirty;
       if (keep || focused) {
         out.set(k, { keep, focused, value: el.value, checked: el.checked,
           s: isText(el) ? el.selectionStart : null, e: isText(el) ? el.selectionEnd : null });
@@ -1900,9 +1905,9 @@
       const g = got.get(k);
       if (!g) continue;
       if (g.keep) { if (isText(el) || el.tagName === 'SELECT') el.value = g.value; else el.checked = g.checked; }
-      if (g.focused) {
+      if (g.focused && isText(el)) {
         el.focus({ preventScroll: true });
-        if (isText(el) && g.s != null) { try { el.setSelectionRange(g.s, g.e); } catch (_) { /* a type without a caret */ } }
+        if (g.s != null) { try { el.setSelectionRange(g.s, g.e); } catch (_) { /* a type without a caret */ } }
       }
     }
   }

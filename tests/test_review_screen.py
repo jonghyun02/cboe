@@ -104,7 +104,9 @@ browser_only = pytest.mark.skipif(not (EDGE and NODE and HAVE_FFMPEG),
 # The Node side: opens a tab over CDP, loads the page, runs a scenario module (default export:
 # async (p) => result) and prints "RESULT {json}". p: ev (evaluate), until (poll an expression),
 # sleep, latency (slow network), fail (answer POSTs with an error, or drop them), type, idle
-# (no write in flight), posts (POST urls seen), exceptions (uncaught page errors).
+# (no write in flight), click / key (the writer's own mouse click on an element's middle and key
+# press, through CDP Input: they focus and toggle as a person's do), posts (POST urls seen),
+# exceptions (uncaught page errors).
 DRIVER = r"""
 import { pathToFileURL } from 'node:url';
 const [port, url, scen, W = '1280', H = '800'] = process.argv.slice(2);
@@ -153,6 +155,17 @@ const p = {
   latency: (ms) => send('Network.emulateNetworkConditions', { offline: false, latency: ms, downloadThroughput: -1, uploadThroughput: -1 }),
   fail: async (mode) => { if (mode && !failMode) await send('Fetch.enable', { patterns: [{ urlPattern: '*/api/*', requestStage: 'Request' }] }); if (!mode) await send('Fetch.disable'); failMode = mode; },
   type: (text) => send('Input.insertText', { text }),
+  click: async (sel) => {
+    const c = await ev(`(() => { const el = document.querySelector(${JSON.stringify(sel)}); if (!el) return null; el.scrollIntoView({ block: 'nearest' }); const r = el.getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()`);
+    if (!c) throw new Error(`no element ${sel}`);
+    for (const type of ['mouseMoved', 'mousePressed', 'mouseReleased']) await send('Input.dispatchMouseEvent', { type, x: c.x, y: c.y, button: 'left', buttons: type === 'mousePressed' ? 1 : 0, clickCount: 1 });
+  },
+  key: async (code) => {
+    const [key, vk] = { Space: [' ', 32], ArrowDown: ['ArrowDown', 40], ArrowUp: ['ArrowUp', 38] }[code];
+    const text = key.length === 1 ? key : undefined;
+    await send('Input.dispatchKeyEvent', { type: text ? 'keyDown' : 'rawKeyDown', code, key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk, ...(text ? { text, unmodifiedText: text } : {}) });
+    await send('Input.dispatchKeyEvent', { type: 'keyUp', code, key, windowsVirtualKeyCode: vk, nativeVirtualKeyCode: vk });
+  },
   idle: async (ms = 20000) => { const end = Date.now() + ms; await sleep(300); let calm = 0; while (calm < 3 && Date.now() < end) { calm = (await busy()) ? 0 : calm + 1; await sleep(200); } return calm >= 3; },
 };
 let result;
@@ -539,6 +552,76 @@ def test_typed_text_stays_when_an_earlier_write_is_answered(tmp_path, browser, c
     assert r["keep"] is True and r["srvKeep"] is True
     assert r["typed2"]["value"].endswith(" 좀 봐요") and r["form"] == {"value": r["typed2"]["value"], "focused": True}, r
     assert r["x3"] == "ignored"
+
+
+FOCUS = r"""(() => { const a = document.activeElement; return a.tagName + (a.dataset && a.dataset.change ? '[' + a.dataset.change + ']' : ''); })()"""
+
+
+@browser_only
+def test_space_and_arrow_keys_work_after_a_switch_is_answered(tmp_path, browser, clips):
+    # the writer clicks 한 칸에 두기 with the mouse and the answer comes: Space plays and ↓ goes to
+    # the next line (the panel drawn again did not give the focus back to the switch: Space ticked
+    # it again, writing keep false, and ↓ stayed on the line)
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          const keep = () => p.ev(`fetch('api/state').then((r) => r.json()).then((s) => !!s.lines.find((l) => l.id === 'L0001').keep)`);
+          await p.ev(`document.querySelector('#tabs [data-view="lines"]').click()`);
+          await p.sleep(150);
+          await p.ev(`document.getElementById('lines-row-L0001').click()`);
+          await p.sleep(300);
+          await p.click('#evidence label.switch:has([data-change="ln-keep"]) span');
+          await p.idle();
+          const answered = { focus: await p.ev(`@FOCUS@`), keep: await keep(),
+                             box: await p.ev(`document.querySelector('#evidence [data-change="ln-keep"]').checked`) };
+          await p.ev(`(() => { window._played = 0; document.getElementById('video').addEventListener('play', () => { window._played += 1; }); })()`);
+          await p.key('Space');
+          await p.idle();
+          const space = { played: await p.ev(`window._played`), keep: await keep(), focus: await p.ev(`@FOCUS@`) };
+          await p.ev(`(() => { const v = document.getElementById('video'); if (!v.paused) v.pause(); })()`);
+          await p.key('ArrowDown');
+          await p.idle();
+          return { answered, space, sel: await p.ev(`(document.querySelector('#rows .row.is-sel') || {}).id || null`), keep: await keep(),
+                   posts: p.posts.filter((u) => u.startsWith('api/lines')).length };
+        }""".replace("@FOCUS@", FOCUS))["result"]
+    assert r["answered"]["keep"] is True and r["answered"]["box"] is True, r
+    assert r["answered"]["focus"] != "INPUT[ln-keep]", r
+    assert r["space"]["played"] >= 1 and r["space"]["keep"] is True, r
+    assert r["sel"] == "lines-row-L0002" and r["keep"] is True, r
+    assert r["posts"] == 1, r                                              # the click's write, nothing more
+
+
+@browser_only
+def test_arrow_goes_to_the_next_person_after_the_reveal_line_is_picked(tmp_path, browser, clips):
+    # 인물 하늘: [남자] before the name, then 이 줄부터 L0001 picked in the select and answered; ↓
+    # goes to the next person and the picked line stays (the select kept the focus: ↓ picked the
+    # next line in it and wrote reveal_line L0003)
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          const dec = () => p.ev(`fetch('api/state').then((r) => r.json()).then((s) => ((s.people || []).find((q) => q.name === '하늘') || {}).decision || {})`);
+          await p.ev(`document.querySelector('#tabs [data-view="people"]').click()`);
+          await p.sleep(200);
+          const names = await p.ev(`[...document.querySelectorAll('#rows .row[data-id]')].map((r) => r.dataset.id)`);
+          await p.ev(`document.querySelector('#rows .row[data-id="하늘"]').click()`);
+          await p.sleep(200);
+          await p.ev(`document.querySelector('#evidence [data-act="pp-mode"][data-mode="generic"]').click()`);
+          await p.idle();
+          // the pick leaves the focus on the select, as a mouse pick does
+          await p.ev(`(() => { const s = document.querySelector('#evidence [data-change="pp-reveal-line"]'); s.focus(); s.selectedIndex = 1; s.dispatchEvent(new Event('change', { bubbles: true })); })()`);
+          await p.idle();
+          const picked = { dec: await dec(), focus: await p.ev(`@FOCUS@`) };
+          await p.key('ArrowDown');
+          await p.idle();
+          return { names, picked, dec: await dec(),
+                   sel: await p.ev(`(() => { const r = document.querySelector('#rows .row.is-sel'); return r ? r.dataset.id : null; })()`) };
+        }""".replace("@FOCUS@", FOCUS))["result"]
+    names = r["names"]
+    assert "하늘" in names and names.index("하늘") + 1 < len(names), names
+    assert r["picked"]["dec"].get("reveal") == "line" and r["picked"]["dec"].get("reveal_line") == "L0001", r
+    assert r["picked"]["focus"] != "SELECT[pp-reveal-line]", r
+    assert r["sel"] == names[names.index("하늘") + 1], r
+    assert r["dec"].get("reveal_line") == "L0001" and r["dec"].get("reveal") == "line", r
 
 
 @browser_only
