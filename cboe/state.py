@@ -1274,8 +1274,10 @@ class Project:
 
     # -------------------------------------------------------------- placement
     def placement_inputs(self, review: dict | None = None, comp: dict | None = None) -> tuple[list[dict], list[dict]]:
-        """(lines, sounds) for ``placement.place``: the lines that are in, with the label to show,
-        and the included sounds (a sound the script writes down carries ``estimated``)."""
+        """(lines, sounds) for ``placement.place``: the lines that are in, with the label to show
+        (``name``) and who speaks (``person``: the line's name, else '#' + the script's ``turn``
+        for a nameless row of a two-speaker subtitle cell, else None), and the included sounds (a
+        sound the script writes down carries ``estimated``)."""
         comp = comp or self.compose(review)
         lines = []
         for ln in comp["lines"]:
@@ -1283,7 +1285,10 @@ class Project:
                 continue
             pl = dict(ln)
             pl["name"] = ln.get("label_name")
-            pl["person"] = ln.get("name")
+            # a row of a two-speaker cell of a subtitle file nobody is named for ('- 누구야?' /
+            # '- 나야': script ``turn`` "<cell>-<row>") is another speaker than the other row, so the
+            # two may share a hyphen cell again; for placement only — no label, no person anywhere else
+            pl["person"] = ln.get("name") or (f"#{ln['turn']}" if ln.get("turn") else None)
             # II.8 [영희/속마음]: where the line comes from goes with the name, never alone (a line
             # whose name is not shown goes on from the line before, of the same source)
             pl.pop("label_extra", None)

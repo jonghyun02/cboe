@@ -1082,3 +1082,46 @@ def test_a_scope_on_a_line_without_a_name_is_this_line_only(tmp_path):
     p.set_speaker("L0001", "구름", "line")
     names = {k: v["name"] for k, v in by_id(p.effective_lines()).items()}
     assert names == {"L0001": "구름", "L0002": None, "L0003": "하늘"}
+
+
+# =================================================================== 5차: 이름 없는 '- ' 두 화자 칸
+def turn_lines(second_words=None):
+    """A subtitle file read as the script: one cell of two rows nobody is named for ('- 누구야?' /
+    '- 나야', script ``turn``) at the cell's time, then a cell of one row."""
+    b = line("L0002", None, "나야", 80.0, 81.375, timing="script", turn="1-2")
+    if second_words:
+        b["words"] = second_words
+    return [line("L0001", None, "누구야?", 80.0, 81.375, timing="script", turn="1-1",
+                 words=[{"w": "누구야?", "s": 80.0, "e": 80.3}] if second_words else words("누구야?", 80.0, 81.375)),
+            b, line("L0003", None, "그래, 가자", 85.0, 87.0, timing="script")]
+
+
+@pytest.mark.parametrize("second", [None, [{"w": "나야", "s": 80.5, "e": 80.7}]], ids=["cell_time", "heard_apart"])
+def test_two_nameless_rows_of_one_subtitle_cell_share_a_hyphen_cell_again(tmp_path, second):
+    p = make(tmp_path, lines=turn_lines(second), items=[], extras=[])
+    pl, _ = p.placement_inputs()
+    assert [x["person"] for x in pl] == ["#1-1", "#1-2", None]
+    draft = p.recompute()
+    assert [c["lines"] for c in draft["cells"]] == [["- 누구야?", "- 나야"], ["그래, 가자"]]
+    assert draft["summary"]["violations"] == 0
+    # '#…' is for placement only: no label, no person, no name anywhere else
+    comp = p.compose()
+    assert [(x["name"], x["label_name"], x["show_name"]) for x in comp["lines"]] == [(None, None, False)] * 3
+    assert not any(str(r["name"]).startswith("#") for r in comp["people"])
+    assert not any(str(n).startswith("#") for n in p.characters())
+    with pytest.raises(ReviewError):                       # no 'same person' to go by
+        p.set_speaker("L0001", "구름", "person")
+    with TestClient(create_app(p.work)) as c:
+        st = c.get("/api/state").json()
+    assert "#1-" not in json.dumps({k: st[k] for k in ("lines", "people", "characters", "draft")}, ensure_ascii=False)
+
+
+def test_rows_of_a_two_speaker_cell_with_names_keep_their_names_as_the_person(tmp_path):
+    ls = turn_lines()
+    ls[0]["speaker"], ls[1]["speaker"] = "하늘", "바다"
+    p = make(tmp_path, lines=ls, items=[], extras=[])
+    assert [x["person"] for x in p.placement_inputs()[0]] == ["하늘", "바다", None]
+    ls[1]["speaker"] = "하늘"                                 # one person on both rows: never one hyphen cell
+    p = make(tmp_path / "same", lines=ls, items=[], extras=[])
+    assert [x["person"] for x in p.placement_inputs()[0]] == ["하늘", "하늘", None]
+    assert not any(ln.startswith("- ") for c in p.recompute()["cells"] for ln in c["lines"])
