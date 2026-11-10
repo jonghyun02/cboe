@@ -8,7 +8,12 @@ inside) and answers per candidate: visible 보임 / 안 보임 / 애매, a short
 ('걷는 모습이 보임'), a visible reaction of a character, and what on screen could have
 made the sound (the detected class can be wrong). Candidates are batched (6 per call)
 and calls run in parallel (cfg['jobs']).
-Without an LLM (``--no-llm``) every candidate gets 애매 / '화면 확인 안 함'.
+Without an LLM (``--no-llm``) every candidate gets 애매 / '화면 확인 안 함' (source 'none').
+``cfg["llm_scope"]``: 'all' (default) asks about every candidate — the observation is shown
+to the writer and given to the agent. 'useful' asks only about candidates whose rule
+recommendation depends on the answer (``recommend.worth_asking``; a sound the detector could
+not name stays 확인 필요 whatever the screen shows, 감사 6-06); the others get source
+'skipped' and are asked by a later run with 'all'.
 Output screen.json {"items": {candidate_id: {...}}}.
 """
 from __future__ import annotations
@@ -18,7 +23,9 @@ from concurrent.futures import ThreadPoolExecutor
 from .. import llm
 from ..media import Media, jpeg_bytes
 from ..util import fmt_time, log, read_json, write_json
+from . import recommend
 
+PROMPT_VERSION = 1          # raise when SYSTEM, SCHEMA or the layout of the question changes (llm_log 'prompt')
 BATCH = 6
 WIDTH = 448
 SCHEMA = {
@@ -66,8 +73,13 @@ def _batch_call(batch: list[dict], m: Media, cuts: list[float], cfg: dict, work)
             parts.append(f"{c['id']} 프레임 {k + 1} ({fmt_time(t)})")
             parts.append(jpeg_bytes(fr, 80))
     res = llm.ask(parts, SCHEMA, model=cfg.get("llm_model", "sonnet"), system=SYSTEM, effort="low",
-                  work=work, tag="screen")
+                  work=work, tag="screen", prompt_version=PROMPT_VERSION)
     return {it["id"]: it for it in res.get("items", [])}
+
+
+def _not_looked(c: dict, source: str) -> dict:
+    return {"id": c["id"], "visible": "애매", "observation": "화면 확인 안 함", "reaction": "",
+            "likely_source": "", "source": source}
 
 
 def run(p, cfg: dict) -> dict:
@@ -75,10 +87,16 @@ def run(p, cfg: dict) -> dict:
     cuts = (read_json(p.path("cuts.json"), {}) or {}).get("cuts", [])
     old = read_json(p.path("screen.json"))
     use_llm = cfg.get("llm", True) and llm.available()
+    scope = "useful" if cfg.get("llm_scope") == "useful" else "all"
     if old is not None:
-        # only candidates whose model call failed (or was skipped without an LLM) are asked again
-        retry = [c for c in sfx if c["id"] not in old["items"] or (old["items"].get(c["id"]) or {}).get("failed")
-                 or (use_llm and (old["items"].get(c["id"]) or {}).get("source") == "none")]
+        # only candidates whose model call failed (or was skipped without an LLM, or left out by an
+        # earlier run with llm_scope 'useful' when this one asks about all) are asked again
+        def again(c) -> bool:
+            it = old["items"].get(c["id"])
+            if it is None or it.get("failed"):
+                return True
+            return use_llm and (it.get("source") == "none" or (it.get("source") == "skipped" and scope != "useful"))
+        retry = [c for c in sfx if again(c)]
         if not retry or not use_llm:
             return {"skipped": True, "failed_left": len(retry)}
         out = dict(old["items"])
@@ -87,10 +105,17 @@ def run(p, cfg: dict) -> dict:
         out, todo = {}, sfx
     if not use_llm:
         for c in todo:
-            out[c["id"]] = {"id": c["id"], "visible": "애매", "observation": "화면 확인 안 함", "reaction": "",
-                            "likely_source": "", "source": "none"}
+            out[c["id"]] = _not_looked(c, "none")
         write_json(p.path("screen.json"), {"items": out, "llm": False})
         return {"llm": False, "items": len(out)}
+    not_asked = 0
+    if scope == "useful":
+        worth = recommend.worth_asking(sfx, cuts, "screen")
+        for c in todo:
+            if c["id"] not in worth:
+                out[c["id"]] = _not_looked(c, "skipped")
+        not_asked = sum(1 for c in todo if c["id"] not in worth)
+        todo = [c for c in todo if c["id"] in worth]
     batches = [todo[i:i + BATCH] for i in range(0, len(todo), BATCH)]
     errors = 0
     with ThreadPoolExecutor(max_workers=max(1, int(cfg.get("jobs", 3)))) as ex:
@@ -111,9 +136,10 @@ def run(p, cfg: dict) -> dict:
                 out[c["id"]] = it
             # saved after every batch: a stopped run keeps what was asked (the rest is asked next run)
             write_json(p.path("screen.json"), {"items": out, "llm": True, "errors": errors, "complete": False})
-    write_json(p.path("screen.json"), {"items": out, "llm": True, "errors": errors, "complete": True})
+    write_json(p.path("screen.json"), {"items": out, "llm": True, "errors": errors, "complete": True,
+                                       "scope": scope, "prompt_version": PROMPT_VERSION})
     cnt = {}
     for it in out.values():
         cnt[it["visible"]] = cnt.get(it["visible"], 0) + 1
-    log.info("screen: %s (batch errors %d)", cnt, errors)
-    return {"visible": cnt, "errors": errors}
+    log.info("screen: %s (asked %d, not asked %d, batch errors %d)", cnt, len(todo), not_asked, errors)
+    return {"visible": cnt, "errors": errors, "asked": len(todo), "not_asked": not_asked}

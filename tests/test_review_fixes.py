@@ -35,7 +35,10 @@ def test_music_cue_after_unsure_start_does_not_crash(tmp_path):
               "instruments": [], "change": None, "music_score": 0.5}]
     p = _project(tmp_path, music_items=items)
     out = [it for it in recommend.build(p, {}) if it["kind"] == "music"]
-    assert [it["rec"] for it in out] == ["check", "exclude"]
+    # 2026-11 audit (9-x1): the start is no caption yet, so the cue is not 'already told' by it —
+    # it waits for the start (확인 필요) and names it in ``follows``
+    assert [it["rec"] for it in out] == ["check", "check"]
+    assert out[1]["follows"] == out[0]["id"] and "앞 후보를 먼저 정해야 함" in out[1]["reason"]
     assert any(e["kind"] == "자막" for e in out[1]["evidence"])
 
 

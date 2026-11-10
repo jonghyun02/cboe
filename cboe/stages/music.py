@@ -1,8 +1,12 @@
 # -*- coding: utf-8 -*-
-"""음악 검출 (5.4): ① 구간 ② 분위기 ③ 악기·장르.
+"""음악 검출 (5.4): ① 구간 ② 분위기 ③ 악기·장르 ④ 멈춤.
 
 ① PretrainedSED 'Music' on the music track (40 ms) with hysteresis; segments shorter
-  than 2 s are dropped and gaps under 2.5 s closed.
+  than 2 s are dropped and gaps under 2.5 s closed. A segment where the music track is
+  next to silent and the original mix does not say music either is separation residue
+  and is not a music segment (``split_silent``). The start time is then moved onto the
+  10 ms level curve of the music track (``refine_start``, the rule of sfx.refine_onset:
+  floor + 25 % of the rise; 넷플릭스 타이밍 1: 자막 시작 = 소리 첫 프레임).
 ② AST (MIT/ast-finetuned-audioset-10-10-0.4593, 527 AudioSet classes, BSD-3) on the
   music track in 10.24 s windows every 2 s: the 7 mood classes (Happy, Funny, Sad,
   Tender, Exciting, Angry, Scary music) and instrument classes. AST's mood sigmoids are
@@ -13,7 +17,12 @@
   above the previous 2 s) or a mood change (new top mood for >= 3 windows, clear
   margin; the change time is only known to a few seconds).
 ③ 변화: the music-track level slope over the first 4 s → '고조되는' / '잦아드는'.
-Candidates: music start and mood changes only (넷플릭스 II.7: 음악은 시작과 분위기가 바뀔 때).
+④ 멈춤: where a segment ends with the level falling steeply within a fraction of a second
+  (``stop_at``) → a 'stop' candidate, '[음악이 멈춘다]' (넷플릭스 II.9: 줄거리에 필요한 음악이
+  갑자기 끝날 때). Whether that silence matters to the plot is the writer's call, so the
+  recommendation is always 확인 필요.
+Candidates: music start, a new cue, a mood change and an abrupt stop. When to caption
+music is this tool's own rule — II.7 describes how to write the caption, not when.
 """
 from __future__ import annotations
 
@@ -30,6 +39,103 @@ WIN_S, HOP_S = 10.24, 2.0
 MOOD_KEYS = list(phrases.MOODS)
 SLOPE_DB_S = 1.5
 CUE_DB, CUE_SEP_S = 9.0, 6.0
+# The values below were read off the stored level curves of three runs (a 21-minute animation
+# dub and two clips of about a minute), not off a labelled set: they are not validated on
+# live-action films yet.
+SILENT_DB = -60.0                            # 90th percentile of a segment's music-track level under this: no music
+START_BEFORE_S, START_AFTER_S = 0.6, 0.6     # where the level rise is looked for around the SED start
+START_RISE_DB = 6.0                          # less rise than this (as in sfx.refine_onset): the SED start is kept
+START_NEAR_DB = 20.0                         # the music has started once the level is this close to the window's peak
+STOP_SEARCH_S, STOP_WIN_S = 1.0, 0.3         # the fall is looked for within 1 s of the segment end, 0.3 s windows
+STOP_DROP_DB = 20.0                          # level before - level after to call the end abrupt
+STOP_HOLD_S = 1.0                            # ... and it has to stay that quiet for this long
+
+
+def near_silent(lev: np.ndarray, hop: float, t0: float, a: float, b: float) -> bool:
+    """True when the music track holds next to nothing in [a, b) (90th percentile of the level)."""
+    seg = lev[max(int((a - t0) / hop), 0):max(int((b - t0) / hop), 0)]
+    return len(seg) > 0 and float(np.percentile(seg, 90)) < SILENT_DB
+
+
+def split_silent(segs: list[list[float]], lev: np.ndarray, hop: float, t0: float, mix: np.ndarray | None = None,
+                 fps: float = sed.FPS) -> tuple[list[list[float]], list[list[float]]]:
+    """(music segments, dropped segments). The 'Music' score of the separated music track also
+    rises on what the separation left over (three of eleven segments of the 21-minute run had a
+    median level of -91 dB, 감사 5-m4). Such a segment is dropped unless the 'Music' score of
+    the original mix (``mix``, one value per SED frame) reaches T_ON there — then the music is
+    real and only the stem lost it."""
+    keep, drop = [], []
+    for a, b in segs:
+        quiet = near_silent(lev, hop, t0, a, b)
+        if quiet and mix is not None:
+            part = mix[max(int((a - t0) * fps), 0):max(int((b - t0) * fps), 0)]
+            if len(part) and float(part.max()) >= T_ON:
+                quiet = False
+        (drop if quiet else keep).append([a, b])
+    return keep, drop
+
+
+def refine_start(lev: np.ndarray, hop: float, t0: float, t_guess: float) -> float:
+    """First frame of the music on its 10 ms level curve (the SED 'Music' score starts some
+    tenths of a second before the level does, 감사 5-m3). The threshold is that of
+    sfx.refine_onset, floor + 25 % of the rise, but music is sustained and has rests, so the
+    first frame that stays over it for 50 ms is taken instead of walking back from the peak.
+    Above digital silence 25 % of the rise is still far under the music (a leftover at -78 dB
+    before music at -50 dB), so the level also has to be within START_NEAR_DB of the window's
+    peak. The guess is kept when the window holds no rise (music already playing), nothing
+    audible, or the level only at its very start."""
+    k_lo = max(int(round((t_guess - START_BEFORE_S - t0) / hop)), 0)
+    k_hi = min(int(round((t_guess + START_AFTER_S - t0) / hop)), len(lev) - 1)
+    if k_hi - k_lo < 5:
+        return round(t_guess, 3)
+    seg = lev[k_lo:k_hi + 1]
+    peak = float(seg.max())
+    floor = float(np.percentile(lev[max(k_lo - 40, 0):k_hi + 1], 10))
+    if peak - floor < START_RISE_DB or peak < SILENT_DB:
+        return round(t_guess, 3)
+    over = seg >= max(floor + 0.25 * (peak - floor), peak - START_NEAR_DB)
+    hold = max(int(round(0.05 / hop)), 1)
+    if over[:hold].all():                       # already sounding at the window start: the rise is not in here
+        return round(t_guess, 3)
+    for k in range(len(seg) - hold + 1):
+        if over[k:k + hold].all():
+            return round(t0 + (k_lo + k) * hop, 3)
+    return round(t_guess, 3)
+
+
+def stop_at(lev: np.ndarray, hop: float, t0: float, b: float) -> tuple[float, float] | None:
+    """(time, fall in dB) where the music breaks off near the segment end ``b``, or None.
+
+    For every frame within STOP_SEARCH_S of ``b`` the median level of the STOP_WIN_S before it is
+    compared with that of the STOP_WIN_S after it. The largest fall must reach STOP_DROP_DB and
+    start from an audible level; a fade-out loses less than that between two 0.3 s windows.
+    The time is the first frame under after + 25 % of the fall, and the track has to stay
+    STOP_DROP_DB under the level before for STOP_HOLD_S after it (a rest before the next hit is
+    not the music stopping)."""
+    w = max(int(round(STOP_WIN_S / hop)), 2)
+    k_lo = max(int(round((b - STOP_SEARCH_S - t0) / hop)), w)
+    k_hi = min(int(round((b + STOP_SEARCH_S - t0) / hop)), len(lev) - w)
+    best_k, best = -1, 0.0
+    for k in range(k_lo, k_hi + 1):
+        d = float(np.median(lev[k - w:k]) - np.median(lev[k:k + w]))
+        if d > best:
+            best_k, best = k, d
+    if best_k < 0 or best < STOP_DROP_DB:
+        return None
+    before, after = float(np.median(lev[best_k - w:best_k])), float(np.median(lev[best_k:best_k + w]))
+    if before < SILENT_DB:                      # nothing audible was playing
+        return None
+    thr = after + 0.25 * (before - after)
+    k = best_k
+    while k > best_k - w and lev[k - 1] < thr:
+        k -= 1
+    while k < best_k + w and lev[k] >= thr:
+        k += 1
+    n = int(round(STOP_HOLD_S / hop))
+    rest = lev[k:k + n]
+    if len(rest) < n // 2 or float(np.percentile(rest, 75)) > before - STOP_DROP_DB:
+        return None
+    return round(t0 + k * hop, 3), round(best, 1)
 
 
 def _cue_onsets(lev: np.ndarray, hop: float, t0: float, a: float, b: float) -> list[float]:
@@ -137,10 +243,12 @@ def run(p, cfg: dict) -> dict:
     Q, _, _ = sed.load(p, "mix")
     mi = names.index("Music")
     m = np.maximum(M[:, mi], 0.9 * Q[:, mi])
-    segs = [[t0 + a, t0 + b] for a, b in _segments(m, sed.FPS)]
+    env = sed.load_env(p)
+    lev, hop = env["music"], float(env["hop"])
+    segs, silent = split_silent([[t0 + a, t0 + b] for a, b in _segments(m, sed.FPS)], lev, hop, t0, Q[:, mi])
+    t_end = t0 + len(m) / sed.FPS
     x, sr = sf.read(str(p.path("audio") / "music_16k.wav"), dtype="float32", always_2d=True)
     x = x.mean(axis=1)
-    env = sed.load_env(p)
     starts = []
     for a, b in segs:
         s = a
@@ -163,10 +271,12 @@ def run(p, cfg: dict) -> dict:
             continue
         moods = probs[sel][:, mood_idx]
         moods = moods / np.maximum(moods.sum(axis=1, keepdims=True), 1e-9)      # share among the 7
-        # start item: windows starting in the first 8 s
+        # start item: windows starting in the first 8 s; its time is the first frame of the level rise
         first = sel[st[sel] < a + 8.0]
-        events = [("start", a, first)]
-        for tc in _cue_onsets(env["music"], float(env["hop"]), t0, a, b):
+        a_on = refine_start(lev, hop, t0, a)
+        seg = [round(min(a, a_on), 3), round(b, 3)]        # every item of the segment starts inside it
+        events = [("start", a_on, first)]
+        for tc in _cue_onsets(lev, hop, t0, a, b):
             events.append(("cue", tc, sel[(st[sel] >= tc - 1.0) & (st[sel] < tc + 8.0)]))
         # mood changes: top mood switches for >= 3 windows with a clear margin
         top = moods.argmax(axis=1)
@@ -195,14 +305,30 @@ def run(p, cfg: dict) -> dict:
                           "raw": round(float(raw[i]), 4)} for i in order]
             inst_list = [{"key": inst_keys[i], "ko": phrases.INSTRUMENTS[inst_keys[i]], "score": round(float(iv[i]), 3)}
                          for i in np.argsort(-iv)[:3]]
-            slope = _slope(env["music"], float(env["hop"]), t0, t)
+            slope = _slope(lev, hop, t0, t)
             change = "고조되는" if slope >= SLOPE_DB_S else ("잦아드는" if slope <= -SLOPE_DB_S else None)
-            items.append({"kind": kind, "onset": round(t, 3), "segment": [round(a, 3), round(b, 3)],
+            items.append({"kind": kind, "onset": round(t, 3), "segment": seg,
                           "moods": mood_list, "mood_strength": round(float(raw.sum()), 4),
                           "instruments": inst_list, "slope_db_s": round(slope, 2),
                           "change": change, "music_score": round(float(m[int((t - t0) * sed.FPS):
                                                                            int((t - t0 + 2) * sed.FPS)].max(initial=0)), 3)})
-    write_json(p.path("music.json"), {"segments": segs, "items": items,
-                                      "params": {"T_ON": T_ON, "T_OFF": T_OFF, "WIN_S": WIN_S, "HOP_S": HOP_S}})
-    log.info("music: %d segments, %d candidates", len(segs), len(items))
-    return {"segments": len(segs), "candidates": len(items)}
+            if kind == "start":
+                items[-1]["onset_sed"] = round(a, 3)       # where the 'Music' score started, before refine_start
+        # ④ the music breaks off (a segment that runs to the end of the processed part did not stop)
+        stop = stop_at(lev, hop, t0, b) if b < t_end - STOP_SEARCH_S else None
+        if stop is not None:
+            ts = stop[0]
+            items.append({"kind": "stop", "onset": ts, "segment": seg, "moods": [], "mood_strength": 0.0,
+                          "instruments": [], "slope_db_s": 0.0, "change": None, "drop_db": stop[1],
+                          "music_score": round(float(m[max(int((ts - t0 - 2) * sed.FPS), 0):
+                                                       max(int((ts - t0) * sed.FPS), 0)].max(initial=0)), 3)})
+    items.sort(key=lambda it: it["onset"])
+    write_json(p.path("music.json"), {"segments": segs, "silent_segments": silent, "items": items,
+                                      "params": {"T_ON": T_ON, "T_OFF": T_OFF, "WIN_S": WIN_S, "HOP_S": HOP_S,
+                                                 "SILENT_DB": SILENT_DB, "START_NEAR_DB": START_NEAR_DB,
+                                                 "STOP_DROP_DB": STOP_DROP_DB, "STOP_WIN_S": STOP_WIN_S,
+                                                 "STOP_HOLD_S": STOP_HOLD_S}})
+    n_stop = sum(1 for it in items if it["kind"] == "stop")
+    log.info("music: %d segments (%d near-silent ones dropped), %d candidates (%d of them a stop)",
+             len(segs), len(silent), len(items), n_stop)
+    return {"segments": len(segs), "silent_segments": len(silent), "candidates": len(items), "stops": n_stop}

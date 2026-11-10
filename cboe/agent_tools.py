@@ -11,22 +11,128 @@
 under 11 GiB — local GPU; Qwen research
 license) on the clip and is serialised with a lock; the other tools read the files the
 pipeline already wrote.
+
+Every call goes through ``Tools.log`` (``CallLog``): what the tool returned, or the exception
+it raised, is kept so that the agent stage can write it into agent/<id>.json and tell a
+re-check whose tool failed from a finished one (감사 4-m1). The MCP library only tells the
+model 'Error executing tool …'; the cause stays here.
 """
 from __future__ import annotations
 
 import re
 import socket
 import threading
+import time
 
 import numpy as np
 
 from . import ontology, paths, phrases
 from .media import Media, jpeg_bytes
 from .stages import sed
+from .stages.recommend import timing_estimated
 from .util import device, fmt_time, free_gpu, log, read_json
 
 
 OMNI_BF16_GIB = 11.0          # GPU memory the bf16 thinker needs with room for the clip
+# The question put to the sound description model. Version 1 gave one example answer ('a heavy
+# object falling on the floor'): 13 of 38 answers of a 21-minute run were that phrase (감사 4-m1).
+# Version 2 gives no example to copy and lets the model say that it cannot tell. Not run yet:
+# the answers of version 2 still have to be looked at on real clips.
+DESCRIBE_PROMPT_VERSION = 2
+DESCRIBE_PROMPT = (
+    "Listen to this audio clip from a TV drama. Ignore speech words and background music. "
+    "What sound effect or non-speech sound is heard? Answer in one short English phrase that names "
+    "what makes the sound and what it does, from what you hear in this clip only. "
+    "If it is a person's voice sound (scream, laugh, gasp), say so. "
+    "If no sound stands out or you cannot tell what it is, answer 'unclear'.")
+
+
+def _as_text(out) -> str:
+    """What a tool returned as text for the record: pictures become '[사진]'."""
+    if isinstance(out, str):
+        return out
+    if isinstance(out, (list, tuple)):
+        return "\n".join(x if isinstance(x, str) else "[사진]" for x in out)
+    return str(out)
+
+
+def _number(x) -> float | None:
+    if isinstance(x, bool):
+        return None
+    try:
+        return float(x)
+    except (TypeError, ValueError):
+        return None
+
+
+def same_args(given: dict | None, called: dict) -> bool:
+    """The arguments the model sent against those a tool was called with: numbers compare as
+    numbers, and arguments the model left out took their defaults."""
+    for k, v in (given or {}).items():
+        if k not in called:
+            return False
+        a, b = _number(v), _number(called[k])
+        if a is not None and b is not None:
+            if abs(a - b) > 1e-6:
+                return False
+        elif str(v) != str(called[k]):
+            return False
+    return True
+
+
+class CallLog:
+    """What every tool call returned or raised.
+
+    The tool server is stateless: it cannot tell which re-check a call belongs to. ``claim``
+    matches the calls a re-check made (tool name and arguments, as the model sent them) to the
+    rows here; each row is given to one call."""
+    OUTPUT_MAX = 4000
+
+    def __init__(self):
+        self._lock = threading.Lock()
+        self.rows: list[dict] = []
+
+    def run(self, tool: str, args: dict, fn):
+        """``fn()`` for one tool call. An exception is recorded and raised again (the tool server
+        turns it into an error result for the model)."""
+        t = time.time()
+        try:
+            out = fn()
+        except Exception as e:
+            self._add(tool, args, t, None, f"{type(e).__name__}: {e}"[:500])
+            raise
+        self._add(tool, args, t, _as_text(out)[:self.OUTPUT_MAX], None)
+        return out
+
+    def _add(self, tool: str, args: dict, t: float, output: str | None, error: str | None) -> None:
+        with self._lock:
+            self.rows.append({"tool": tool, "args": dict(args), "seconds": round(time.time() - t, 2),
+                              "output": output, "error": error, "claimed": False})
+
+    def errors(self) -> dict[str, int]:
+        """Number of calls that raised, per tool."""
+        with self._lock:
+            out: dict[str, int] = {}
+            for r in self.rows:
+                if r["error"] is not None:
+                    out[r["tool"]] = out.get(r["tool"], 0) + 1
+            return out
+
+    def claim(self, trace: list[dict]) -> None:
+        """Write ``output`` (the text returned, or the exception), ``seconds`` and ``error: True``
+        (the call raised) into the tool calls of one re-check: ``trace`` rows {"tool", "input"}."""
+        with self._lock:
+            for call in trace:
+                row = next((r for r in self.rows if not r["claimed"] and r["tool"] == call.get("tool")
+                            and same_args(call.get("input"), r["args"])), None)
+                if row is None:
+                    continue
+                row["claimed"] = True
+                call["seconds"] = row["seconds"]
+                if row["error"] is not None:
+                    call["error"], call["output"] = True, row["error"]
+                elif "output" not in call:
+                    call["output"] = row["output"]
 
 
 def _gpu_gib(dev: str) -> float:
@@ -46,6 +152,17 @@ def _norm(s: str) -> str:
     return re.sub(r"[^0-9A-Za-z가-힣]", "", s).lower()
 
 
+def fmt_line(ln: dict) -> str:
+    """A dialogue line for the agent: 'L0012 03:48.7 이름: 대사'. A line without a time (the scene
+    is not in the video, or lies outside the processed part) says so instead, and a time that
+    align could only guess is marked — a 'reaction right after the sound' on it proves little."""
+    if ln.get("start") is None:
+        when = {"absent": "(영상에 없는 장면)", "out_of_range": "(처리 구간 밖)"}.get(ln.get("status"), "(시각 없음)")
+    else:
+        when = fmt_time(ln["start"]) + (" (시각 추정)" if timing_estimated(ln) else "")
+    return f"{ln['id']} {when} {ln.get('speaker') or '?'}: {ln['text']}"
+
+
 class Tools:
     def __init__(self, p):
         self.p = p
@@ -62,6 +179,7 @@ class Tools:
         self._closed = False
         self._frame_lock = threading.Lock()
         self.calls: dict[str, int] = {}
+        self.log = CallLog()
 
     def _count(self, name):
         with self._frame_lock:             # tools run on several MCP worker threads
@@ -127,12 +245,8 @@ class Tools:
             model, proc = self._omni
             sys_prompt = ("You are Qwen, a virtual human developed by the Qwen Team, Alibaba Group, capable of "
                           "perceiving auditory and visual inputs, as well as generating text and speech.")
-            q = ("Listen to this audio clip from a TV drama. Ignore speech words and background music. "
-                 "What sound effect or non-speech sound is heard? Answer in one short English phrase naming the "
-                 "source and action (for example: 'a heavy object falling on the floor'). If it is a person's "
-                 "voice sound (scream, laugh, gasp), say so.")
             msgs = [{"role": "system", "content": [{"type": "text", "text": sys_prompt}]},
-                    {"role": "user", "content": [{"type": "audio"}, {"type": "text", "text": q}]}]
+                    {"role": "user", "content": [{"type": "audio"}, {"type": "text", "text": DESCRIBE_PROMPT}]}]
             text = proc.apply_chat_template(msgs, add_generation_prompt=True, tokenize=False)
             inp = proc(text=text, audio=[x.astype(np.float32)], return_tensors="pt", padding=True,
                        use_audio_in_video=False).to(model.device).to(model.dtype)
@@ -187,12 +301,12 @@ class Tools:
 
     # ----------------------------------------------------------------- 대사
     def _fmt_line(self, ln) -> str:
-        return f"{ln['id']} {fmt_time(ln['start'])} {ln.get('speaker') or '?'}: {ln['text']}"
+        return fmt_line(ln)
 
     def dialogue_around(self, time: float, before: float = 15.0, after: float = 15.0) -> str:
         self._count("dialogue_around")
-        rows = [self._fmt_line(ln) for ln in self.lines
-                if ln["end"] >= float(time) - before and ln["start"] <= float(time) + after]
+        rows = [fmt_line(ln) for ln in self.lines if ln.get("start") is not None and ln.get("end") is not None
+                and ln["end"] >= float(time) - before and ln["start"] <= float(time) + after]
         return "\n".join(rows) if rows else "(이 구간에 대사 없음)"
 
     def search_dialogue(self, query: str) -> str:
@@ -222,43 +336,65 @@ def free_port() -> int:
     return port
 
 
-def serve(tools: Tools) -> tuple[str, object]:
-    """Start the MCP server in a background thread; returns (url, uvicorn server)."""
-    import time
+TOOL_DOCS = {
+    "rescan_sound": "Re-detect sounds between start and end seconds on the effects track and the original mix "
+                    "(PretrainedSED, 447 AudioSet classes). Returns top classes with scores and the hierarchy.",
+    "describe_sound": "Describe the non-speech sound between start and end seconds with a local audio-language "
+                      "model (Qwen2.5-Omni-3B). track: 'effects' (separated effects) or 'mix' (original).",
+    "look_frames": "Look at video frames around a time (seconds): count frames (1-6) spread over span seconds.",
+    "dialogue_around": "Dialogue lines (id, time, speaker, text) from `before` seconds before to `after` seconds "
+                       "after a time.",
+    "search_dialogue": "Search the whole script for lines containing any of the words in query.",
+    "scene_context": "Shot changes around a time and the other caption candidates within 20 seconds with their "
+                     "current recommendations.",
+}
 
-    import uvicorn
+
+def tool_functions(tools) -> dict:
+    """The tools as the MCP server offers them (name -> function; the signatures are the tool
+    schemas). Every call runs through ``tools.log``, which keeps its result or its exception."""
+    run = tools.log.run
+
+    def rescan_sound(start: float, end: float) -> str:
+        return run("rescan_sound", {"start": start, "end": end}, lambda: tools.rescan_sound(start, end))
+
+    def describe_sound(start: float, end: float, track: str = "effects") -> str:
+        return run("describe_sound", {"start": start, "end": end, "track": track},
+                   lambda: tools.describe_sound(start, end, track))
+
+    def look_frames(time: float, span: float = 2.0, count: int = 4) -> list:
+        return run("look_frames", {"time": time, "span": span, "count": count},
+                   lambda: tools.look_frames(time, span, count))
+
+    def dialogue_around(time: float, before: float = 15.0, after: float = 15.0) -> str:
+        return run("dialogue_around", {"time": time, "before": before, "after": after},
+                   lambda: tools.dialogue_around(time, before, after))
+
+    def search_dialogue(query: str) -> str:
+        return run("search_dialogue", {"query": query}, lambda: tools.search_dialogue(query))
+
+    def scene_context(time: float) -> str:
+        return run("scene_context", {"time": time}, lambda: tools.scene_context(time))
+
+    return {f.__name__: f for f in (rescan_sound, describe_sound, look_frames, dialogue_around, search_dialogue,
+                                    scene_context)}
+
+
+def make_server(tools):
+    """The MCP server with the six tools registered (not started)."""
     from mcp.server.mcpserver import MCPServer
 
     srv = MCPServer("cboe")
+    for name, fn in tool_functions(tools).items():
+        srv.tool(description=TOOL_DOCS[name])(fn)
+    return srv
 
-    @srv.tool(description="Re-detect sounds between start and end seconds on the effects track and the original mix "
-                          "(PretrainedSED, 447 AudioSet classes). Returns top classes with scores and the hierarchy.")
-    def rescan_sound(start: float, end: float) -> str:
-        return tools.rescan_sound(start, end)
 
-    @srv.tool(description="Describe the non-speech sound between start and end seconds with a local audio-language "
-                          "model (Qwen2.5-Omni-3B). track: 'effects' (separated effects) or 'mix' (original).")
-    def describe_sound(start: float, end: float, track: str = "effects") -> str:
-        return tools.describe_sound(start, end, track)
+def serve(tools: Tools) -> tuple[str, object]:
+    """Start the MCP server in a background thread; returns (url, uvicorn server)."""
+    import uvicorn
 
-    @srv.tool(description="Look at video frames around a time (seconds): count frames (1-6) spread over span seconds.")
-    def look_frames(time: float, span: float = 2.0, count: int = 4) -> list:
-        return tools.look_frames(time, span, count)
-
-    @srv.tool(description="Dialogue lines (id, time, speaker, text) from `before` seconds before to `after` seconds "
-                          "after a time.")
-    def dialogue_around(time: float, before: float = 15.0, after: float = 15.0) -> str:
-        return tools.dialogue_around(time, before, after)
-
-    @srv.tool(description="Search the whole script for lines containing any of the words in query.")
-    def search_dialogue(query: str) -> str:
-        return tools.search_dialogue(query)
-
-    @srv.tool(description="Shot changes around a time and the other caption candidates within 20 seconds with their "
-                          "current recommendations.")
-    def scene_context(time: float) -> str:
-        return tools.scene_context(time)
-
+    srv = make_server(tools)
     port = free_port()
     app = srv.streamable_http_app(stateless_http=True, json_response=True)
     server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=port, log_level="warning"))

@@ -14,7 +14,10 @@ Onset-driven on the effects track (Bandit v2) — captions are about when a soun
    ('최소 자동차 소리까지'). 경쟁 종류 = unrelated classes close to the best score.
 3. 시각: first frame of the sound on the level curve (floor + 25 % of the rise).
 4. 목록 밖 소리: a clear onset (big level jump or a 'Sound effect' score) without a
-   class above TAU_PARENT becomes '알 수 없는 소리' (재확인 에이전트로).
+   class above TAU_PARENT becomes '알 수 없는 소리' (재확인 에이전트로). One that rests on the
+   level jump alone — no class, no 'Sound effect' score — carries ``minor: true`` so the
+   review screen can fold it away (감사 4-m3: every unknown sound of the 21-minute run came
+   from this one rule); the candidate itself is kept.
 5. Generic catch-all classes (Mechanisms, Surface contact …) never trigger on their own.
 Same-class onsets closer than the class merge gap (>= 1.5 s) are merged (walking is one
 caption), and the sound end ``t1`` follows the class score / level down.
@@ -89,6 +92,22 @@ def resolve(scores: dict[str, float], onto) -> tuple[str, list[str], bool]:
         path.append(c)
         if scores.get(c, 0.0) >= TAU_PARENT:
             return c, path, True
+
+
+def unknown_by(confident: bool, sfx_score: float, jump_db: float, peak_db: float, loud_db: float) -> str | None:
+    """Why an onset without a confident class is still a candidate ('목록 밖 소리'), or None.
+
+    'sound_effect': AudioSet's 'Sound effect' class fired (a produced effect the model cannot name).
+    'level': only the level curve says so — the effects track jumps LEVEL_JUMP_UNKNOWN dB and is
+    as loud as the upper quarter of the track. Nothing tells what the sound is, so such a
+    candidate is marked ``minor``."""
+    if confident:
+        return None
+    if sfx_score >= SFX_UNKNOWN:
+        return "sound_effect"
+    if jump_db >= LEVEL_JUMP_UNKNOWN and peak_db >= loud_db:
+        return "level"
+    return None
 
 
 def refine_onset(lev: np.ndarray, hop: float, t0: float, t_guess: float) -> float:
@@ -212,8 +231,8 @@ def run(p, cfg: dict) -> dict:
         jmp = float(jump[k_on:k_on + int(0.3 / hop)].max(initial=0.0))
         sfx_score = float(P[a:b, sfx_i].max())
         peak_lev = float(lev[k_on:k_on + int(0.5 / hop)].max(initial=-120.0))
-        unknown = not confident and (sfx_score >= SFX_UNKNOWN or
-                                     (jmp >= LEVEL_JUMP_UNKNOWN and peak_lev >= loud_unknown))
+        by = unknown_by(confident, sfx_score, jmp, peak_lev, loud_unknown)
+        unknown = by is not None
         if not confident and not unknown:
             if not (lead >= 0.18 and (jmp >= LEVEL_JUMP or sfx_score >= SFX_TRIGGER)):
                 continue                               # weak and unexplained: noise
@@ -253,8 +272,11 @@ def run(p, cfg: dict) -> dict:
             "label": {"class": best, "ko": phrases.ko(best), "score": round(sc[best], 3),
                       "mix_score": round(float(Q[a:b, bi].max()), 3), "path": path,
                       "path_ko": [phrases.ko(c) for c in path], "top": top, "competing": competing,
-                      "unknown": unknown, "confident": confident, "sound_effect_score": round(sfx_score, 3)},
+                      "unknown": unknown, "unknown_by": by, "confident": confident,
+                      "sound_effect_score": round(sfx_score, 3)},
             "level_db": round(level, 1), "level_jump_db": round(jmp, 1), "onset_by": sorted(srcs),
+            # found by the level jump alone: kept, but the review screen may fold it (감사 4-m3)
+            "minor": by == "level",
             "phrases": uniq, "phrase": uniq[0]["text"], "short": uniq[0]["short"], "flags": flags})
     # merge repeats of the same class (one caption for a walking sequence) and onsets that
     # are just later parts of the sound before (same best class, or unknown right after)
@@ -272,15 +294,17 @@ def run(p, cfg: dict) -> dict:
             prev["label"]["score"] = max(prev["label"]["score"], c["label"]["score"])
             prev["level_db"] = max(prev["level_db"], c["level_db"])
             prev["repeats"] = prev.get("repeats", 1) + 1
+            prev["minor"] = bool(prev.get("minor")) and bool(c.get("minor"))    # level-only only if every part is
         else:
             out.append(c)
     for i, c in enumerate(out, 1):
         c["id"] = f"S{i:04d}"
     write_json(p.path("sfx.json"), {"candidates": out, "params": {
         "T_ON": T_ON, "T_OFF": T_OFF, "TAU": TAU, "TAU_PARENT": TAU_PARENT, "TAU_COMP": TAU_COMP,
-        "COMP_RATIO": COMP_RATIO, "LEVEL_JUMP": LEVEL_JUMP, "SFX_TRIGGER": SFX_TRIGGER,
-        "SAME_CLASS_GAP_S": SAME_CLASS_GAP_S}})
+        "COMP_RATIO": COMP_RATIO, "LEVEL_JUMP": LEVEL_JUMP, "LEVEL_JUMP_UNKNOWN": LEVEL_JUMP_UNKNOWN,
+        "SFX_TRIGGER": SFX_TRIGGER, "SFX_UNKNOWN": SFX_UNKNOWN, "SAME_CLASS_GAP_S": SAME_CLASS_GAP_S}})
     n_unk = sum(1 for c in out if c["label"]["unknown"])
-    log.info("sfx: %d candidates (%d unknown, %d uncertain) from %d onsets", len(out), n_unk,
-             sum(1 for c in out if not c["label"]["confident"]), len(merged))
-    return {"candidates": len(out), "unknown": n_unk, "onsets": len(merged)}
+    n_minor = sum(1 for c in out if c.get("minor"))
+    log.info("sfx: %d candidates (%d unknown, %d of them by the level jump alone, %d uncertain) from %d onsets",
+             len(out), n_unk, n_minor, sum(1 for c in out if not c["label"]["confident"]), len(merged))
+    return {"candidates": len(out), "unknown": n_unk, "minor": n_minor, "onsets": len(merged)}

@@ -10,9 +10,22 @@ mapped onto the end of the previous chunk (seen here: '안녕하세요' at 67.0 
 of 93.9 s). So we run Silero VAD ourselves (lower threshold so that whispers and
 shouts survive), group the speech regions into chunks of at most 25 s, and
 transcribe each chunk on its own with timestamps relative to the chunk.
-Character names from the script are passed as hotwords.
 
-Output asr.json {"language", "words": [{"w","s","e","p"}], "vad": [[s, e]]} (absolute s).
+Hotwords (``hotword_names``): the character names that are said in the dialogue text.
+Names that only stand in the speaker column and numbered role labels ('친구1') are not
+passed: Whisper wrote such hint text into stretches it could not make out, and the real
+lines there lost their times (감사 6-m3, 1-10). A chunk that still comes back as nothing
+but the hint names is left out of ``words`` and kept in ``hint_echo`` (``hint_echo``).
+
+Language: one language for the whole run, as before. ``cfg["asr_detect_language"]`` (off
+by default) asks the model for the language of each chunk first, where the backend can
+(faster-whisper; not the OpenVINO pipeline), and transcribes the chunk in it. Either way
+``chunks`` records the language used for every chunk, for the lines the script marks as
+foreign (넷플릭스 II.6).
+
+Output asr.json {"language", "words": [{"w","s","e","p"}], "vad": [[s, e]],
+"chunks": [{"start","end","language","detected","words"}], "hint_echo": [words],
+"hotwords": str | null} (absolute s).
 """
 from __future__ import annotations
 
@@ -30,6 +43,16 @@ SR = 16000
 VAD = {"threshold": 0.35, "min_speech_duration_ms": 100, "min_silence_duration_ms": 300, "speech_pad_ms": 150}
 MAX_CHUNK_S = 25.0
 JOIN_GAP_S = 1.0
+HOTWORDS_MAX = 30
+# A chunk of at least ECHO_MIN_WORDS words that are all hint names is the hint repeated, and so
+# is a run of at least ECHO_MIN_RUN such words naming two or more characters inside a longer
+# chunk. From one 21-minute run (감사 6-m3): its two chunks made of hint words only were both
+# echoes (a name and a numbered role label alternating six words long, and a two-word name
+# over a groan) and no real line was a chunk of names. Not validated beyond that; a real line
+# that is nothing but names loses its words here and gets its time from the voice activity
+# instead. A single name stays.
+ECHO_MIN_WORDS, ECHO_MIN_RUN = 2, 4
+LANG_MIN_PROB = 0.5           # a detected chunk language under this is not trusted (not validated)
 
 
 def _cuda_dlls() -> None:
@@ -48,6 +71,67 @@ def script_language(script: dict | None) -> str | None:
     text = "".join(ln["text"] for ln in script["lines"])
     hangul = len(re.findall(r"[가-힣]", text))
     return "ko" if hangul > 0.3 * max(len(re.sub(r"\s", "", text)), 1) else None
+
+
+def hotword_names(script: dict | None) -> list[str]:
+    """Character names to give Whisper as hotwords: those said somewhere in the dialogue text.
+
+    Left out: names that only stand in the speaker column (a hint for a word nobody says can
+    only do harm), numbered role labels such as '친구1' or '군인 2', and one-letter names
+    (they match inside other words). At most HOTWORDS_MAX names, in script order."""
+    if not script:
+        return []
+    said = re.sub(r"\s", "", "".join(str(ln.get("text") or "") for ln in script.get("lines") or [])).lower()
+    out: list[str] = []
+    for name in script.get("characters") or []:
+        name = " ".join(str(name or "").split())
+        key = name.replace(" ", "").lower()
+        if len(key) < 2 or re.search(r"\d+$", key) or key not in said or name in out:
+            continue
+        out.append(name)
+    return out[:HOTWORDS_MAX]
+
+
+def _hint_key(word: str) -> str:
+    """A word as compared with the hints: letters only, without a trailing number ('친구2.' -> '친구')."""
+    return re.sub(r"\d+$", "", re.sub(r"[^0-9A-Za-z가-힣]", "", word)).lower()
+
+
+def hint_echo(words: list[str], hotwords: str | list[str] | None) -> list[bool]:
+    """For the words of ONE transcribed chunk: True where Whisper only repeated the hotword hint.
+
+    ``hotwords`` is the hint: the list of names (a name may have several words), or the string
+    given to the model (then every word is taken as a name of its own). A word counts as a hint
+    word when it is a word of a name, with or without a number after it (hint '친구1', output
+    '친구2 친구3'). Marked: the whole chunk when it has at least ECHO_MIN_WORDS words and all are
+    hint words; inside a longer chunk a run of at least ECHO_MIN_RUN hint words that names two
+    or more different characters."""
+    names = hotwords.split() if isinstance(hotwords, str) else list(hotwords or [])
+    owner: dict[str, int] = {}
+    for i, name in enumerate(names):
+        for tok in str(name).split():
+            if _hint_key(tok):
+                owner.setdefault(_hint_key(tok), i)
+    out = [False] * len(words)
+    if not owner:
+        return out
+    wk = [_hint_key(w) for w in words]
+    k = 0
+    while k < len(words):
+        if wk[k] not in owner:
+            k += 1
+            continue
+        j = k
+        while j < len(words) and wk[j] in owner:
+            j += 1
+        if k == 0 and j == len(words):
+            echo = j - k >= ECHO_MIN_WORDS
+        else:
+            echo = j - k >= ECHO_MIN_RUN and len({owner[x] for x in wk[k:j]}) >= 2
+        if echo:
+            out[k:j] = [True] * (j - k)
+        k = j
+    return out
 
 
 def speech_regions(audio: np.ndarray) -> list[tuple[int, int]]:
@@ -89,6 +173,12 @@ class FasterWhisper:
         for seg in segs:
             for w in seg.words or []:
                 yield w.word, w.start, w.end, float(w.probability)
+
+    def detect_language(self, audio: np.ndarray) -> tuple[str, float]:
+        """(language code, probability) of a chunk from Whisper's language tokens. Only called
+        with ``cfg["asr_detect_language"]``."""
+        lang, prob, _ = self.model.detect_language(audio)
+        return lang, float(prob)
 
 
 class OVWhisper:
@@ -187,32 +277,75 @@ def load_model(dev: str):
     return FasterWhisper(dev) if backend == "faster-whisper" else OVWhisper(dev)
 
 
-def transcribe(wav: Path, language: str | None, hotwords: str | None, t0: float, dev: str | None = None) -> dict:
+def transcribe_chunks(audio: np.ndarray, groups: list[tuple[int, int]], model, language: str | None,
+                      hotwords: str | None, t0: float, detect: bool = False,
+                      hint_names: list[str] | None = None) -> dict:
+    """Transcribe every chunk (sample range of ``audio``) on its own with ``model.words``.
+
+    Returns {"words", "chunks", "hint_echo"}: the words in time order without those that only
+    repeat the hint, one row per chunk with the language it was transcribed in, and the words
+    left out as hint echo. With ``detect`` and a model that has ``detect_language(clip)`` the
+    chunk is transcribed in the language found (when its probability reaches LANG_MIN_PROB) and
+    the name hints are given only to chunks in the script's language; without it every chunk
+    gets ``language`` and the hints, exactly as before."""
+    from ..util import progress
+    base = language or "ko"
+    det = getattr(model, "detect_language", None) if detect else None
+    if detect and det is None:
+        log.warning("asr: this backend cannot tell the language of a chunk; every chunk is transcribed as %s", base)
+    words, echo, rows = [], [], []
+    for gi, (a, b) in enumerate(groups):
+        progress("asr", gi, len(groups))
+        pad_a, pad_b = max(0, a - int(0.1 * SR)), min(len(audio), b + int(0.1 * SR))
+        off = t0 + pad_a / SR
+        clip = audio[pad_a:pad_b]
+        lang, prob, found = base, None, False
+        if det is not None:
+            got = det(clip)
+            if got and got[0]:
+                prob = None if got[1] is None else float(got[1])
+                if prob is None or prob >= LANG_MIN_PROB:
+                    lang, found = str(got[0]), True
+        hints = hotwords if lang == base else None
+        chunk = []
+        for w, s, e, pr in model.words(clip, lang, hints):
+            txt = w.strip()
+            if txt:
+                chunk.append({"w": txt, "s": round(s + off, 3), "e": round(e + off, 3),
+                              "p": None if pr is None else round(pr, 3)})
+        flags = [False] * len(chunk)
+        if hints:                                   # only a chunk that was given the hint can repeat it
+            flags = hint_echo([w["w"] for w in chunk], hint_names if hint_names is not None else hints)
+        words += [w for w, f in zip(chunk, flags) if not f]
+        echo += [w for w, f in zip(chunk, flags) if f]
+        row = {"start": round(t0 + a / SR, 3), "end": round(t0 + b / SR, 3), "language": lang, "detected": found,
+               "words": len(chunk) - sum(flags)}
+        if prob is not None:
+            row["prob"] = round(prob, 3)
+        if any(flags):
+            row["hint_echo"] = sum(flags)
+        rows.append(row)
+    words.sort(key=lambda w: w["s"])
+    return {"words": words, "chunks": rows, "hint_echo": echo}
+
+
+def transcribe(wav: Path, language: str | None, hotwords: str | None, t0: float, dev: str | None = None,
+               detect: bool = False, hint_names: list[str] | None = None) -> dict:
     audio, sr = sf.read(str(wav), dtype="float32", always_2d=True)
     audio = audio.mean(axis=1)
     assert sr == SR
     regions = speech_regions(audio)
-    from ..util import progress
     model = load_model(dev or device())
     name = model.name
-    words = []
-    groups = chunks(regions)
     try:
-        for gi, (a, b) in enumerate(groups):
-            progress("asr", gi, len(groups))
-            pad_a, pad_b = max(0, a - int(0.1 * SR)), min(len(audio), b + int(0.1 * SR))
-            off = t0 + pad_a / SR
-            for w, s, e, pr in model.words(audio[pad_a:pad_b], language or "ko", hotwords):
-                txt = w.strip()
-                if txt:
-                    words.append({"w": txt, "s": round(s + off, 3), "e": round(e + off, 3),
-                                  "p": None if pr is None else round(pr, 3)})
+        got = transcribe_chunks(audio, chunks(regions), model, language, hotwords, t0, detect, hint_names)
     finally:
         del model
         free_gpu()
-    words.sort(key=lambda w: w["s"])
-    return {"language": language or "ko", "words": words, "model": name, "input": wav.name,
-            "vad": [[round(t0 + a / SR, 3), round(t0 + b / SR, 3)] for a, b in regions], "vad_options": VAD}
+    return {"language": language or "ko", "words": got["words"], "model": name, "input": wav.name,
+            "vad": [[round(t0 + a / SR, 3), round(t0 + b / SR, 3)] for a, b in regions], "vad_options": VAD,
+            "chunks": got["chunks"], "hint_echo": got["hint_echo"], "hotwords": hotwords,
+            "detect_language": bool(detect)}
 
 
 def run(p, cfg: dict) -> dict:
@@ -220,13 +353,16 @@ def run(p, cfg: dict) -> dict:
         return {"skipped": True}
     script = read_json(p.path("script.json"))
     lang = script_language(script)
-    hot = " ".join((script or {}).get("characters", [])[:30]) or None
+    names = hotword_names(script)
+    hot = " ".join(names) or None
     wav = p.path("audio") / "speech_16k.wav"
     if not wav.exists():
         wav = p.path("audio") / "mix_16k.wav"
     dev = device()
     with gpu_lock(), timed(f"Whisper on {wav.name} ({dev})"):
-        out = transcribe(wav, lang, hot, float(p.meta.get("t0", 0.0)), dev)
+        out = transcribe(wav, lang, hot, float(p.meta.get("t0", 0.0)), dev,
+                         detect=bool(cfg.get("asr_detect_language", False)), hint_names=names)
     write_json(p.path("asr.json"), out)
-    log.info("asr: %d words in %d speech regions", len(out["words"]), len(out["vad"]))
-    return {"words": len(out["words"]), "regions": len(out["vad"])}
+    log.info("asr: %d words in %d speech regions (hint names: %s; %d words left out as hint echo)",
+             len(out["words"]), len(out["vad"]), hot or "none", len(out["hint_echo"]))
+    return {"words": len(out["words"]), "regions": len(out["vad"]), "hint_echo": len(out["hint_echo"])}

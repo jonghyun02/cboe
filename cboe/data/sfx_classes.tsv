@@ -9,7 +9,7 @@ Alarm	경보음	삐삐	alarm	event	0.2	1.0
 Alarm clock	알람 소리	따르릉	alarm	event	0.2	1.0
 Alert	알림음	띠링	alarm	event	0.1	1.0
 Ambulance (siren)	구급차 소리	삐뽀삐뽀	siren	event	0.3	1.0
-Animal		동물 울음	dog	ambient	0.2	0.5
+Animal	동물 울음소리		dog	ambient	0.2	0.5
 Applause	박수 소리	짝짝짝	crowd_reaction	event	0.3	1.0
 Arrow	화살 소리	슈웅	whoosh	event	0.1	0.5
 Artillery fire	포격 소리	쾅	gun	event	0.1	1.0
@@ -121,7 +121,7 @@ Crushing	으스러지는 소리	우지직	impact	event	0.1	0.5
 Crying, sobbing	흐느끼는 소리		crying	vocal	0.3	0.5
 Cupboard open or close	찬장 여닫는 소리	달칵	door	event	0.1	0.5
 Cutlery, silverware	수저 달그락거리는 소리	달그락	kitchen	minor	0.2	0.5
-Deformable shell		바스락	paper	minor	0.2	0.5
+Deformable shell	바스락거리는 소리	바스락	paper	minor	0.2	0.5
 Dental drill, dentist's drill	치과 드릴 소리	위이잉	tools	minor	0.3	1.0
 Dial tone	통화 연결음	뚜	phone	event	0.3	1.0
 Digestive				background	0.2	0.5
@@ -130,7 +130,7 @@ Ding-dong	초인종 소리	딩동	doorbell	event	0.2	0.0
 Dishes, pots, and pans	그릇 달그락거리는 소리	달그락	kitchen	minor	0.2	0.5
 Distortion				background	0.2	0.5
 Dog	개 짖는 소리	멍멍	dog	ambient	0.2	1.0
-Domestic animals, pets		동물 울음	dog	ambient	0.2	0.5
+Domestic animals, pets	동물 울음소리		dog	ambient	0.2	0.5
 Dong, bong	댕 울리는 소리	댕	bell	event	0.2	1.0
 Donkey, ass	당나귀 소리	히잉	livestock	ambient	0.3	1.0
 Door	문소리	덜컥	door	event	0.1	0.5
@@ -151,7 +151,7 @@ Engine	엔진 소리	부르릉	car	ambient	0.5	0.0
 Engine knocking	엔진 소리	덜덜덜	car	ambient	0.3	0.0
 Engine starting	시동 거는 소리	부릉	car	ambient	0.2	0.0
 Environmental noise				background	0.2	0.5
-Error signal	오류음 소리	삐빅	alarm	event	0.1	1.0
+Error signal	오류음	삐빅	alarm	event	0.1	1.0
 Eruption	폭발 소리	콰르릉	explosion	event	0.3	0.5
 Explosion	폭발 소리	쾅	explosion	event	0.1	0.5
 Fart	방귀 소리		body	minor	0.1	0.0
@@ -173,7 +173,7 @@ Foghorn	뱃고동 소리	부웅	horn	event	0.3	0.0
 Fowl	닭 소리	꼬꼬	poultry	ambient	0.3	1.0
 Frog	개구리 소리	개굴개굴	frog	ambient	0.3	1.0
 Frying (food)	지글지글 굽는 소리	지글지글	kitchen	minor	0.5	0.5
-Fusillade	총성 소리	탕탕탕	gun	event	0.1	1.0
+Fusillade	총성	탕탕탕	gun	event	0.1	1.0
 Gargling	가글 소리		body	minor	0.2	0.0
 Gasp	헉 하는 소리		breath	vocal	0.1	0.5
 Gears	톱니바퀴 소리	철컥	tools	minor	0.2	1.0
@@ -189,7 +189,7 @@ Groan	신음 소리		moan	vocal	0.2	0.0
 Growling	으르렁거리는 소리	으르렁	dog	ambient	0.2	1.0
 Grunt	끙 하는 소리		breath	vocal	0.1	0.5
 Gull, seagull	갈매기 소리	끼룩	bird	ambient	0.2	1.0
-Gunshot, gunfire	총성 소리	탕	gun	event	0.1	1.0
+Gunshot, gunfire	총성	탕	gun	event	0.1	1.0
 Gurgling, bubbling	보글보글 소리	보글보글	water	ambient	0.3	0.5
 Gush	물소리	쏴아	water	ambient	0.3	0.5
 Hair dryer	드라이어 소리	위잉	appliance	minor	0.5	0.0
@@ -232,7 +232,7 @@ Laughter	웃음소리		laughter	vocal	0.2	0.5
 Lawn mower	잔디깎이 소리	부르릉	tools	minor	0.5	1.0
 Light engine (high frequency)	엔진 소리	위잉	car	ambient	0.5	0.0
 Liquid	물소리	찰랑	water	ambient	0.2	0.5
-Livestock, farm animals, working animals		가축 울음	livestock	ambient	0.2	0.5
+Livestock, farm animals, working animals	가축 울음소리		livestock	ambient	0.2	0.5
 Lock	잠금장치 소리	철컥	door	event	0.1	0.5
 Machine gun	기관총 소리	타타타탕	gun	event	0.1	1.0
 Mains hum				background	0.2	0.5
@@ -297,7 +297,7 @@ Rattle	덜그럭거리는 소리	덜그럭	impact	event	0.2	0.5
 Refrigerator	냉장고 소리	웅	appliance	minor	1.0	0.0
 Respiratory sounds				background	0.2	0.5
 Reverberation				background	0.2	0.5
-Reversing beeps	후진 경고음 소리	삐삐	alarm	event	0.3	1.0
+Reversing beeps	후진 경고음	삐삐	alarm	event	0.3	1.0
 Ringing tone, ringback tone	통화 연결음	뚜르르	phone	event	0.3	1.0
 Ringtone	휴대폰 벨소리	띠리링	phone	event	0.3	1.0
 Roar	포효하는 소리	크아앙	big_cat	ambient	0.2	0.0
@@ -348,7 +348,7 @@ Snoring	코 고는 소리		snore	vocal	0.5	0.0
 Snort	콧방귀 소리		breath	vocal	0.1	0.5
 Snort (horse)	말 소리	푸르릉	livestock	ambient	0.1	1.0
 Sonar	소나 소리	핑	alarm	event	0.3	1.0
-Sonic boom	음속 폭음 소리	쾅	explosion	event	0.1	0.5
+Sonic boom	음속 폭음	쾅	explosion	event	0.1	0.5
 Sound effect				background	0.2	0.5
 Sound equipment				background	0.2	0.5
 Sound reproduction				background	0.2	0.5
@@ -427,9 +427,9 @@ Whispering	속삭이는 소리		whisper	speech	0.5	0.0
 Whistle	호루라기 소리	삑	whistle	event	0.1	0.0
 Whistling	휘파람 소리		whistle_voice	vocal	0.3	0.0
 White noise, pink noise				background	0.2	0.5
-Whoop	환호성 소리	와	crowd_reaction	event	0.2	1.0
+Whoop	환호성	와	crowd_reaction	event	0.2	1.0
 Whoosh, swoosh, swish	휙 소리	휙	whoosh	event	0.1	0.5
-Wild animals		동물 울음	bird	ambient	0.2	0.5
+Wild animals	동물 울음소리		bird	ambient	0.2	0.5
 Wildfire	불 소리	화르르	fire	ambient	0.5	0.0
 Wind	바람 부는 소리	휘잉	wind	ambient	1.0	0.0
 Wind chime	풍경 소리	딸랑	bell	event	0.3	1.0
