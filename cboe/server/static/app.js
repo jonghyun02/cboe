@@ -2118,6 +2118,7 @@
   /** The fold above the list (대사 view only; it does not scroll away with the lines). */
   function renderAside() {
     const el = $('#list-aside');
+    if (!el) return;
     const html = S.view === 'lines' ? asideHtml() : '';
     if (el._html !== html) { el._html = html; el.innerHTML = html; }       // the same rows: its scroll and an armed 버리기 stay
     el.hidden = !html;
