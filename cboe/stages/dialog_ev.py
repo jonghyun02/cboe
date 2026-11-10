@@ -19,9 +19,10 @@ recommendation (``cboe.cues``), with or without an LLM.
 LLM: Claude, text only, 20 candidates per call. Without an LLM a keyword rule gives
 'already' for vocal sounds on vocalisation lines and 'reaction' for typical reaction
 phrases. ``cfg["llm_scope"]``: 'all' (default) asks about every candidate; 'useful' asks
-only where the rule recommendation depends on the answer (``recommend.worth_asking``, with
-the screen answers that are already there) — the others keep the keyword rule's answer,
-marked ``skipped``, and are asked by a later run with 'all'.
+only where the rule recommendation depends on the answer (``recommend.worth_asking_in``: the
+candidates with the script cues attached, with the screen answers that are already there) —
+the others keep the keyword rule's answer, marked ``skipped``, and are asked by a later run
+with 'all', or by a later 'useful' run once their answer matters (a new screen answer).
 Output dialog_ev.json {"items": {candidate_id: {...}}}.
 """
 from __future__ import annotations
@@ -126,9 +127,17 @@ def run(p, cfg: dict) -> dict:
     used_llm = cfg.get("llm", True) and llm.available()
     scope = "useful" if cfg.get("llm_scope") == "useful" else "all"
     old = read_json(p.path("dialog_ev.json"))
+    worth = set()
+    if used_llm and scope == "useful":
+        # the candidates as the recommendation sees them (script cues, script scenes), with the
+        # screen answers there are now
+        seen = (read_json(p.path("screen.json"), {}) or {}).get("items", {})
+        worth = recommend.worth_asking_in(p, cands, "dialog", seen)
     if old is not None:
         # only candidates the model did not answer: a failed batch, an earlier run without LLM, or
-        # (when this run asks about all) one that an earlier run with llm_scope 'useful' left out
+        # one that an earlier run with llm_scope 'useful' left out when this run asks about all —
+        # or when its answer now matters (the screen answer, the script or the alignment changed:
+        # screen.json is asked again without dialog_ev.json being cleared)
         def again(c) -> bool:
             it = old["items"].get(c["id"])
             if it is None:
@@ -136,7 +145,7 @@ def run(p, cfg: dict) -> dict:
             if it.get("source") == "llm":
                 return False
             if it.get("skipped"):
-                return scope != "useful"
+                return scope != "useful" or c["id"] in worth
             return bool(it.get("failed", not old.get("llm")))
         todo = [c for c in cands if again(c)]
         if not todo or not used_llm:
@@ -150,9 +159,6 @@ def run(p, cfg: dict) -> dict:
     doc = read_json(p.path("script.json"), {}) or {}
     starts = cue_mod.scene_starts(lines, (read_json(p.path("scenes.json"), {}) or {}).get("scenes"))
     if used_llm and scope == "useful":
-        cuts = (read_json(p.path("cuts.json"), {}) or {}).get("cuts", [])
-        seen = (read_json(p.path("screen.json"), {}) or {}).get("items", {})
-        worth = recommend.worth_asking(cands, cuts, "dialog", seen, starts)
         for c in todo:
             if c["id"] not in worth:                # the answer cannot change the recommendation
                 out[c["id"]] = {**rule(c, lines), "skipped": True}

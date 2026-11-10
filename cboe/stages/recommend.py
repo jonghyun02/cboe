@@ -686,6 +686,25 @@ def worth_asking(sfx: list[dict], cuts: list[float], which: str, screen_items: d
     return out
 
 
+def worth_asking_in(p, sfx: list[dict], which: str, screen_items: dict | None = None) -> set[str]:
+    """``worth_asking`` for the work folder ``p`` on the candidates as ``build`` sees them: the
+    script cues attached (``attach_sound``: an unnamed sound the script names is ``named_by``
+    'script', and then a visible source or the sound written in the dialogue excludes it — the
+    answer matters for it) and the scenes of the script (``cues.scene_starts``) for
+    ``scene_first``. ``sfx`` itself is not changed."""
+    cuts = (read_json(p.path("cuts.json"), {}) or {}).get("cuts", [])
+    lines = (read_json(p.path("dialogue.json"), {}) or {}).get("lines", [])
+    scenes = (read_json(p.path("scenes.json"), {}) or {}).get("scenes")
+    hits = cue_mod.match_sounds(cue_stage.load(p), sfx)
+    seen = []
+    for c in sfx:
+        c = dict(c)
+        if c["id"] in hits:
+            attach_sound(c, hits[c["id"]])
+        seen.append(c)
+    return worth_asking(seen, cuts, which, screen_items, cue_mod.scene_starts(lines, scenes))
+
+
 def run(p, cfg: dict) -> dict:
     if p.path("items.json").exists():
         return {"skipped": True}

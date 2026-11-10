@@ -11,9 +11,11 @@ and calls run in parallel (cfg['jobs']).
 Without an LLM (``--no-llm``) every candidate gets 애매 / '화면 확인 안 함' (source 'none').
 ``cfg["llm_scope"]``: 'all' (default) asks about every candidate — the observation is shown
 to the writer and given to the agent. 'useful' asks only about candidates whose rule
-recommendation depends on the answer (``recommend.worth_asking``; a sound the detector could
-not name stays 확인 필요 whatever the screen shows, 감사 6-06); the others get source
-'skipped' and are asked by a later run with 'all'.
+recommendation depends on the answer (``recommend.worth_asking_in``: the candidates with the
+script cues attached, in the script scenes; a sound the detector could not name stays 확인
+필요 whatever the screen shows, 감사 6-06 — unless the script names it, then a visible source
+excludes it); the others get source 'skipped' and are asked by a later run with 'all', or by
+a later 'useful' run once their answer matters (the script or the alignment changed).
 Output screen.json {"items": {candidate_id: {...}}}.
 """
 from __future__ import annotations
@@ -88,14 +90,18 @@ def run(p, cfg: dict) -> dict:
     old = read_json(p.path("screen.json"))
     use_llm = cfg.get("llm", True) and llm.available()
     scope = "useful" if cfg.get("llm_scope") == "useful" else "all"
+    # the candidates as the recommendation sees them: with the script cues and the script scenes
+    worth = recommend.worth_asking_in(p, sfx, "screen") if use_llm and scope == "useful" else set()
     if old is not None:
         # only candidates whose model call failed (or was skipped without an LLM, or left out by an
-        # earlier run with llm_scope 'useful' when this one asks about all) are asked again
+        # earlier run with llm_scope 'useful' when this one asks about all — or when the answer
+        # now matters: the script, the alignment or the cues changed since) are asked again
         def again(c) -> bool:
             it = old["items"].get(c["id"])
             if it is None or it.get("failed"):
                 return True
-            return use_llm and (it.get("source") == "none" or (it.get("source") == "skipped" and scope != "useful"))
+            return use_llm and (it.get("source") == "none" or (it.get("source") == "skipped"
+                                                               and (scope != "useful" or c["id"] in worth)))
         retry = [c for c in sfx if again(c)]
         if not retry or not use_llm:
             return {"skipped": True, "failed_left": len(retry)}
@@ -110,7 +116,6 @@ def run(p, cfg: dict) -> dict:
         return {"llm": False, "items": len(out)}
     not_asked = 0
     if scope == "useful":
-        worth = recommend.worth_asking(sfx, cuts, "screen")
         for c in todo:
             if c["id"] not in worth:
                 out[c["id"]] = _not_looked(c, "skipped")

@@ -458,7 +458,7 @@ def asked(monkeypatch):
     calls = {"dialog": [], "screen": []}
     monkeypatch.setattr(llm, "available", lambda: True)
 
-    def dialog_batch(batch, lines, cfg, work):
+    def dialog_batch(batch, lines, cfg, work, context=None):
         calls["dialog"].append([c["id"] for c in batch])
         return {c["id"]: {"id": c["id"], "relation": "none", "line_id": "", "evidence": "", "plot_hint": ""} for c in batch}
 
@@ -515,6 +515,94 @@ def test_default_scope_asks_about_every_sound(tmp_path, asked):
     p = _evidence_project(tmp_path)
     assert screen.run(p, {})["asked"] == 2 and asked["screen"] == [["S0001", "S0002"]]
     assert read_json(p.path("screen.json"))["scope"] == "all"
+
+
+# a made-up script: one scene, a sound written between two lines (no real script text)
+CUE_SCRIPT = {"version": 2, "format": "screenplay", "timed": False, "characters": ["가온"], "people": [],
+              "scenes": [{"id": "SC001", "number": "1", "heading": "1. 지어낸 부엌 / 밤", "place": "지어낸 부엌", "time": "밤"}],
+              "elements": [{"id": "E0001", "type": "heading", "scene_id": "SC001", "text": "1. 지어낸 부엌 / 밤"},
+                           {"id": "E0002", "type": "dialogue", "scene_id": "SC001", "text": "지어낸 대사 1", "line_id": "L0001"},
+                           {"id": "E0003", "type": "action", "scene_id": "SC001", "text": "탁자 위의 컵이 쨍그랑 깨진다."},
+                           {"id": "E0004", "type": "dialogue", "scene_id": "SC001", "text": "지어낸 대사 2", "line_id": "L0002"}],
+              "lines": [{"id": f"L000{i}", "speaker": "가온", "text": f"지어낸 대사 {i}", "raw": f"지어낸 대사 {i}",
+                         "scene_id": "SC001", "element_id": f"E000{2 * i}", "language": None, "sung": False, "source": None,
+                         "delivery": [], "vocal": [], "directions": []} for i in (1, 2)]}
+CUE_LINES = [_line(1, 10.0, 12.0, scene_id="SC001", status="ok"), _line(2, 20.0, 22.0, scene_id="SC001", status="ok")]
+CUE_SCENES = {"scenes": [{"id": "SC001", "start": 5.0, "end": 30.0, "status": "found"}]}
+
+
+def _unnamed(iid="S0001", onset=15.0) -> dict:
+    return _sound(iid, onset, "Generic impact sounds", "부딪히는", confident=False, unknown=True,
+                  phrases=[{"text": "[소리]", "short": "[소리]", "source": "unknown"}], phrase="[소리]", short="[소리]")
+
+
+def test_useful_scope_asks_about_an_unnamed_sound_the_script_names(tmp_path, asked):
+    """An unnamed sound that a script cue names (named_by 'script') is excluded when its source is
+    on screen and stays 확인 필요 when it is not: the screen answer matters, so it is asked."""
+    p = _project(tmp_path, sfx={"candidates": [_unnamed()]}, dialogue={"lines": CUE_LINES}, script=CUE_SCRIPT,
+                 scenes=CUE_SCENES)
+    sfx_before = read_json(p.path("sfx.json"))
+    assert recommend.worth_asking_in(p, sfx_before["candidates"], "screen") == {"S0001"}
+    assert read_json(p.path("sfx.json")) == sfx_before and "cue_id" not in sfx_before["candidates"][0]
+    res = screen.run(p, {"llm_scope": "useful"})
+    assert asked["screen"] == [["S0001"]] and res["asked"] == 1 and res["not_asked"] == 0
+    # what the answer decides, through build (the same candidate the stage looked at)
+    recs = {}
+    for vis in ("보임", "안 보임"):
+        write_json(p.path("screen.json"), {"items": {"S0001": {"id": "S0001", "visible": vis, "observation": "컵이 깨짐",
+                                                               "reaction": "", "likely_source": "", "source": "vlm"}}})
+        it = next(x for x in recommend.build(p, {}) if x["id"] == "S0001")
+        assert it["named_by"] == "script"
+        recs[vis] = it["rec"]
+    assert recs == {"보임": "exclude", "안 보임": "check"}
+    # the dialogue answer matters too when the screen does not show the source ('이미 적힘' excludes it)
+    res = dialog_ev.run(p, {"llm_scope": "useful"})
+    assert asked["dialog"] == [["S0001"]] and res["not_asked"] == 0
+    # the same sound without the script: no name, 확인 필요 whatever is answered -> not asked
+    (tmp_path / "bare").mkdir()
+    bare = _project(tmp_path / "bare", sfx={"candidates": [_unnamed()]}, dialogue={"lines": CUE_LINES})
+    assert screen.run(bare, {"llm_scope": "useful"})["not_asked"] == 1 and len(asked["screen"]) == 1
+
+
+def test_useful_scope_asks_again_when_the_answer_now_matters(tmp_path, asked):
+    # screen: skipped while the script was not there; once the cue names the sound, the next run asks it
+    (tmp_path / "s").mkdir()
+    p = _project(tmp_path / "s", sfx={"candidates": [_unnamed()]}, dialogue={"lines": CUE_LINES})
+    assert screen.run(p, {"llm_scope": "useful"})["not_asked"] == 1 and asked["screen"] == []
+    assert read_json(p.path("screen.json"))["items"]["S0001"]["source"] == "skipped"
+    write_json(p.path("script.json"), CUE_SCRIPT)
+    write_json(p.path("scenes.json"), CUE_SCENES)
+    res = screen.run(p, {"llm_scope": "useful"})
+    assert asked["screen"] == [["S0001"]] and res["asked"] == 1
+    assert read_json(p.path("screen.json"))["items"]["S0001"]["source"] == "vlm"
+    assert screen.run(p, {"llm_scope": "useful"})["skipped"] and len(asked["screen"]) == 1
+    # dialog: the screen showed the source (no dialogue answer brings it back), then the screen was
+    # asked again (--force screen keeps dialog_ev.json) and says 안 보임: now the answer matters
+    (tmp_path / "d").mkdir()
+    q = _project(tmp_path / "d", sfx={"candidates": [_sound("S0001", 10.0)]}, dialogue={"lines": [_line(1, 10.5)]},
+                 screen={"items": {"S0001": {"visible": "보임", "observation": "번개가 보임", "reaction": "", "source": "vlm"}}})
+    assert dialog_ev.run(q, {"llm_scope": "useful"})["not_asked"] == 1 and asked["dialog"] == []
+    assert read_json(q.path("dialog_ev.json"))["items"]["S0001"]["skipped"] is True
+    write_json(q.path("screen.json"), {"items": {"S0001": {"visible": "안 보임", "observation": "어두운 방",
+                                                           "reaction": "", "source": "vlm"}}})
+    res = dialog_ev.run(q, {"llm_scope": "useful"})
+    assert asked["dialog"] == [["S0001"]] and res["asked"] == 1
+    assert read_json(q.path("dialog_ev.json"))["items"]["S0001"]["source"] == "llm"
+
+
+def test_screen_stage_groups_by_the_script_scenes(tmp_path, asked, monkeypatch):
+    got = []
+    real = recommend.worth_asking
+
+    def spy(sfx, cuts, which, screen_items=None, starts=None):
+        got.append((which, starts))
+        return real(sfx, cuts, which, screen_items, starts)
+    monkeypatch.setattr(recommend, "worth_asking", spy)
+    p = _project(tmp_path, sfx={"candidates": [_sound()]}, dialogue={"lines": CUE_LINES}, script=CUE_SCRIPT,
+                 scenes=CUE_SCENES)
+    screen.run(p, {"llm_scope": "useful"})
+    dialog_ev.run(p, {"llm_scope": "useful"})
+    assert got == [("screen", [(5.0, "SC001")]), ("dialog", [(5.0, "SC001")])]      # the same scenes in both
 
 
 def test_evidence_stages_pass_their_prompt_version(tmp_path, monkeypatch):
