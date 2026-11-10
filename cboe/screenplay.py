@@ -815,10 +815,45 @@ def classify_plain(texts: list[str], evidence: dict | None = None) -> list[dict]
     return _assemble(_plain_rows(texts, ev))
 
 
-def positioned_text(lines: list[dict]) -> list[str]:
+def positioned_text(lines: list[dict], starts=None) -> list[str]:
     """Positioned lines as text lines (columns of a row joined by a tab), for a PDF that is
-    not laid out as a shooting script."""
-    return ["\t".join(s["text"] for s in segs) for segs in _group(lines)]
+    not laid out as a shooting script.
+
+    With ``starts`` (``text -> bool``: this text begins a line of its own, as ``이름: 대사``
+    does), a row that only goes on with the words of the row before is joined to it: that row
+    was full (``_wrapped``), this one starts where it started, and neither is a heading or a
+    mark. Where the document ends a line cut at a space with that space, a full row without
+    one was cut inside a word and the halves join without a space."""
+    groups = _group(lines)
+    if starts is None:
+        return ["\t".join(s["text"] for s in segs) for segs in groups]
+    right = find_columns(lines)["right"]
+    single = [segs[0] if len(segs) == 1 else None for segs in groups]
+
+    def goes_on(prev: dict | None, row: dict | None) -> bool:
+        return prev is not None and row is not None and row["page"] in (prev["page"], prev["page"] + 1) \
+            and abs(row["x0"] - prev["x0"]) <= COLUMN_TOL and _wrapped(prev, row, right) \
+            and not starts(row["text"]) and not _mark(row["text"]) and not _mark(prev["text"])
+
+    joins = [k > 0 and goes_on(single[k - 1], single[k]) for k in range(len(groups))]
+    cut = [single[k - 1] for k in range(1, len(groups)) if joins[k]]
+    marks_spaces = len(cut) >= 3 and sum(1 for r in cut if r.get("space_end")) >= 0.3 * len(cut)
+    out: list[str] = []
+    for k, segs in enumerate(groups):
+        if not joins[k]:
+            out.append("\t".join(s["text"] for s in segs))
+            continue
+        prev, row = single[k - 1], single[k]
+        if marks_spaces and not prev.get("space_end") and _WORD_CH.match(out[-1][-1]) and _WORD_CH.match(row["text"][0]):
+            out[-1] += row["text"]
+        else:
+            out[-1] = _join(out[-1], prev, row, right)
+    return out
+
+
+def _mark(text: str) -> bool:
+    """A heading, a transition or an on-screen mark: a line of its own."""
+    return heading_candidate(text) is not None or is_transition(text) or bool(ONSCREEN.fullmatch(text))
 
 
 # ================================================= speaker cell and directions
@@ -1224,13 +1259,14 @@ def build(items: list[dict], fmt: str = "screenplay") -> dict:
     return b.document()
 
 
-def read_pdf(path) -> dict | list[str]:
+def read_pdf(path, starts=None) -> dict | list[str]:
     """A PDF script: the document when it is laid out as a shooting script, otherwise its
-    text lines (for the caller to read like a text file)."""
+    text lines (for the caller to read like a text file; ``starts`` joins the rows a full
+    line pushed down, see ``positioned_text``)."""
     lines = pdf_lines(Path(path))
     items = classify_positioned(lines)
     if items is None:
-        return positioned_text(lines)
+        return positioned_text(lines, starts)
     doc = build(items)
     doc["layout"] = "columns"
     return doc

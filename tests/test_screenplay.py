@@ -76,16 +76,18 @@ def test_page_numbers_and_running_titles_are_dropped():
 
 # ------------------------------------------------------------- a real (tiny) PDF
 def _pdf(pages: list[str], size=(595, 842)) -> bytes:
-    """A PDF with one content stream per page and the fonts F1 Helvetica, F2 Helvetica-Bold."""
+    """A PDF with one content stream per page and the fonts F1 Helvetica, F2 Helvetica-Bold,
+    F3 Courier (every glyph 0.6 em wide)."""
     objs = [b"<< /Type /Catalog /Pages 2 0 R >>",
-            ("<< /Type /Pages /Kids [%s] /Count %d >>" % (" ".join(f"{5 + 2 * k} 0 R" for k in range(len(pages))),
+            ("<< /Type /Pages /Kids [%s] /Count %d >>" % (" ".join(f"{6 + 2 * k} 0 R" for k in range(len(pages))),
                                                           len(pages))).encode(),
             b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
-            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>"]
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold >>",
+            b"<< /Type /Font /Subtype /Type1 /BaseFont /Courier >>"]
     for k, content in enumerate(pages):
         data = content.encode("ascii")
         objs.append((f"<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {size[0]} {size[1]}] "
-                     f"/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents {6 + 2 * k} 0 R >>").encode())
+                     f"/Resources << /Font << /F1 3 0 R /F2 4 0 R /F3 5 0 R >> >> /Contents {7 + 2 * k} 0 R >>").encode())
         objs.append(b"<< /Length %d >>\nstream\n" % len(data) + data + b"\nendstream")
     out = bytearray(b"%PDF-1.4\n")
     offsets = []
@@ -303,6 +305,33 @@ def test_positioned_text_without_a_speaker_column_is_read_as_text():
     assert sp.positioned_text(rows) == ["미나: 안녕하세요", "준호: 네 안녕하세요", "(문이 열린다)"]
     doc = script.read_rows(sp.positioned_text(rows))
     assert doc["format"] == "lines" and [ln["speaker"] for ln in doc["lines"]] == ["미나", "준호"]
+
+
+def test_a_pdf_of_name_colon_lines_joins_the_rows_a_full_line_pushed_down(tmp_path):
+    # Courier 10: 6 units a glyph, so rows of 45 glyphs end together at the right edge (342)
+    rows = ["MINA: Did you see the small lamp by the door? ",          # full, cut at a space
+            "It was on when we left the house.",
+            "JUNO: No, I did not see that. Did you lock it ",
+            "in the end?",
+            "MINA: Yes, I think so, and the dusty old lant",            # full, cut inside a word
+            "ern was still on the old table. I am so sure.",            # full too, then a line of its own
+            "(The door opens.)",
+            "JUNO: Then let us go back.",
+            "MINA: Fine."]
+    assert [len(r.rstrip()) for r in rows[:6]] == [45, 33, 45, 11, 45, 45]
+    f = tmp_path / "dub.pdf"
+    f.write_bytes(_pdf(["".join(_t("F3", 10, 72, 760 - 14 * k, r) for k, r in enumerate(rows))]))
+    lines = sp.pdf_lines(f)
+    assert sp.classify_positioned(lines) is None and sp.find_columns(lines)["right"] == 342.0
+    assert len(sp.positioned_text(lines)) == 9                          # without ``starts``: row by row
+    doc = script.read(f)
+    assert doc["format"] == "lines"
+    assert [(ln["speaker"], ln["text"]) for ln in doc["lines"]] == [
+        ("MINA", "Did you see the small lamp by the door? It was on when we left the house."),
+        ("JUNO", "No, I did not see that. Did you lock it in the end?"),
+        ("MINA", "Yes, I think so, and the dusty old lantern was still on the old table. I am so sure."),
+        ("JUNO", "Then let us go back."), ("MINA", "Fine.")]
+    assert [e["type"] for e in doc["elements"]].count("action") == 1
 
 
 def test_a_name_line_above_its_dialogue_column():

@@ -23,7 +23,10 @@ Accepted files
   ``(이름) 대사`` or ``이름: 대사`` give the speaker (and language), ``♪ 가사 ♪`` is sung, a row
   that is only ``[...]`` is a sound and no dialogue — except ``[이름]`` alone with the words going
   on in the next row without a hyphen (a cell broken right after a long label): it names the
-  speaker of those words. Times are kept (``start``/``end``) so alignment can be skipped.
+  speaker of those words when the name labels words elsewhere in the file or the label and the
+  words would not fit on one row, and it does not read as a sound (``[전화벨]``, ``[정적]``). Each
+  row that starts with a hyphen is the line of another speaker (a two-speaker cell gives two
+  lines with the time of the cell). Times are kept (``start``/``end``) so alignment can be skipped.
 Text files are read as UTF-8, UTF-16 (with a byte order mark) or CP949.
 
 Output (``read``)::
@@ -62,6 +65,7 @@ from functools import lru_cache
 from pathlib import Path
 
 from . import screenplay as sp
+from . import style, textutil
 
 VERSION = sp.VERSION
 _TAG = r"[\(（][^()（）]{1,10}[\)）]"
@@ -135,6 +139,14 @@ def _split_named(s: str, known: set | None = None):
 def _direction_only(s: str) -> bool:
     """Nothing but directions: ``(문 열리는 소리)``, ``<회상>``, ``[천둥] (잠시 뒤)``."""
     return not LETTER_RE.search(BRACKETS_RE.sub(" ", INLINE_DIRECTION_RE.sub(" ", s)))
+
+
+def _starts_line(text: str) -> bool:
+    """A row of a PDF read as text that begins a line of its own: ``이름: 대사``, a scene
+    heading, a comment, a ``/`` continuation, a direction alone, a row without letters."""
+    s = text.strip()
+    return not LETTER_RE.search(s) or bool(SCENE_RE.match(s)) or s.startswith(("/", "#")) \
+        or _direction_only(s) or bool(_split_named(s))
 
 
 def lines_document(raw_lines: list[str]) -> dict:
@@ -308,14 +320,22 @@ def _sound_words() -> frozenset:
     return frozenset(out)
 
 
-def _label_line(r: str, following: list[str]) -> bool:
+# a label alone on its row that reads as a sound, not a person: 음악 계속, 전화벨, 문 열림, 통화 중,
+# 정적, 빵빵 (a sound word said twice)
+SOUND_NAME_RE = re.compile(r"(?:음악|소리|효과음|벨|열림|닫힘|울림|계속)$|\s중$|^(?:정적|침묵|무음|적막|고요)$|^(\S+)\1$")
+HYPHEN_RE = re.compile(r"[-–]\s*")
+
+
+def _label_line(r: str, following: list[str], known: frozenset | set = frozenset()) -> bool:
     """A row that is only ``[이름]`` is the speaker label of the words on the next row when the
     cell was broken right after the label (a long label, ``[김철수/속마음]`` then the words): the
-    next row goes on without a hyphen, and the label names somebody or a language — not a
-    sound (``[쾅]``, ``[음악]``, ``[한숨]``)."""
+    next row goes on without a hyphen, and the label names a language, a source or somebody.
+    Somebody is a name the file writes before words elsewhere (``known``), or a label that
+    could not stand on one row with the words (why the cell was broken there) and does not
+    read as a sound (``[쾅]``, ``[음악 계속]``, ``[전화벨]``, ``[정적]``, ``[한숨]``)."""
     m = BRACKET_NAME_RE.fullmatch(r)
     nxt = next((x for x in following if x), None)
-    if not m or m.group(2) or nxt is None or nxt.startswith(("-", "–")):
+    if not m or m.group(2) or nxt is None or HYPHEN_RE.match(nxt):
         return False
     if not LETTER_RE.search(BRACKETS_RE.sub(" ", INLINE_DIRECTION_RE.sub(" ", nxt))):
         return False                                  # the next row is a sound too
@@ -323,11 +343,31 @@ def _label_line(r: str, following: list[str]) -> bool:
     if not _label(m.group(1), probe):
         return False
     name = probe["name"]
-    return not (name and (name in _sound_words() or re.search(r"(?:음악|소리|효과음)$", name)))
+    if not name or re.sub(r"\s+", "", name) in known:
+        return True
+    if name in _sound_words() or SOUND_NAME_RE.search(name):
+        return False
+    rest = " ".join(x for x in following if x)
+    return "/" in m.group(1) or textutil.units(f"{r} {rest}") > style.MAX_UNITS + 1e-9
 
 
-def _read_subtitle(path: Path) -> dict:
-    b = sp.Builder("timed")
+def _speaker_rows(shown: list[str]) -> list[list[str]]:
+    """The rows of a cell by speaker: a row that starts with a hyphen starts the words of
+    another speaker (II.5: ``- [미나] 누구세요?`` / ``- [준호] 나야``), rows without one go on with
+    the speaker before. The hyphen of a group's first row is taken off."""
+    groups: list[list[str]] = []
+    for row in shown:
+        m = HYPHEN_RE.match(row)
+        if m or not groups:
+            groups.append([row[m.end():].strip() if m else row])
+        else:
+            groups[-1].append(row)
+    return groups
+
+
+def _subtitle_cells(path: Path) -> list[tuple[float, float, list[str]]]:
+    """(start, end, shown rows) of every cell of an .srt / .vtt file."""
+    out = []
     blocks = re.split(r"\n\s*\n", read_text(path).replace("\r\n", "\n").replace("\r", "\n").strip())
     for block in blocks:
         rows = block.strip().splitlines()
@@ -335,38 +375,69 @@ def _read_subtitle(path: Path) -> dict:
         if tl is None:
             continue
         g = TIME_RE.search(rows[tl]).groups()
-        cue = sp.parse_cue("")
-        texts = []
-        shown = [re.sub(r"<[^>]+>", "", r).strip() for r in rows[tl + 1:]]
-        for k, row in enumerate(shown):
-            r = row.lstrip("-").strip()
-            if not r or r.startswith("♬"):
-                continue                              # a music line
-            if r.startswith("[") and _direction_only(r) and not (row == r and _label_line(r, shown[k + 1:])):
-                own = BRACKET_NAME_RE.fullmatch(r) if row == r else None
-                if own and not own.group(2) and sp.direction_type(own.group(1))[0] == "vocal":
-                    cue["vocal"].append(own.group(1).strip())     # without a hyphen: the speaker's own sound (II.5)
-                continue                              # a sound line (a speaker label alone is read below)
-            if r.startswith("♪"):                     # ♪ 가사 ♪
+        out.append((_secs(*g[:4]), _secs(*g[4:]), [re.sub(r"<[^>]+>", "", r).strip() for r in rows[tl + 1:]]))
+    return out
+
+
+def _labelled_names(cells) -> set[str]:
+    """Names the file writes as the label of words (``[미나] 누구세요?``, ``(미나) 누구세요?``)."""
+    out = set()
+    for _, _, shown in cells:
+        for group in _speaker_rows(shown):
+            for r in group:
+                m = BRACKET_NAME_RE.match(r) or PAREN_NAME_RE.match(r)
+                if m and LETTER_RE.search(m.group(2)):
+                    probe = sp.parse_cue("")
+                    _label(m.group(1), probe)
+                    if probe["name"]:
+                        out.add(re.sub(r"\s+", "", probe["name"]))
+    return out
+
+
+def _subtitle_line(rows: list[str], known: set) -> tuple[dict, list[str]]:
+    """The speaker cue and the words of the rows of one speaker in a cell."""
+    cue = sp.parse_cue("")
+    texts = []
+    for k, r in enumerate(rows):
+        if not r or r.startswith("♬"):
+            continue                              # a music line
+        if r.startswith("[") and _direction_only(r) and not _label_line(r, rows[k + 1:], known):
+            own = BRACKET_NAME_RE.fullmatch(r)
+            if own and not own.group(2) and sp.direction_type(own.group(1))[0] == "vocal":
+                cue["vocal"].append(own.group(1).strip())     # in the speaker's rows: the speaker's own sound (II.5)
+            continue                              # a sound line (a speaker label alone is read below)
+        if r.startswith("♪"):                     # ♪ 가사 ♪
+            r = r.strip("♪ ").strip()
+            cue["sung"] = True
+        m = BRACKET_NAME_RE.match(r) or PAREN_NAME_RE.match(r)
+        if m:
+            _label(m.group(1), cue)
+            r = m.group(2).strip()
+            if r.startswith("♪"):                 # [영희] ♪ 가사 ♪
                 r = r.strip("♪ ").strip()
                 cue["sung"] = True
-            m = BRACKET_NAME_RE.match(r) or PAREN_NAME_RE.match(r)
-            if m:
-                _label(m.group(1), cue)
-                r = m.group(2).strip()
-                if r.startswith("♪"):                 # [영희] ♪ 가사 ♪
-                    r = r.strip("♪ ").strip()
-                    cue["sung"] = True
-            else:
-                named = _split_named(r)
-                if named:
-                    named_cue = sp.parse_cue(named[0])
-                    cue.update({k: v for k, v in named_cue.items() if v})
-                    r = named[1].strip()
-            if r and LETTER_RE.search(r):
-                texts.append(r)
-        if texts:
-            b.line(cue, _clean(" ".join(texts)), start=_secs(*g[:4]), end=_secs(*g[4:]))
+        else:
+            named = _split_named(r)
+            if named:
+                named_cue = sp.parse_cue(named[0])
+                cue.update({k: v for k, v in named_cue.items() if v})
+                r = named[1].strip()
+        if r and LETTER_RE.search(r):
+            texts.append(r)
+    return cue, texts
+
+
+def _read_subtitle(path: Path) -> dict:
+    """A timed subtitle: one line per speaker of a cell — the two rows of a two-speaker cell
+    (``- [미나] …`` / ``- [준호] …``) are two lines with the time of the cell."""
+    b = sp.Builder("timed")
+    cells = _subtitle_cells(path)
+    known = _labelled_names(cells)
+    for start, end, shown in cells:
+        for rows in _speaker_rows(shown):
+            cue, texts = _subtitle_line(rows, known)
+            if texts:
+                b.line(cue, _clean(" ".join(texts)), start=start, end=end)
     return b.document()
 
 
@@ -394,7 +465,7 @@ def read(path) -> dict:
     elif ext == ".json":
         doc = _read_json(path)
     elif ext == ".pdf":
-        doc = sp.read_pdf(path)
+        doc = sp.read_pdf(path, starts=_starts_line)
         if not isinstance(doc, dict):                 # a PDF without a speaker column: read its text
             doc = read_rows(doc)
     elif ext == ".hwp":

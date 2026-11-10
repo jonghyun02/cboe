@@ -314,3 +314,50 @@ def test_an_exported_subtitle_keeps_its_speakers_when_read_back(tmp_path):
     assert [ln["text"].replace(" ", "") for ln in back["lines"]] == [text.replace(" ", "") for *_, text in said]
     assert [(ln["language"], ln["source"]) for ln in back["lines"]] == [
         (None, None), ("영어", "inner"), (None, None), (None, None), (None, "inner"), ("독일어", None)]
+
+
+def test_a_two_speaker_cell_is_read_back_as_two_lines(tmp_path):
+    from cboe import export, placement
+
+    def lines_of(said):
+        return [{"id": f"L{k:04d}", "speaker": n, "show_name": True, "name": n, "label_extra": [], "language": lang,
+                 "text": t, "start": s, "end": e, "timing": "asr", "status": "ok", "words": []}
+                for k, (n, lang, t, s, e) in enumerate(said, 1)]
+
+    said = [("미나", None, "누구세요?", 1.0, 2.0), ("준호", "영어", "나야", 1.4, 2.4), ("미나", None, "들어와", 6.0, 7.5)]
+    draft = placement.place(lines_of(said), [], [], 24.0, window=(0.0, None))
+    dual = draft["cells"][0]["lines"]
+    assert len(dual) == 2 and all(r.startswith("- [") for r in dual), "the placement sets the two lines in one cell"
+    out = tmp_path / "dual.srt"
+    export.write(draft["cells"], out, "srt", fps=24.0)
+    back = script.read(out)
+    got = [(ln["speaker"], ln["text"], ln["language"], ln["delivery"]) for ln in back["lines"]]
+    assert got == [("미나", "누구세요?", None, []), ("준호", "나야", "영어", []), ("미나", "들어와", None, [])]
+    first, second = back["lines"][:2]
+    assert (first["start"], first["end"]) == (second["start"], second["end"]) == (draft["cells"][0]["start"], draft["cells"][0]["end"])
+    assert back["characters"] == ["미나", "준호"]
+    # placed again, the two lines make the same cell
+    again = placement.place(lines_of([(ln["speaker"], ln["language"], ln["text"], ln["start"], ln["end"])
+                                      for ln in back["lines"]]), [], [], 24.0, window=(0.0, None))
+    assert again["cells"][0]["lines"] == dual
+    # written by hand: the label of one row is not the other's, one hyphen also starts a speaker
+    f = tmp_path / "hand.srt"
+    f.write_text("1\n00:00:01,000 --> 00:00:03,000\n- [영희/영어] 좋아.\n- [철수] 가자.\n\n"
+                 "2\n00:00:04,000 --> 00:00:06,000\n[영희] 어디 가?\n- 집에.\n\n"
+                 "3\n00:00:07,000 --> 00:00:09,000\n-[철수] 비가 오는데\n우산은 있어?\n- [영희] 응.\n", encoding="utf-8")
+    got = [(ln["speaker"], ln["text"], ln["language"], ln["start"]) for ln in script.read(f)["lines"]]
+    assert got == [("영희", "좋아.", "영어", 1.0), ("철수", "가자.", None, 1.0), ("영희", "어디 가?", None, 4.0),
+                   (None, "집에.", None, 4.0), ("철수", "비가 오는데 우산은 있어?", None, 7.0), ("영희", "응.", None, 7.0)]
+
+
+def test_a_sound_alone_on_its_row_names_nobody(tmp_path):
+    # another writer's subtitle: a sound on the row above the words, without hyphens
+    sounds = ["전화벨", "정적", "침묵", "문 열림", "음악 계속", "빵빵", "띵동", "멀리서", "통화 중"]
+    blocks = [f"[{s}]\n잠깐만 기다려 {k}" for k, s in enumerate(sounds)]
+    blocks += ["[보람] 저 왔어요", "[보람]\n잠깐만 기다려 줘", "[나래]\n오늘따라바람이정말많이부는구나"]
+    f = tmp_path / "s.srt"
+    f.write_text("\n".join(f"{k}\n00:00:{k:02d},000 --> 00:00:{k:02d},800\n{b}\n" for k, b in enumerate(blocks, 1)),
+                 encoding="utf-8")
+    d = script.read(f)
+    assert [ln["speaker"] for ln in d["lines"]] == [None] * len(sounds) + ["보람", "보람", "나래"]
+    assert d["characters"] == ["보람", "나래"]       # a name labelling words elsewhere, a label too long for one row
