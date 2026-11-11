@@ -304,11 +304,39 @@ def test_a_word_that_starts_with_yeol_is_no_door_opening():
     assert c["phrase"] == "[덜컹덜컹 - 기차]" and "train" in c["families"]
     c = cues.sfx_cue("문 앞에 끼익 열차가 선다.")
     assert c["phrase"] == "[끼익]" and "[급정거]" in c["phrases"] and "car" in c["families"]
-    c = cues.sfx_cue("문 밖에서 쿵쿵 열심히 뛴다.")
-    assert not any("문" in p for p in c["phrases"])
+    for text in ("문 밖에서 쿵쿵 열심히 뛴다.", "창문 너머 열기구가 쿵 떨어진다.",
+                 "문 밖에서 쿵쿵 열 명이 뛴다.", "문 앞에서 쿵쿵 열다섯 명이 뛴다."):    # nor the number
+        c = cues.sfx_cue(text)
+        assert not any("문" in p for p in c["phrases"]), text
     for text in ("문이 끼익 천천히 열렸다.", "문을 천천히 끼익 열자 바람이 분다.", "문을 끼익 열어 본다.",
                  "문이 끼익 활짝 열려 있다.", "문이 천천히 끼익 열리며 빛이 든다."):
         assert cues.sfx_cue(text)["phrase"] == "[끼익 - 문]", text
+
+
+@pytest.mark.parametrize("text, phrase", [
+    ("문이 끼익 열림.", "[끼익 - 문]"),
+    ("문을 끼익 열다.", "[끼익 - 문]"),
+    ("문을 끼익 열다가 멈춘다.", "[끼익 - 문]"),
+    ("문을 끼익 열더니 들어온다.", "[끼익 - 문]"),
+    ("문을 끼익 열던 손이 멈춘다.", "[끼익 - 문]"),
+    ("문을 끼익 열기 무섭게 뛰어나간다.", "[끼익 - 문]"),
+    ("문을 끼익 열게 둔다.", "[끼익 - 문]"),
+    ("문을 끼익 열도록 둔다.", "[끼익 - 문]"),
+    ("문을 끼익 열수록 시끄럽다.", "[끼익 - 문]"),
+    ("문을 끼익 열곤 했다.", "[끼익 - 문]"),
+    ("문을 끼익 열까 말까 한다.", "[끼익 - 문]"),
+    ("문이 끼익 열 때마다 깬다.", "[끼익 - 문]"),
+    ("문을 끼익 열 수 없다.", "[끼익 - 문]"),
+    ("대문을 끼익 열다.", "[끼익 - 대문]"),
+    ("현관문이 덜컹 열 때마다 깬다.", "[덜컹 - 현관문]"),
+    ("문을 덜컹 열다가 멈춘다.", "[덜컹 - 문]"),
+])
+def test_every_ending_of_the_verb_yeol_after_the_doors_sound_is_the_door(text, phrase):
+    """7차 확인: '열' read as the verb only before the endings of '열다' must take all of them —
+    '열림', '열다가', '열던', '열기', '열 때', '열 수' are the door opening, not a brake."""
+    c = cues.sfx_cue(text)
+    assert c["phrase"] == phrase and "door" in c["families"], text
+    assert "[급정거]" not in c["phrases"] and "car" not in c["families"], text
 
 
 def test_a_long_run_of_onomatopoeia_beside_a_door_is_read_at_once():
