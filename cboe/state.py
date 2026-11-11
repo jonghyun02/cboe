@@ -1768,8 +1768,8 @@ class Project:
         align stage suspects (both counted apart), a stretch made only of interjections or
         vocalisations (as alignment leaves them out of the extras), and a stretch of one word
         shorter than ``HEARD_SHORT`` s. Each ``{"start", "end", "text" (what was heard), "words"
-        (how many), "extra" (the '대본에 없는 말' it is, or None), "line" (the script line over it, or
-        None)}``; [] without asr.json."""
+        (how many), "extra" (the '대본에 없는 말' most of its words are in, the first heard of two
+        with as many, or None), "line" (the script line over it, or None)}``; [] without asr.json."""
         import bisect
 
         from .stages.align import INTERJECTIONS, is_vocalisation, norm_chars
@@ -1844,8 +1844,10 @@ class Project:
             if hotwords:
                 if _echo_only(toks, hotwords):
                     continue
-            xs = [kept(a, b) for a, b, _ in g]
-            xid = max({x["id"] for x in xs if x}, key=lambda i: sum(1 for x in xs if x and x["id"] == i), default=None)
+            # the extra most of the words are in; of two with as many, the one heard first (not the
+            # order of a set, which went with the string hash: PYTHONHASHSEED)
+            xs = [x["id"] for x in (kept(a, b) for a, b, _ in g) if x]
+            xid = max(dict.fromkeys(xs), key=xs.count, default=None)
             over = [(min(e, float(ln["end"])) - max(s, float(ln["start"])), ln["id"]) for ln in script_lines]
             best = max(over, default=(0.0, None))
             out.append({"start": round(s, 3), "end": round(e, 3), "text": " ".join(toks), "words": len(g),

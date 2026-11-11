@@ -1487,6 +1487,34 @@ def test_the_export_check_and_the_state_list_speech_heard_without_a_cell(tmp_pat
         assert not any("자막 칸이 없는 구간" in w for w in export_warnings(st["export_check"]))
 
 
+def test_the_extra_of_speech_heard_without_a_cell_does_not_follow_the_string_hash(tmp_path):
+    # 7th round: of two '대본에 없는 말' with as many words in one stretch, the one named followed the
+    # order of a set of their ids (the string hash): another PYTHONHASHSEED, another export check.
+    # Now the one heard first
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    two = [{"id": "X0001", "start": 30.0, "end": 30.8, "text": "저기요 잠깐만", "scene_id": "SC001",
+            "words": heard("저기요 잠깐만", 30.0, 30.8)},
+           {"id": "X0002", "start": 31.2, "end": 32.0, "text": "거기 서요", "scene_id": "SC001",
+            "words": heard("거기 서요", 31.2, 32.0)}]
+    p = make(tmp_path, extras=two)
+    write_json(p.path("asr.json"), {"words": ASR + two[0]["words"] + two[1]["words"], "hint_echo": []})
+    p.recompute()
+    code = ("import json, sys; from cboe.state import Project; "
+            "print(json.dumps(Project(sys.argv[1]).export_check(), ensure_ascii=False, sort_keys=True))")
+    root = Path(__file__).resolve().parents[1]
+    outs = set()
+    for seed in range(6):
+        r = subprocess.run([sys.executable, "-c", code, str(p.work)], cwd=root, capture_output=True, check=True,
+                           env=dict(os.environ, PYTHONHASHSEED=str(seed), PYTHONIOENCODING="utf-8"))
+        outs.add(r.stdout.decode("utf-8"))
+    assert len(outs) == 1
+    (row,) = json.loads(outs.pop())["heard_no_cell"]
+    assert (row["start"], row["end"], row["words"], row["extra"]) == (30.0, 32.0, 4, "X0001")
+
+
 # =================================================================== 6차: 노래 구간의 말 · 정렬의 새 힌트
 def test_an_extra_heard_inside_a_song_becomes_a_sung_line_unless_the_writer_says_no(tmp_path):
     p = make(tmp_path, extras=[dict(EXTRAS[0], sung=True), dict(EXTRAS[1])])
