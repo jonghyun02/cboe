@@ -2331,7 +2331,8 @@
     if (cells.length) bits.push(cells.map((c, i) => `<button type="button" class="g-cell" data-act="goto-cell" data-cell="${esc(c.id)}" title="${esc((c.lines || []).join(' / '))}">${i + 1}칸 ${fmtTime(c.start)}</button>`).join(' '));
     else if (ln.include) bits.push('자막 칸 없음');
     const notes = new Set(cells.flatMap((c) => (c.check && c.check.notes) || []));
-    for (const n of notes) bits.push(`<span class="flag">${esc(n)}</span>`);
+    const told = (joinNowOf(ln) || {}).note;              // said once, beside the 앞 줄과 한 칸으로 switch
+    for (const n of notes) if (n !== told) bits.push(`<span class="flag">${esc(n)}</span>`);
     let out = `<div class="ev-note">${bits.join('<i>·</i>')}</div>`;
     if (ln.raw && ln.raw !== (ln.script_text || ln.text)) out += `<div class="raw"><b>대본 원문</b>${esc(ln.raw)}</div>`;
     return out;
@@ -2399,6 +2400,16 @@
     const a = D.added.get(ln.id);
     return (a ? a.pos : (ln.decision || {}).pos) || null;
   }
+  /** What the 칸 묶기 row says beside the join switch of a line in the subtitles: {joined: true},
+      {note} (asked for and not joined: the note placement wrote on the line's cell, said there and
+      not again among the panel's cell notes), or null (no switch, a write on its way, not asked). */
+  function joinNowOf(ln) {
+    if (!ln.include || D.added.has(ln.id) || !lineBefore(ln) || pend.has(`${ln.id}|join`)) return null;
+    if (ln.joined) return { joined: true };
+    if (!ownOf(ln, 'join')) return null;
+    const notes = (ln.cells || []).map((c) => D.cellById.get(c)).filter(Boolean).flatMap((c) => (c.check && c.check.notes) || []);
+    return { note: notes.find((n) => String(n).startsWith(JOIN_FAIL)) || JOIN_FAIL };
+  }
   /** 앞 줄과 한 칸으로 (line ``join``): a switch on every line in the subtitles but the first.
       ``joined`` (the draft has this line in the cell of the line before) shows as 앞 줄과 한 칸;
       asked for and not joined, the note placement wrote on the line's cell says why. */
@@ -2407,13 +2418,9 @@
     const prev = lineBefore(ln);
     if (!prev) return '';
     const on = !!ownOf(ln, 'join');
-    const sending = pend.has(`${ln.id}|join`);
-    let now = '';
-    if (!sending && ln.joined) now = '<span class="pill ls-ok join-now">앞 줄과 한 칸</span>';
-    else if (!sending && on) {
-      const notes = (ln.cells || []).map((c) => D.cellById.get(c)).filter(Boolean).flatMap((c) => (c.check && c.check.notes) || []);
-      now = `<span class="flag join-now">${esc(notes.find((n) => String(n).startsWith(JOIN_FAIL)) || JOIN_FAIL)}</span>`;
-    }
+    const j = joinNowOf(ln);
+    const now = !j ? '' : j.joined ? '<span class="pill ls-ok join-now">앞 줄과 한 칸</span>'
+      : `<span class="flag join-now">${esc(j.note)}</span>`;
     const when = prev.start != null ? `${fmtTime(prev.start)} ` : '';
     return `<div class="ed-row join-row"><label class="switch sm"><input type="checkbox" data-change="ln-join"${on ? ' checked' : ''}><span>앞 줄과 한 칸으로</span></label>${now}
       <span class="field-hint join-prev" title="${esc(prev.text)}">앞 줄 ${esc(when)}${esc(whoOf(prev))} 「${esc(cut(prev.text, 18))}」</span></div>`;

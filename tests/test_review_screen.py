@@ -1589,3 +1589,70 @@ def test_sung_speech_and_the_name_and_language_hints_are_shown_and_filtered(tmp_
     assert keys.index("spelling") < keys.index("name") < keys.index("language") < keys.index("lang"), keys
     assert r["byName"] == ["L0001"] and r["byLang"] == ["L0002"], r
     assert "이름만 다르게 들림" in r["panel1"] and "들린 언어: 영어 · 언어 표시 확인" in r["panel2"], r
+
+
+# what the line panel shows: its note, the compare rows, the section heads, the 들린 대로 button
+PANEL = r"""(() => { const q = (s) => document.querySelector('#evidence ' + s), b = q('[data-act="ln-from"][data-from="heard"]');
+  return { note: (q('.ev-note') || {}).textContent || '', all: document.getElementById('evidence').textContent,
+    cmp: [...document.querySelectorAll('#evidence .cmp-row')].map((r) => r.textContent.replace(/\s+/g, ' ').trim()),
+    sec: [...document.querySelectorAll('#evidence .sec')].map((x) => x.textContent.replace(/\s+/g, ' ').trim()),
+    heard: b ? (b.disabled ? 'off' : 'on') : null, now: (q('.join-now') || {}).textContent || '' }; })()"""
+
+
+@browser_only
+def test_a_line_whose_name_was_heard_otherwise_sets_the_script_beside_what_was_heard(tmp_path, browser, clips):
+    # hint name on a line the alignment calls ok, as the real server sends it (no fetch hook): the
+    # panel sets the script beside what was heard and 들린 대로 takes it (old server: no asr_text,
+    # the panel said 대본 글 그대로 나간다 and had no 들린 대로)
+    named = dict(_line("L0001", "하늘", "바다야, 누구 계세요?", 5.4, 6.2), asr_text="파다야 누구 계세요", hints=["name"],
+                 diff=[{"kind": "word", "name": True, "script": "바다야,", "heard": "파다야", "at": [0, 1]}])
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0, lines=[named, *PAGE_LINES[1:]])
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          const pick = async (id) => { await p.ev(`document.getElementById('lines-row-${id}').click()`); await p.sleep(250); };
+          await p.ev(`document.querySelector('#tabs [data-view="lines"]').click()`);
+          await p.sleep(200);
+          await pick('L0003');
+          const plain = await p.ev(`@PANEL@`);
+          await pick('L0001');
+          const named = await p.ev(`@PANEL@`);
+          await p.ev(`document.querySelector('#evidence [data-act="ln-from"][data-from="heard"]').click()`);
+          await p.idle();
+          const row = await p.ev(`(document.querySelector('#lines-row-L0001') || {}).textContent || ''`);
+          return { plain, named, row, after: await p.ev(`@PANEL@`) };
+        }""".replace("@PANEL@", PANEL))
+    o = r["result"]
+    n = o["named"]
+    assert any(s.startswith("대조") for s in n["sec"]) and not any(s.startswith("글") for s in n["sec"]), n
+    assert any(c.startswith("대본") and "바다야, 누구 계세요?" in c for c in n["cmp"]), n
+    assert any(c.startswith("들린 말") and "파다야 누구 계세요" in c for c in n["cmp"]), n
+    assert n["heard"] == "on" and "이름만 다르게 들림" in n["note"], n
+    assert any(s.startswith("글") for s in o["plain"]["sec"]) and o["plain"]["heard"] is None, o["plain"]   # nothing to compare
+    assert any(u == "api/lines/L0001" for u in r["posts"]), r["posts"]
+    assert "파다야 누구 계세요" in o["row"] and "들린 대로 고름" in " ".join(o["after"]["cmp"] + [o["after"]["all"]]), o
+
+
+@browser_only
+def test_a_join_that_does_not_fit_says_why_once_on_the_line_panel(tmp_path, browser, clips):
+    # 앞 줄과 한 칸으로 on a line too long for a hyphen line, placed by the real server: why it was
+    # not joined is said beside the switch and not again among the cell notes (old page: twice)
+    work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
+    with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
+        r = run_page(browser, srv.url, r"""export default async (p) => {
+          await p.ev(`document.querySelector('#tabs [data-view="lines"]').click()`);
+          await p.sleep(200);
+          await p.ev(`document.getElementById('lines-row-L0002').click()`);
+          await p.sleep(250);
+          const before = await p.ev(`@PANEL@`);
+          await p.ev(`document.querySelector('#evidence [data-change="ln-join"]').click()`);
+          await p.idle();
+          const asked = await p.ev(`@PANEL@`);
+          await p.ev(`document.querySelector('#evidence [data-change="ln-join"]').click()`);
+          await p.idle();
+          return { before, asked, off: await p.ev(`@PANEL@`) };
+        }""".replace("@PANEL@", PANEL))["result"]
+    why = "앞 줄과 한 칸으로 묶지 못함 · 너무 김: 하이픈 줄 16자 초과"
+    a = r["asked"]
+    assert a["now"] == why, a
+    assert a["all"].count("앞 줄과 한 칸으로 묶지 못함") == 1 and why not in a["note"], a
+    assert "앞 줄과 한 칸으로 묶지 못함" not in r["before"]["all"] and "앞 줄과 한 칸으로 묶지 못함" not in r["off"]["all"], r

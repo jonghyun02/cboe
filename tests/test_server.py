@@ -510,3 +510,36 @@ def test_the_work_lock_pauses_the_cycle_collector_while_any_is_held():
         assert not gc.isenabled()
     finally:
         gc.enable()
+
+
+# ------------------------------------------------------------------- 7차: a name heard otherwise
+def test_a_line_whose_name_was_heard_otherwise_carries_what_was_heard(tmp_path):
+    # hint name on a line the alignment calls ok (only the name sounded different): the state sends
+    # what was heard and the difference, so the line's panel sets the script beside it and offers
+    # 들린 대로 (old server: the hint only, nothing heard to compare)
+    w = tmp_path / "w"
+    w.mkdir()
+
+    def words(text, s, e):
+        toks = text.split()
+        return [{"w": x, "s": round(s + i * (e - s) / len(toks), 3), "e": round(s + (i + 1) * (e - s) / len(toks), 3)}
+                for i, x in enumerate(toks)]
+    rows = [("L0001", "나래", "보라야, 내일 아침에 산으로 가자.", "포라야 내일 아침에 산으로 가자", "ok", ["name"],
+             [{"kind": "word", "name": True, "script": "보라야,", "heard": "포라야", "at": [0, 1]}], 1.0, 3.0),
+            ("L0002", "보라", "좋아 산에서 해를 보자.", "좋아 산에서 해를 보자.", "ok", None, None, 4.0, 6.0),
+            ("L0003", "나래", "그때 꼭 와야 한다, 알았지?", "그때 꼭 와야 한다 고마워", "differs", None,
+             [{"kind": "word", "script": "알았지?", "heard": "고마워", "at": [4, 5]}], 7.0, 9.0)]
+    lines = [{"id": i, "speaker": sp, "text": t, "start": s, "end": e, "words": words(t, s, e), "status": st,
+              "timing": "asr", "scene_id": "SC001", "asr_text": heard, "hints": h, "diff": d}
+             for i, sp, t, heard, st, h, d, s, e in rows]
+    for name, obj in (("project.json", {"title": "시험", "t0": 0.0, "t1": 12.0, "fps": 24.0, "duration": 12.0}),
+                      ("dialogue.json", {"lines": lines, "extras": []}), ("items.json", {"items": []}),
+                      ("cuts.json", {"cuts": []})):
+        (w / name).write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+    with TestClient(create_app(w, media=_NoMedia())) as c:
+        got = {ln["id"]: ln for ln in c.get("/api/state").json()["lines"]}
+    assert got["L0001"]["hints"] == ["name"] and got["L0001"]["status"] == "ok"
+    assert got["L0001"]["asr_text"] == "포라야 내일 아침에 산으로 가자", got["L0001"]
+    assert got["L0001"]["diff"] == rows[0][6]
+    assert "asr_text" not in got["L0002"] and "diff" not in got["L0002"]          # nothing to say: kept small
+    assert got["L0003"]["asr_text"] == "그때 꼭 와야 한다 고마워" and got["L0003"]["diff"] == rows[2][6]

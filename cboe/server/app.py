@@ -360,9 +360,11 @@ def line_row(ln: dict) -> dict:
     no word times; empty values, false flags (``ROW_FLAGS``) and ``origin`` / ``text_from``
     "script" are left out; the script text, the raw script line and what was heard only where
     they say something (``script_text`` when the shown text differs, ``asr_text`` / ``diff`` for
-    differs · unheard lines and for a text taken from what was heard); ``label`` = the label as
-    placed when the name is shown; ``delivery`` (the manner of speech the script writes) always,
-    [] when there is none; ``joined``: in one cell with the line before it in the draft."""
+    differs · unheard lines, for a line whose only difference is a name heard otherwise (hint
+    ``name``: status ok, the page still sets the script beside what was heard) and for a text
+    taken from what was heard); ``label`` = the label as placed when the name is shown;
+    ``delivery`` (the manner of speech the script writes) always, [] when there is none;
+    ``joined``: in one cell with the line before it in the draft."""
     row = {k: ln[k] for k in ROW_KEYS if ln.get(k) not in (None, [], {}, "", "script")}
     row.update({k: True for k in ROW_FLAGS if ln.get(k)})
     row["delivery"] = list(ln.get("delivery") or [])
@@ -370,7 +372,8 @@ def line_row(ln: dict) -> dict:
         row["script_text"] = ln["script_text"]
     if ln.get("raw") and ln["raw"] != ln.get("script_text"):
         row["raw"] = ln["raw"]
-    if ln.get("status") in ("differs", "unheard") or ln.get("text_from") == "heard":
+    if (ln.get("status") in ("differs", "unheard") or ln.get("text_from") == "heard"
+            or "name" in (ln.get("hints") or ())):
         row["asr_text"] = ln.get("asr_text") or ""
         if ln.get("diff"):
             row["diff"] = ln["diff"]
