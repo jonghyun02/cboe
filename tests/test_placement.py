@@ -316,6 +316,33 @@ def test_two_short_lines_of_different_speakers_share_a_hyphen_cell():
     assert [x["refs"] for x in run(tight)["cells"]] == [["L1"], ["L2"], ["L3"]]
 
 
+def test_two_guessed_lines_make_no_hyphen_cell_that_7_s_would_end_just_before_the_next():
+    # 7차 (G3-04): the cell of the two from the first in-time would end at 7 s, 4 frames before the
+    # next line (TG 5 "gaps between subtitles of 3-11 frames inclusive must be closed to 2 frames"),
+    # and half a second before it would cut the speech: two guessed lines give way instead (each
+    # gets 5/6 s, no must); two heard lines keep the hyphen cell (alone, the first is 6 frames)
+    from cboe import check
+
+    def musts(d):
+        return [v["code"] for v in check.run(d)["violations"] if v["level"] == "must"]
+    for timing, paired in (("voice", False), ("even", False), ("asr", True)):
+        lines = [L("L1", "뭐?", sec(240), sec(244), speaker="가람", timing=timing),
+                 L("L2", "응 알았어", sec(248), sec(404), speaker="나래", timing=timing),
+                 L("L3", "그래", sec(411), sec(418), speaker="다솜", timing="asr")]
+        d = run(lines)
+        assert any(c["refs"] == ["L1", "L2"] for c in d["cells"]) is paired, (timing, d["cells"])
+        if not paired:
+            assert [c["refs"] for c in d["cells"]] == [["L1"], ["L2"], ["L3"]] and musts(d) == [], (timing, d["cells"])
+        else:
+            assert musts(d) == ["short_gap"], d["cells"]
+    # with half a second left before the next line, or the gap closed, the two guessed lines share it
+    for c0 in (419, 409):
+        lines = [L("L1", "뭐?", sec(240), sec(244), speaker="가람", timing="voice"),
+                 L("L2", "응 알았어", sec(248), sec(404 if c0 == 409 else 400), speaker="나래", timing="voice"),
+                 L("L3", "그래", sec(c0), sec(c0 + 7), speaker="다솜", timing="asr")]
+        assert one(run(lines), "L1")["refs"] == ["L1", "L2"], c0
+
+
 def test_two_nameless_turns_of_a_subtitle_script_share_a_hyphen_cell_without_labels():
     # 5th round: a subtitle script's "- " cell without names comes as two lines whose person is
     # "#" + the turn (state.placement_inputs); two people, and the "#…" is never shown

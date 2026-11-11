@@ -86,7 +86,10 @@ contained sentence" = 두 화자 자막의 줄마다 완결된 문장) and the t
 also pairs a guessed line with a heard one); or, both heard or both guessed, ② the two are the rows
 of one cell of a subtitle script (they came in one cell); or ③ the cell of the two gets 5/6 s and
 the reading time of both before the next cell (before, a second line that was not short left the
-first a cell under 5/6 s, GR 1). A row of a subtitle cell that cannot get 5/6 s before the next
+first a cell under 5/6 s, GR 1). Two guessed lines make no cell by ② or ③ that 7 s from the first
+in-time would end 3-11 frames before the next cell, with no room to end it half a second before
+(TG 5, a must): they give way instead (``_short_gap_left``; 72 cases of the B sweep of verify f1a,
+one must less each, none more). A row of a subtitle cell that cannot get 5/6 s before the next
 line and cannot share a cell with it goes back to the other row of its cell before it (②). A line
 whose time is a guess is drawn to a heard line by ① only: else it gives way or gets no cell (below).
 
@@ -829,11 +832,30 @@ def _can_pair(a: _Cell, b: _Cell, c, P: _P, w1=None) -> bool:
         return True                                      # ① both short
     if bool(pa.get("guess")) != bool(pb.get("guess")):
         return False         # a guessed line beside a heard one: it gives way or gets no cell (_make_room)
+    need = max(P.min_f, P.need(units(_hyphen_line(pa)) + units(_hyphen_line(pb))))
+    # two guessed lines can give way instead (_untangle, _make_room): no cell of the two that 7 s would
+    # end 3-11 frames before the next one (TG 5, a must). Two heard lines keep it: alone, the first
+    # would be a few frames on screen (GR 1, a must too; measured on the B sweep of verify f1a)
+    avoid = bool(pa.get("guess")) and _short_gap_left(a, pa, pb, c, need, P)
     if _one_cell(pa, pb):
-        return True                                      # ②
+        return not avoid                                 # ②
     room = min((c.start - P.gap) if c is not None else INF, a.start + P.max_f,
                w1 if w1 is not None else INF) - a.start
-    return room >= max(P.min_f, P.need(units(_hyphen_line(pa)) + units(_hyphen_line(pb))))   # ③
+    return room >= need and not avoid                    # ③
+
+
+def _short_gap_left(a: _Cell, pa: dict, pb: dict, c, need: int, P: _P) -> bool:
+    """Whether the hyphen cell of ``pa`` and ``pb`` from ``a.start`` would end 3-11 frames before
+    the cell after, ``c``: 7 s from its in-time comes before 2 frames before ``c``, and half a second
+    before ``c`` comes before the speech of the two and the reading time (``need``) — TG 5 "gaps
+    between subtitles of 3-11 frames inclusive must be closed to 2 frames" (a must). The in-time of
+    the cell is the first line's, so the second line alone may still close that gap."""
+    if c is None:
+        return False
+    cap = a.start + P.max_f
+    if c.start - P.gap <= cap or c.start - cap >= P.half_exact - 1e-9:
+        return False
+    return _half_before(c.start, P) < max(pa["e"], pb["e"], a.start + need)
 
 
 # the writer's "one cell with the line before" (module doc "Writer's join")
