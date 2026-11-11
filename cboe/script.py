@@ -418,8 +418,9 @@ def _speaker_rows(shown: list[str], known=None, speakers=None) -> list[list[str]
     another speaker (II.5: ``- [미나] 누구세요?`` / ``- [준호] 나야``), rows without one go on with
     the speaker before — except, given ``known`` (``_labelled_names``) and ``speakers`` (the same
     of the first rows only), a row that names another speaker than the one its rows named (``-
-    [가람] 가자.`` / ``[나래] 응.``, ``가람: 가자.`` / ``나래: 응.``: I.6, one speaker per row; II.8, the speaker ID where a speaker
-    starts; ``_row_name``). The hyphen of a group's first row is taken off."""
+    [가람] 가자.`` / ``[나래] 응.``, ``가람: 가자.`` / ``나래: 응.``: I.6, one speaker per row; II.8,
+    the speaker ID where a speaker starts; ``_row_name``). The hyphen of a group's first row is
+    taken off."""
     groups: list[list[str]] = []
     names: list[str | None] = []                     # the speaker each group's rows named so far
     for k, row in enumerate(shown):
