@@ -493,6 +493,18 @@ def test_a_row_that_names_another_speaker_is_that_speakers_line(tmp_path):
     assert [(w["speaker"], w["vocal"], w.get("turn")) for w in doc["wordless"]] == [("나래", ["웃음"], "2-2")]
 
 
+def test_a_row_that_names_another_speaker_with_a_colon_is_that_speakers_line(tmp_path):
+    # 6차 확인 G4-08: '가람: 가자.' / '나래: 응.' was one line of 나래, '가자. 응.' (가람's words given
+    # to 나래). A name that starts words elsewhere in the file starts a speaker's words in a cell too;
+    # the same name again splits nothing.
+    f = tmp_path / "colon.srt"
+    f.write_text("1\n00:00:01,000 --> 00:00:03,000\n가람: 가자.\n나래: 응.\n\n"
+                 "2\n00:00:04,000 --> 00:00:06,000\n나래: 그래.\n\n"
+                 "3\n00:00:07,000 --> 00:00:09,000\n가람: 됐어.\n가람: 가자.\n", encoding="utf-8")
+    got = [(ln["speaker"], ln["text"], ln.get("turn")) for ln in script.read(f)["lines"]]
+    assert got == [("가람", "가자.", "1-1"), ("나래", "응.", "1-2"), ("나래", "그래.", None), ("가람", "됐어. 가자.", None)]
+
+
 def test_a_sound_alone_on_its_row_names_nobody(tmp_path):
     # another writer's subtitle: a sound on the row above the words, without hyphens
     sounds = ["전화벨", "정적", "침묵", "문 열림", "음악 계속", "빵빵", "띵동", "멀리서", "통화 중"]

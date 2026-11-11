@@ -394,11 +394,16 @@ def _row_name(row: str, following: list[str], known, speakers) -> str | None:
     [웃음]`` when the file starts a speaker's words with that label elsewhere too (``speakers``: a
     label of the row before the words, not a speaker of the file, may be a manner — ``(화내며)
     빨리 와.``), or ``[나래]`` alone with the words on the next row (``_label_line``); None for a
-    row that names nobody (``[쾅]``, ``(웃으며) 응.``, words alone)."""
+    row that names nobody (``[쾅]``, ``(웃으며) 응.``, words alone). ``나래: 응.`` names 나래 as the
+    bracket label does (6차 확인 G4-08)."""
     m = BRACKET_NAME_RE.match(row) or PAREN_NAME_RE.match(row)
     probe = sp.parse_cue("")
     if not m:
-        return None
+        named = _split_named(row)
+        if not named or not LETTER_RE.search(named[1]):
+            return None
+        name = sp.parse_cue(named[0])["name"]
+        return name if name and re.sub(r"\s+", "", name) in speakers else None
     if m.group(2):
         if not LETTER_RE.search(m.group(2)) or not _label(m.group(1), probe) or not probe["name"]:
             return None
@@ -413,7 +418,7 @@ def _speaker_rows(shown: list[str], known=None, speakers=None) -> list[list[str]
     another speaker (II.5: ``- [미나] 누구세요?`` / ``- [준호] 나야``), rows without one go on with
     the speaker before — except, given ``known`` (``_labelled_names``) and ``speakers`` (the same
     of the first rows only), a row that names another speaker than the one its rows named (``-
-    [가람] 가자.`` / ``[나래] 응.``: I.6, one speaker per row; II.8, the speaker ID where a speaker
+    [가람] 가자.`` / ``[나래] 응.``, ``가람: 가자.`` / ``나래: 응.``: I.6, one speaker per row; II.8, the speaker ID where a speaker
     starts; ``_row_name``). The hyphen of a group's first row is taken off."""
     groups: list[list[str]] = []
     names: list[str | None] = []                     # the speaker each group's rows named so far
@@ -446,7 +451,8 @@ def _subtitle_cells(path: Path) -> list[tuple[float, float, list[str]]]:
 
 def _labelled_names(cells, first_rows: bool = False) -> set[str]:
     """Names the file writes as the label of words (``[미나] 누구세요?``, ``(미나) 누구세요?``) — with
-    ``first_rows``, only where a speaker's words start: the first row of a cell or a hyphen row."""
+    ``first_rows``, only where a speaker's words start: the first row of a cell or a hyphen row,
+    there also ``미나: 누구세요?`` (``_row_name``)."""
     out = set()
     for _, _, shown in cells:
         for group in _speaker_rows(shown):
@@ -457,6 +463,11 @@ def _labelled_names(cells, first_rows: bool = False) -> set[str]:
                     _label(m.group(1), probe)
                     if probe["name"]:
                         out.add(re.sub(r"\s+", "", probe["name"]))
+                elif not m and first_rows:
+                    named = _split_named(r)
+                    name = sp.parse_cue(named[0])["name"] if named and LETTER_RE.search(named[1]) else None
+                    if name:
+                        out.add(re.sub(r"\s+", "", name))
     return out
 
 
