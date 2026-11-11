@@ -248,7 +248,8 @@ def test_a_line_nobody_is_named_for_has_no_same_person():
     ("김가람", "가람", "surname"), ("남궁가람", "가람", "surname"), ("김 가람", "가람", "surname"),
     ("어린 김가람", "가람", "surname"), ("어린 가람", "가람", "age"), ("어린가람", "가람", "age"),
     ("가람(아역)", "가람", "age"), ("가람 (17세)", "가람", "age"), ("20대 가람", "가람", "age"),
-    ("소년 가람", "가람", "age"), ("가람 아역", "가람", "age"), ("가람(성인)", "어린 가람", "age")])
+    ("소년 가람", "가람", "age"), ("가람 아역", "가람", "age"), ("가람(성인)", "어린 가람", "age"),
+    ("김가람님", "가람님", "surname"), ("이세나", "세나", "surname")])     # a given name with '님' stays
 def test_two_names_that_may_be_one_person(a, b, why):
     assert people.same_person_hint(a, b) == why and people.same_person_hint(b, a) == why
 
@@ -262,7 +263,11 @@ def test_two_names_that_may_be_one_person(a, b, why):
     # 7차: a title after a prefix that is also a family name, or after a family name (G3-02)
     ("부대장", "대장"), ("소대장", "대장"), ("전대통령", "대통령"), ("전 대통령", "대통령"), ("여종업원", "종업원"),
     ("여배우", "배우"), ("여간호사", "간호사"), ("부주장", "주장"), ("부기장", "기장"), ("박의원", "의원"),
-    ("김변호사", "변호사"), ("최목사", "목사")])
+    ("김변호사", "변호사"), ("최목사", "목사"),
+    # 7차 맞물림: a title with '님', and the titles of a period drama after a family-name letter
+    ("김교수님", "교수님"), ("이형사님", "형사님"), ("김사장님", "사장님"), ("박선생님", "선생님"),
+    ("왕세자", "세자"), ("황태자", "태자"), ("김대감", "대감"), ("이도령", "도령"), ("최도련님", "도련님"),
+    ("왕왕자", "왕자"), ("박공주", "공주"), ("윤왕비", "왕비"), ("김나리", "나리"), ("최마님", "마님")])
 def test_names_that_are_not_offered(a, b):
     assert people.same_person_hint(a, b) is None and people.same_person_hint(b, a) is None
 

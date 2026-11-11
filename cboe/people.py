@@ -109,7 +109,11 @@ NOT_GIVEN_NAMES = {"남편", "아내", "부인", "엄마", "아빠", "어머니"
                    "목사", "신부", "수녀", "스님", "간호사", "약사", "교사", "강사", "요리사", "주방장",
                    "종업원", "점원", "점장", "지배인", "매니저", "사원", "회사원", "공무원", "연구원",
                    "승무원", "운전사", "경비", "경비원", "소방관", "경찰관", "교도관", "집사", "여사",
-                   "사모님", "아가씨", "총각", "영감", "형님", "누님", "선배", "후배", "친구"}
+                   "사모님", "아가씨", "총각", "영감", "형님", "누님", "선배", "후배", "친구",
+                   # titles of a period drama after a family-name letter ('왕세자', '황태자', '김대감');
+                   # a title with '님' is looked up without it ('김교수님' / '교수님', _surname_of)
+                   "세자", "태자", "왕자", "공주", "왕비", "왕후", "대군", "중전", "대비", "상궁", "내관",
+                   "대감", "도령", "도련님", "나리", "마님", "아씨", "마마", "전하", "사또", "판서", "정승"}
 # (나) words of age or time said with the name: before it with a space ('소년 가람'), or as a tail
 # ('가람(아역)', '가람 아역'); the adjectives also written onto the name ('어린가람')
 AGE_WORDS = ("어린 시절", "학창 시절", "어린시절", "학창시절", "어린", "젊은", "늙은", "꼬마", "아기", "아역", "성인",
@@ -446,8 +450,11 @@ def _core(name) -> str:
 
 
 def _surname_of(longer: str, shorter: str) -> bool:
-    """Whether ``longer`` is a family name and the given name ``shorter`` ('김가람', '가람')."""
-    if len(shorter) < 2 or shorter in NOT_GIVEN_NAMES or not re.fullmatch(r"[가-힣]+", longer + shorter):
+    """Whether ``longer`` is a family name and the given name ``shorter`` ('김가람', '가람'); not a
+    title or a word of family, also with '님' after it ('김교수님', '교수님')."""
+    if len(shorter) < 2 or not re.fullmatch(r"[가-힣]+", longer + shorter):
+        return False
+    if shorter in NOT_GIVEN_NAMES or (shorter.endswith("님") and shorter[:-1] in NOT_GIVEN_NAMES):
         return False
     head = longer[:-len(shorter)] if longer.endswith(shorter) else None
     return bool(head) and (head in SURNAMES or head in DOUBLE_SURNAMES)
