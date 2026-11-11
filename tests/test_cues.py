@@ -339,6 +339,12 @@ def test_a_word_that_starts_with_yeol_is_no_door_opening():
     ("대문을 끼익 열다.", "[끼익 - 대문]"),
     ("현관문이 덜컹 열 때마다 깬다.", "[덜컹 - 현관문]"),
     ("문을 덜컹 열다가 멈춘다.", "[덜컹 - 문]"),
+    # the stem at a punctuation mark (after G4-04 these were a brake: 7th round)
+    ("문을 끼익 열!", "[끼익 - 문]"),
+    ("문을 끼익 열.", "[끼익 - 문]"),
+    ("문을 끼익 열?", "[끼익 - 문]"),
+    ("문을 끼익 열…", "[끼익 - 문]"),
+    ("대문을 덜컹 열, 하고 외친다.", "[덜컹 - 대문]"),
 ])
 def test_every_ending_of_the_verb_yeol_after_the_doors_sound_is_the_door(text, phrase):
     """7차 확인: '열' read as the verb only before the endings of '열다' must take all of them —

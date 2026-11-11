@@ -107,9 +107,10 @@ NOT_DOORS = ("주문", "질문", "논문", "신문", "의문", "명문", "공문
 DOORS_LIKE_NOT_DOORS = ("격자", "내부", "외부")
 _DOOR = rf"(?:(?<![{''.join(w[0] for w in NOT_DOORS)}])|(?<={'|'.join(DOORS_LIKE_NOT_DOORS)}))문"
 # '열' only as the verb ('열린다', '열고', '열자', '열림', '열다가', '열던', '열기', '열 때', '열라고',
-# '열거든'): not '열차', '열쇠', '열심히', '열기구', '열거', '열라 (very)', nor the number ('열다섯',
-# '열 명') (6차 확인 G4-04, 7차 확인)
-_DOOR_VERB = (r"(?:닫|열(?=[고어었며면자지려리린릴렸림더던게겠곤긴까래든죠잖]|다(?!섯)|라(?!\s)|거(?:든|나)|"
+# '열거든', and the stem at a punctuation mark: '문을 끼익 열!', '열.', '열?', '열…', as before G4-04):
+# not '열차', '열쇠', '열심히', '열기구', '열거', '열라 (very)', nor the number ('열다섯', '열 명')
+# (6차 확인 G4-04, 7차 확인)
+_DOOR_VERB = (r"(?:닫|열(?=[고어었며면자지려리린릴렸림더던게겠곤긴까래든죠잖.,!?…~]|다(?!섯)|라(?!\s)|거(?:든|나)|"
               r"도록|수록|기(?!구)|\s(?!\s*(?:명|살|개|마리))|$)|여닫|연다|연(?![가-힣]))")
 # a word of the table's onomatopoeia ('쾅쾅'), taken whole: possessive, so a long '탕탕탕…' is not
 # split again in every way when the words after it do not follow (exponential); a word read
