@@ -123,15 +123,25 @@ const out = (o) => { console.log('RESULT ' + JSON.stringify(o)); process.exit(0)
 if (typeof WebSocket !== 'function') out({ error: 'this Node has no WebSocket' });
 let t = null;
 for (let i = 0; i < 120 && !t; i++) {
-  try { const r = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT' }); if (r.ok) t = await r.json(); } catch (_) { /* not up */ }
+  try { const r = await fetch(`http://127.0.0.1:${port}/json/new?about:blank`, { method: 'PUT', signal: AbortSignal.timeout(5000) }); if (r.ok) t = await r.json(); } catch (_) { /* not up, or busy */ }
   if (!t) await sleep(250);
 }
 if (!t) out({ error: 'no CDP' });
 const ws = new WebSocket(t.webSocketDebuggerUrl);
 await new Promise((res, rej) => { ws.addEventListener('open', res, { once: true }); ws.addEventListener('error', rej, { once: true }); });
-let seq = 0, failMode = null;
+let seq = 0, failMode = null, gone = null;
 const pending = new Map(), exceptions = [], posts = [];
-const send = (method, params = {}) => new Promise((res, rej) => { const id = ++seq; pending.set(id, { res, rej }); ws.send(JSON.stringify({ id, method, params })); });
+const send = (method, params = {}) => new Promise((res, rej) => {
+  if (gone) { rej(gone); return; }
+  const id = ++seq; pending.set(id, { res, rej }); ws.send(JSON.stringify({ id, method, params }));
+});
+// the tab's socket closed (the tab is gone, Edge is busy or ending): every call still waiting fails
+// at once instead of leaving the script to end on an await nothing settles (no RESULT line)
+ws.addEventListener('close', () => {
+  gone = new Error('CDP socket closed');
+  for (const { rej } of pending.values()) rej(gone);
+  pending.clear();
+});
 ws.addEventListener('message', (m) => {
   const msg = JSON.parse(m.data);
   if (msg.id && pending.has(msg.id)) { const { res, rej } = pending.get(msg.id); pending.delete(msg.id); if (msg.error) rej(new Error(JSON.stringify(msg.error))); else res(msg.result); return; }
@@ -189,10 +199,29 @@ try {
   await ready();
   result = await (await import(pathToFileURL(scen).href)).default(p);
 } catch (e) { result = { error: String((e && e.stack) || e) }; }
-try { await send('Target.closeTarget', { targetId: t.id }); } catch (_) { /* gone */ }
-ws.close();
+// closing the tab closes its socket, often before the answer comes: wait for one or the other, at
+// most 3 s, then say the result (it was known before the tab was closed)
+await Promise.race([send('Target.closeTarget', { targetId: t.id }).catch(() => null), sleep(3000)]);
+try { ws.close(); } catch (_) { /* gone */ }
 out({ result, exceptions, posts });
 """
+
+
+def _debug_port(port_file: Path, proc, wait: float = 30.0) -> int:
+    """The debugging port headless Edge writes in its profile (``DevToolsActivePort``, first line).
+    Edge may still be writing it: a read Windows refuses (PermissionError) or a file not yet whole
+    is read again a moment later, until ``wait`` seconds have passed or Edge has ended."""
+    end = time.monotonic() + wait
+    while True:
+        try:
+            first = port_file.read_text().split()[:1]
+            if first and first[0].isdigit():
+                return int(first[0])
+        except OSError:                                 # not there yet, or held by Edge while it writes
+            pass
+        if time.monotonic() > end or proc.poll() is not None:
+            pytest.fail("headless Edge did not open its debugging port")
+        time.sleep(0.1)
 
 
 @pytest.fixture(scope="module")
@@ -209,13 +238,9 @@ def browser(tmp_path_factory):
                              "--disable-backgrounding-occluded-windows", "--disable-background-timer-throttling", "about:blank"],
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     try:
-        port_file, end = prof / "DevToolsActivePort", time.monotonic() + 30
-        while not (port_file.is_file() and port_file.read_text().strip()):
-            if time.monotonic() > end or proc.poll() is not None:
-                pytest.fail("headless Edge did not open its debugging port")
-            time.sleep(0.1)
+        port = _debug_port(prof / "DevToolsActivePort", proc)
         (root / "driver.mjs").write_text(DRIVER, encoding="utf-8")
-        yield {"port": int(port_file.read_text().split()[0]), "root": root, "n": 0}
+        yield {"port": port, "root": root, "n": 0}
     finally:
         if sys.platform == "win32":
             subprocess.run(["taskkill", "/F", "/T", "/PID", str(proc.pid)], capture_output=True)
@@ -249,6 +274,138 @@ def run_page(browser, url, scenario, size=(1280, 800)):
     assert not (isinstance(res, dict) and res.get("error")), res
     assert not data.get("exceptions"), data["exceptions"]
     return data
+
+
+class FakeCDP:
+    """A stand-in for Edge's debugging port, to see what the driver does when the tab misbehaves:
+    PUT /json/new gives a tab, its WebSocket answers every call ({} and, for Runtime.evaluate, true —
+    false for the page's is-busy test), and on Target.closeTarget it ``close``s its socket without an
+    answer (as Edge does when the tab goes first) or stays ``silent``. Plain sockets: no library."""
+
+    def __init__(self, on_close="close"):
+        import socket
+        self.on_close, self.calls = on_close, []
+        self.sock = socket.socket()
+        self.sock.bind(("127.0.0.1", 0))
+        self.sock.listen(8)
+        self.port = self.sock.getsockname()[1]
+        threading.Thread(target=self._serve, daemon=True).start()
+
+    def _serve(self):
+        while True:
+            try:
+                conn, _ = self.sock.accept()
+            except OSError:
+                return
+            threading.Thread(target=self._one, args=(conn,), daemon=True).start()
+
+    def _one(self, conn):
+        import base64
+        import hashlib
+        req = b""
+        while b"\r\n\r\n" not in req:
+            got = conn.recv(4096)
+            if not got:
+                return conn.close()
+            req += got
+        head = req.split(b"\r\n\r\n")[0].decode("latin-1").split("\r\n")
+        hdr = {k.strip().lower(): v.strip() for k, _, v in (h.partition(":") for h in head[1:])}
+        if hdr.get("upgrade", "").lower() != "websocket":
+            body = json.dumps({"id": "T1", "webSocketDebuggerUrl": f"ws://127.0.0.1:{self.port}/devtools/page/T1"}).encode()
+            conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: %d\r\nConnection: close\r\n\r\n"
+                         % len(body) + body)
+            return conn.close()
+        acc = base64.b64encode(hashlib.sha1((hdr["sec-websocket-key"] + "258EAFA5-E914-47DA-95CA-C5AB0DC85B11").encode()).digest())
+        conn.sendall(b"HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: "
+                     + acc + b"\r\n\r\n")
+        buf = req.split(b"\r\n\r\n", 1)[1]
+
+        def need(n):
+            nonlocal buf
+            while len(buf) < n:
+                got = conn.recv(65536)
+                if not got:
+                    raise EOFError
+                buf += got
+            out, buf = buf[:n], buf[n:]
+            return out
+
+        def send(obj):
+            data = json.dumps(obj).encode()
+            n = len(data)
+            conn.sendall(bytes([0x81, n]) + data if n < 126 else bytes([0x81, 126]) + n.to_bytes(2, "big") + data
+                         if n < 65536 else bytes([0x81, 127]) + n.to_bytes(8, "big") + data)
+        try:
+            while True:
+                b0, b1 = need(2)
+                n = b1 & 0x7F
+                n = int.from_bytes(need(2), "big") if n == 126 else int.from_bytes(need(8), "big") if n == 127 else n
+                mask = need(4) if b1 & 0x80 else b"\0\0\0\0"
+                data = bytes(x ^ mask[i % 4] for i, x in enumerate(need(n)))
+                if b0 & 0x0F == 8:                                  # the driver closes
+                    return
+                msg = json.loads(data)
+                self.calls.append(msg["method"])
+                if msg["method"] == "Target.closeTarget":
+                    if self.on_close == "close":
+                        conn.sendall(bytes([0x88, 0]))
+                        return
+                    continue                                        # silent: no answer, the socket stays
+                expr = (msg.get("params") or {}).get("expression", "")
+                send({"id": msg["id"], "result": {"result": {"value": "is-busy" not in expr}}
+                      if msg["method"] == "Runtime.evaluate" else {}})
+        except (EOFError, OSError):
+            return
+        finally:
+            if self.on_close != "silent":
+                conn.close()
+
+    def close(self):
+        self.sock.close()
+
+
+@pytest.mark.skipif(not NODE, reason="Node is needed to run the driver")
+@pytest.mark.parametrize("on_close", ["close", "silent"])
+def test_the_driver_says_its_result_when_the_tab_closes_its_socket_before_answering(tmp_path, on_close):
+    # 7차 (G3-11): closing the tab closes its socket, often before the answer to closeTarget comes; the
+    # driver waited for that answer with nothing to settle it and Node ended without RESULT ('unsettled
+    # top-level await'), or (no answer, socket open) not at all. It says the result it has either way
+    cdp = FakeCDP(on_close)
+    try:
+        (tmp_path / "driver.mjs").write_text(DRIVER, encoding="utf-8")
+        (tmp_path / "scen.mjs").write_text("export default async (p) => ({ ok: await p.ev('1') })", encoding="utf-8")
+        t0 = time.monotonic()
+        out = subprocess.run([NODE, str(tmp_path / "driver.mjs"), str(cdp.port), "http://127.0.0.1:1/", str(tmp_path / "scen.mjs")],
+                             capture_output=True, text=True, encoding="utf-8", timeout=60)
+        lines = [ln for ln in out.stdout.splitlines() if ln.startswith("RESULT ")]
+        assert lines, out.stdout + out.stderr
+        assert json.loads(lines[-1][7:])["result"] == {"ok": True}
+        assert "Target.closeTarget" in cdp.calls and time.monotonic() - t0 < 30
+    finally:
+        cdp.close()
+
+
+def test_the_debugging_port_is_read_again_while_edge_still_writes_it(tmp_path):
+    # 7차 (G3-13): Windows refuses a read of DevToolsActivePort while Edge writes it (PermissionError):
+    # the fixture failed with an error before the first test; it now reads it again a moment later
+    class Writing:
+        def __init__(self, fails):
+            self.fails = list(fails)
+
+        def read_text(self):
+            if self.fails:
+                raise self.fails.pop(0)
+            return "51234\n/devtools/browser/abc\n"
+
+    class Alive:
+        def poll(self):
+            return None
+    assert _debug_port(Writing([FileNotFoundError(), PermissionError(13, "Permission denied"), PermissionError()]), Alive()) == 51234
+
+    class Half(Writing):                                   # written, not yet whole
+        def read_text(self):
+            return "" if self.fails and self.fails.pop(0) else "51235\n"
+    assert _debug_port(Half([True, True]), Alive()) == 51235
 
 
 class Served:
