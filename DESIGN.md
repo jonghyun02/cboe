@@ -711,7 +711,8 @@
   `lines[].source`(결정이 없을 때 대본 출처), `lines[].delivery`·`joined`·`hints`(`name` · `language`)·`heard_language`, `items[].reason`의 끝 ' · 앞 줄을 먼저 정해야 함'과 `follows`,
   `items[].evidence[].window_out`과 대본 후보의 `window_out`, `items[].pos`, `added[].pos`, `people[].maybe_same`, `extras[].sung`·`suspect`,
   `export_check.heard_no_cell`(없으면 `summary.heard_no_cell` 수만), `export_check.lines.unsettled`, `draft.cells[].pos`·`check.notes`(join을 못 묶은 메모는
-  '앞 줄과 한 칸으로 묶지 못함'으로 시작한다고 본다), `project.media`(`building`이면서 `progress` null이고 `note`가 있으면 진행률 대신 그 글).
+  '앞 줄과 한 칸으로 묶지 못함'으로 시작한다고 본다. 그 메모는 '앞 줄과 한 칸으로' 스위치 옆에 한 번만 보이고 칸 메모 목록에서는 뺀다: `joinNowOf`),
+  `lines[].asr_text`·`diff`(이름 힌트 줄도 대조에 들린 글), `project.media`(`building`이면서 `progress` null이고 `note`가 있으면 진행률 대신 그 글).
 - 보내는 것: 위 표의 요청. 줄 칸은 한 칸씩 보낸다(`{join: true | null}`, `{pos: "top" | null}`, `{manner: 글 | null}`, `{source: null | "" | 코드}`). 작가가 넣은 줄에는
   source·join·manner를 보내지 않고 `api/added/{id}`에 `pos`만 보낸다. 출처 메뉴의 이름(`SOURCE_KO`)은 `app.js`에 있다(배치가 쓰는 낱말은 `style.SOURCE_LABELS`).
 - 다시 그려도 지키는 것: 치던 글 칸과 그 포커스, 보내는 중인 값(`pend`: 줄의 `PEND_FIELDS` breaks · keep · sung · language · source · join · pos · manner, 인물의
