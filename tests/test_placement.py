@@ -343,6 +343,30 @@ def test_two_guessed_lines_make_no_hyphen_cell_that_7_s_would_end_just_before_th
         assert one(run(lines), "L1")["refs"] == ["L1", "L2"], c0
 
 
+def test_a_guessed_line_waits_behind_a_short_heard_line_it_would_leave_under_5_6_s():
+    # 7차 (G3-05): '뭐?' heard, a guessed line of 1.5 s starting 5 frames after it (not spoken over
+    # it, too long to share a hyphen cell by ①): it waits until '뭐?' has had 5/6 s and still gets its
+    # own (before: '뭐?' was 3 frames on screen, GR 1, a must)
+    from cboe import check
+    for who in ("나래", "가람"):                    # another person, or the same one (no hyphen cell)
+        lines = [L("L1", "뭐?", sec(240), sec(244), speaker="가람", timing="asr"),
+                 L("L2", "응 알았어 지금 갈게", sec(245), sec(281), speaker=who, timing="voice")]
+        d = run(lines)
+        a, b = one(d, "L1"), one(d, "L2")
+        assert F(a["start"]) == 240 and F(a["end"]) - F(a["start"]) >= MIN_F and a["check"]["violations"] == [], d["cells"]
+        assert F(b["start"]) == F(a["end"]) + 2 and F(b["end"]) - F(b["start"]) >= MIN_F and b["check"]["violations"] == []
+        assert [v for v in check.run(d)["violations"] if v["level"] == "must"] == []
+        # not when the guessed line then has no 5/6 s before the line after it, nor past a scene change
+        tight = run(lines + [L("L3", "그래", sec(275), sec(285), speaker="다솜", timing="asr")])
+        assert F(one(tight, "L2")["start"]) == 245, tight["cells"]
+        scenes = [dict(lines[0], scene_id="SC1"), dict(lines[1], scene_id="SC1"),
+                  L("L3", "그래", sec(300), sec(310), speaker="다솜", timing="asr", scene_id="SC2")]
+        assert F(one(run(scenes, cuts=[sec(283)]), "L2")["start"]) == 245
+        # a heard line after it never moves for it (another person shares a hyphen cell with it, ③)
+        heard = run([lines[0], dict(lines[1], timing="asr")])
+        assert F(one(heard, "L2")["start"]) == 245 if who == "가람" else one(heard, "L2")["refs"] == ["L1", "L2"]
+
+
 def test_two_nameless_turns_of_a_subtitle_script_share_a_hyphen_cell_without_labels():
     # 5th round: a subtitle script's "- " cell without names comes as two lines whose person is
     # "#" + the turn (state.placement_inputs); two people, and the "#…" is never shown
@@ -950,6 +974,31 @@ def test_in_time_uses_the_cut_ahead_when_the_cut_before_is_taken():
     d = run([prev, line], cuts=cuts)
     assert one(d, "L2")["start"] == sec(k)                             # so: on the cut ahead (TG4), not 7 frames early
     assert one(d, "L1")["end"] >= sec(k - 10)
+
+
+def test_a_cell_of_dialogue_and_the_sound_that_interrupts_it_starts_on_the_cut_as_the_dialogue_does():
+    # 7차 (G3-09): the speech before runs up to the cut, the line after starts 1-3 frames past it and a
+    # sound in its pause makes '- 잠깐만 이쪽으로' / '- [쿵]' (④): that cell starts on the cut as the
+    # dialogue cell does without the sound (TG 2), the gap before it 2 frames (TG 5; before: 3-5
+    # frames, cut_in_after and short_gap_cut)
+    from cboe import check
+    cut = sec(278)
+    for a_end, b_at in ((11.55, 11.65), (11.6, 11.62), (11.6, 11.70)):
+        a = L("L1", "안녕하세요 여러분", 10.0, a_end, speaker="가람", timing="asr")
+        ws = [("잠깐만", 0.0, 0.4), ("이쪽으로", 0.4, 0.9), ("그래", 1.6, 2.0), ("알았어", 2.0, 2.5)]
+        text = " ".join(w for w, _, _ in ws)
+        b = L("L2", text, b_at, b_at + 2.5, words=W(text, [(round(b_at + s, 3), round(b_at + e, 3)) for _, s, e in ws]),
+              speaker="나래", timing="asr")
+        plain = run([a, b], cuts=[cut])
+        d = run([a, b], [S("S1", round(b_at + 1.0, 3), "[쿵]", t1=round(b_at + 1.3, 3))], cuts=[cut])
+        mixed = next(c for c in d["cells"] if "S1" in c["refs"])
+        assert mixed["refs"] == ["L2", "S1"] and mixed["lines"] == ["- 잠깐만 이쪽으로…", "- [쿵]"], d["cells"]
+        assert mixed["start"] == cells_of(plain, "L2")[0]["start"] == cut, (a_end, b_at, d["cells"])
+        assert F(mixed["start"]) - F(one(d, "L1")["end"]) == 2
+        assert not {"cut_in_after", "short_gap_cut"} & {v["code"] for v in check.run(d, cuts=[cut])["violations"]}
+    # a cell a sound starts keeps the sound's onset (BBC 5.5)
+    snd = run([L("L1", "안녕하세요 여러분", 10.0, 11.55, speaker="가람", timing="asr")], [S("S1", sec(281), "[쿵]")], cuts=[cut])
+    assert F(one(snd, "S1")["start"]) == 281
 
 
 def test_start_before_a_cut_follows_the_same_rule_at_every_frame_rate():

@@ -109,6 +109,10 @@ onset is a guess); a cell shorter than a quarter of a second carries "flash", so
 out unnoticed. A line with a piece left less than 5/6 s is laid out again inside the gap between
 the cells of the other lines around it (its pieces in order, each with its reading time when the
 gap holds that, else 5/6 s; a heard line from the in-time of its first piece on, never earlier).
+A heard line of one piece that a guessed line starting right after it (not spoken over it) leaves
+under 5/6 s has that line wait until it has had its reading time, else 5/6 s, when the guessed
+line still gets its own before the cell after it (``_wait_behind``; 7th round, 1000 made-up scenes:
+cells under 5/6 s 766 -> 729, the checker's musts 2038 -> 1984, one sound more without room).
 A later piece of a heard line may then come after its words, and also before them when the pieces
 after it need the room (each still after the piece before it has had its time): 5/6 s (General
 Requirements 1, a must for the checker) comes before the in-time "on the first frame of audio or as
@@ -1193,13 +1197,39 @@ def _lay_out(run: list[_Cell], lo: int, hi, P: _P):
     return None
 
 
-def _make_room(cells: list[_Cell], P: _P, w0: int, w1) -> tuple[list[dict], bool]:
+def _wait_behind(cells: list[_Cell], j: int, c: _Cell, P: _P, w1, cuts=()) -> bool:
+    """A heard cell ``c`` of one piece left under 5/6 s because the line after it (``cells[j]``, one
+    piece of one guessed line, not spoken over ``c``: that one ``_untangle`` ③ makes wait) starts
+    too soon: the guessed line moves (``_shift``) to where ``c`` has had its reading time, else 5/6 s,
+    when it then still gets its own (5/6 s and the reading speed) before the cell after it, the
+    window end and a scene change (TG 4) — a guessed line gives way to a heard one (module doc).
+    The ends are set for now; the caller sets them again."""
+    x = cells[j]
+    if not _guess_only(x):
+        return False
+    after = cells[j + 1] if j + 1 < len(cells) else None
+    lim = min(after.start - P.gap if after is not None else INF, w1 if w1 is not None else INF,
+              min((cut - P.gap for a, cut in _scene_ends(cells, list(cuts)) if a is x), default=INF))
+    for need in dict.fromkeys((_need(c, P), P.min_f)):
+        s = c.start + need + P.gap
+        if s <= x.start:
+            return False                             # it leaves that room already
+        if s + _need(x, P) <= lim:
+            _shift(x, s - x.start)
+            c.end, x.end = s - P.gap, s + _need(x, P)
+            return True
+    return False
+
+
+def _make_room(cells: list[_Cell], P: _P, w0: int, w1, cuts=()) -> tuple[list[dict], bool]:
     """A line with a piece left under 5/6 s (module doc): the pieces of the line that sit together
     between two cells of other lines are laid out again inside that gap (``_lay_out``; the cell
     before may shrink to its floor). A heard line (timing asr) is laid out from the in-time of its
     first piece on, never earlier, and its words keep their times; a later piece may come after
     its words or, when the pieces after it need the room, before them (a cell of a few frames
-    cannot be read at all, 4th review; 5/6 s before TG 1, module doc). When the
+    cannot be read at all, 4th review; 5/6 s before TG 1, module doc). A heard line of one piece
+    that the guessed line after it leaves under 5/6 s has that line wait for it (``_wait_behind``,
+    ``cuts``: the shot changes, for the scene changes). When the
     gap cannot hold the pieces, a guessed line gets no cell at all (``no_room`` entries, with the
     gap between the other lines); a heard line keeps its cells, and when the writer's cut points
     made them that short, the short cells say so in ``check.notes``. Returns (no_room entries,
@@ -1252,6 +1282,10 @@ def _make_room(cells: list[_Cell], P: _P, w0: int, w1) -> tuple[list[dict], bool
         k = len(run)
         gap = max(0, hi - lo) / P.fps
         want = (k * P.min_f + (k - 1) * P.gap) / P.fps
+        if not guess and k == 1 and nxt is not None and _wait_behind(cells, b + 1, c, P, w1, cuts):
+            moved = True                             # the guessed line after it waits (G3-05)
+            i = b + 1
+            continue
         if not guess:
             kept.update(x.seq for x in run)          # this group only: a later group of the line is seen
             if c.parts[0].get("breaks"):             # on its own (after a cell of another line)
@@ -1342,7 +1376,7 @@ def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> tuple[li
     cells = _untangle(cells, P, w0, w1)                  # overlapping lines: never a one-frame cell
     cells = _pair_short(cells, P, w1)
     _dialogue_outs(cells, P, w1, _scene_caps(cells, cuts, P))
-    dropped, moved = _make_room(cells, P, w0, w1)        # a guessed line squeezed between two others
+    dropped, moved = _make_room(cells, P, w0, w1, cuts)  # a guessed line squeezed between two others
     if moved or dropped or any(c.end - c.start < P.min_f for c in cells):
         _sorted(cells)
         _dialogue_outs(cells, P, w1, _scene_caps(cells, cuts, P))
@@ -2009,14 +2043,19 @@ def _start_on_cut(cells: list[_Cell], cuts: list[int], P: _P) -> None:
     2프레임으로): the dialogue starts on the cut and the cell before ends 2 frames before it,
     when that keeps its 5/6 s and reading speed. In-time placement could not take the cut when
     the speech before ran up to it (the in-time never takes the speech of the cell before); the
-    out-time is moved there all the same (③), so the gap is closed here (4th review)."""
+    out-time is moved there all the same (③), so the gap is closed here (4th review). A cell of
+    dialogue and a sound that the dialogue starts ("- 내가 어제 봤는데…" / "- [첨벙!]", ④ of the
+    sounds) is a dialogue cell here too, while its sound still shows at most ``INTERRUPT_LEAD``
+    before it is heard (7th round); a cell a sound starts keeps the sound's onset (BBC 5.5)."""
     for a, b in zip(cells, cells[1:]):
-        if b.kind() != "dialogue":
+        if b.kind() != "dialogue" and not (b.mode == "hyphen" and b.parts[0]["kind"] == "dialogue"):
             continue
         xs = [x for x in cuts if a.start < x < b.start and b.start - x <= P.half]
         if not xs:
             continue
         x = xs[-1]
+        if any(p["t"] - x > P.lead for p in b.sounds()):
+            continue
         end = x - P.gap
         if not end <= a.end < x + P.gap or b.start - a.end <= P.gap:
             continue
