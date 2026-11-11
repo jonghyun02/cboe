@@ -246,6 +246,23 @@ class SafeJSONResponse(JSONResponse):
         return text.encode("utf-8")
 
 
+def json_reply(content) -> SafeJSONResponse:
+    """The answer FastAPI makes of ``content`` returned by an endpoint (``jsonable_encoder``, then
+    ``SafeJSONResponse``), without ``jsonable_encoder``'s copy of the whole state — about 0.1 s for a
+    state of 1.27 MB (감사 6-08) — when that copy changes nothing: content that ``json.dumps`` writes
+    as it is (dicts, lists, tuples, strings, numbers, booleans, None) comes out of
+    ``jsonable_encoder`` as the same data, but for the keys starting with ``_sa`` it leaves out;
+    so a body that has no ``"_sa`` is the bytes FastAPI would send. Otherwise FastAPI's way."""
+    from fastapi.encoders import jsonable_encoder
+    try:
+        out = SafeJSONResponse(content)
+    except (TypeError, ValueError):                      # something only jsonable_encoder can write
+        return SafeJSONResponse(jsonable_encoder(content))
+    if b'"_sa' in out.body:
+        return SafeJSONResponse(jsonable_encoder(content))
+    return out
+
+
 class PlacementError(ValueError):
     """A placement fix that cannot be applied (answered as 409 with a Korean message)."""
 
@@ -716,7 +733,7 @@ def create_app(work, media=None) -> FastAPI:
     # ---------------------------------------------------------------- state
     @app.get("/api/state")
     def get_state():
-        return svc.state()
+        return json_reply(svc.state())
 
     @app.post("/api/items/bulk")
     def bulk_update(body: BulkUpdate):
@@ -728,7 +745,7 @@ def create_app(work, media=None) -> FastAPI:
                 raise HTTPException(404, f"없는 후보입니다: {', '.join(missing[:5])}")
             for i in ids:
                 svc.project.set_decision(i, decision=body.decision)
-            return svc.state(recompute=True)
+            return json_reply(svc.state(recompute=True))
 
     @app.post("/api/items/{item_id}")
     def update_item(item_id: str, body: ItemUpdate):
@@ -752,7 +769,7 @@ def create_app(work, media=None) -> FastAPI:
                 svc.project.set_decision(item_id, **fields)
             except ReviewError as exc:                    # a name too long, a scope a nameless line cannot take
                 raise HTTPException(409 if isinstance(exc, Conflict) else 400, str(exc)) from None
-            return svc.state(recompute=True)
+            return json_reply(svc.state(recompute=True))
 
     @app.post("/api/placement/{item_id}")
     def fix_placement(item_id: str, body: PlacementFix):
@@ -782,7 +799,7 @@ def create_app(work, media=None) -> FastAPI:
                 eff = next((e for e in p.effective_items() if e["id"] == item_id), {})
                 if not (eff.get("decided") and eff.get("final") == "include"):
                     p.set_decision(item_id, decision="include")   # moving it means the writer keeps it
-            return svc.state(recompute=True)
+            return json_reply(svc.state(recompute=True))
 
     # ---------------------------------------------------------- the review layer
     def apply(what: str, fn, *args, **kwargs):
@@ -809,7 +826,7 @@ def create_app(work, media=None) -> FastAPI:
         """Take several dialogue lines in or out at once (include null: back to the default)."""
         with svc.lock:
             apply("줄", svc.project.set_lines, body.ids, body.include)
-            return svc.state(recompute=True)
+            return json_reply(svc.state(recompute=True))
 
     @app.post("/api/lines/aside")
     def line_aside(body: AsideAction):
@@ -818,7 +835,7 @@ def create_app(work, media=None) -> FastAPI:
         item — 400 when the line has none) or, with ``line`` null, let it go."""
         with svc.lock:
             apply("결정", svc.project.set_aside, body.key, body.line)
-            return svc.state(recompute=True)
+            return json_reply(svc.state(recompute=True))
 
     @app.post("/api/lines/{line_id}")
     def update_line(line_id: str, body: LineUpdate):
@@ -831,7 +848,7 @@ def create_app(work, media=None) -> FastAPI:
             fields["language"] = fields["language"].strip()          # "": spoken in Korean
         with svc.lock:
             apply("줄", svc.project.set_line, line_id, **fields)
-            return svc.state(recompute=True)
+            return json_reply(svc.state(recompute=True))
 
     @app.post("/api/lines/{line_id}/speaker")
     def update_speaker(line_id: str, body: SpeakerUpdate):
@@ -840,7 +857,7 @@ def create_app(work, media=None) -> FastAPI:
         name = (body.name or "").strip() or None
         with svc.lock:
             apply("줄", svc.project.set_speaker, line_id, name, body.scope)
-            return svc.state(recompute=True)
+            return json_reply(svc.state(recompute=True))
 
     @app.post("/api/extras/{extra_id}")
     def extra_action(extra_id: str, body: ExtraAction):
@@ -848,7 +865,7 @@ def create_app(work, media=None) -> FastAPI:
         fields = {k: v for k, v in sent(body).items() if k != "action" and v is not None}
         with svc.lock:
             apply("'대본에 없는 말'", svc.project.set_extra, extra_id, body.action, **fields)
-            return svc.state(recompute=True)
+            return json_reply(svc.state(recompute=True))
 
     @app.post("/api/added")
     def add_item(body: AddedNew):
@@ -856,7 +873,7 @@ def create_app(work, media=None) -> FastAPI:
         fields = {k: v for k, v in sent(body).items() if k != "kind"}
         with svc.lock:
             apply("항목", svc.project.add, body.kind, **fields)
-            return svc.state(recompute=True)
+            return json_reply(svc.state(recompute=True))
 
     @app.post("/api/added/{added_id}")
     def update_added(added_id: str, body: AddedUpdate):
@@ -865,13 +882,13 @@ def create_app(work, media=None) -> FastAPI:
             raise HTTPException(400, "바꿀 내용이 없습니다")
         with svc.lock:
             apply("항목", svc.project.update_added, added_id, **fields)
-            return svc.state(recompute=True)
+            return json_reply(svc.state(recompute=True))
 
     @app.delete("/api/added/{added_id}")
     def delete_added(added_id: str):
         with svc.lock:
             apply("항목", svc.project.delete_added, added_id)
-            return svc.state(recompute=True)
+            return json_reply(svc.state(recompute=True))
 
     @app.post("/api/people")
     def update_people(body: PeopleUpdate):
@@ -884,7 +901,7 @@ def create_app(work, media=None) -> FastAPI:
             raise HTTPException(400, "바꿀 내용이 없습니다")
         with svc.lock:
             apply("인물", svc.project.set_people, body.names, **fields)
-            return svc.state(recompute=True)
+            return json_reply(svc.state(recompute=True))
 
     # --------------------------------------------------------------- export
     @app.post("/api/export")
@@ -901,9 +918,9 @@ def create_app(work, media=None) -> FastAPI:
             st = svc.state()
             chk = st["export_check"]
             # "check" = the guide check of the file just written (clause by clause, must / should)
-            return {"path": str(path), "name": path.name, "format": body.format,
-                    "url": f"api/export/{body.format}", "cells": res["cells"], "check": res["check"],
-                    "warnings": export_warnings(chk), "export_check": chk, "state": st}
+            return json_reply({"path": str(path), "name": path.name, "format": body.format,
+                               "url": f"api/export/{body.format}", "cells": res["cells"], "check": res["check"],
+                               "warnings": export_warnings(chk), "export_check": chk, "state": st})
 
     @app.get("/api/export/{fmt}")
     def download(fmt: ExportFormat):

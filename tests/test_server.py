@@ -399,3 +399,58 @@ def test_an_older_sample_folder_carries_the_review_layer(client, work):
     assert review(work)["lines"][first]["include"] is False and review(work)["items"] == {}
     st = client.post(f"/api/lines/{first}", json={"include": None}).json()
     assert any(first in c["refs"] for c in st["draft"]["cells"]) and first not in review(work)["lines"]
+
+
+# ------------------------------------------------------------------- 7차: the state without jsonable_encoder's copy
+def test_json_reply_sends_the_bytes_fastapi_would_send():
+    from fastapi.encoders import jsonable_encoder
+
+    from cboe.server.app import SafeJSONResponse, json_reply
+    cases = [{"a": [1, 2.5, None, True, "가나"], "b": (1, (2, 3)), "c": {"x": {"y": [], "z": {}}}},
+             {"_sa_hidden": 1, "kept": 2}, {"nested": [{"_sample": "x", "ok": 1}]},      # jsonable_encoder drops _sa…
+             {"text": '"_sa는 글 속에'}, {"n": float("nan"), "i": [float("inf"), -0.0]}, {"s": {3, 1, 2}},
+             {"p": Path("a") / "b"}, [1, "x", None], {1: "a number key", None: "none", 2.5: "float", True: "bool"}]
+    for c in cases:
+        assert json_reply(c).body == SafeJSONResponse(jsonable_encoder(c)).body, c
+        assert json_reply(c).headers["content-type"] == SafeJSONResponse(jsonable_encoder(c)).headers["content-type"]
+
+
+class _NoMedia:
+    def start(self):
+        return self
+
+    def status(self):
+        return {"state": "none", "t0": 0.0, "progress": None, "note": None}
+
+    def close(self):
+        pass
+
+
+def test_state_and_decisions_answer_what_fastapi_would_answer(tmp_path):
+    from fastapi.encoders import jsonable_encoder
+
+    from cboe.server.app import SafeJSONResponse
+    w = tmp_path / "w"
+    w.mkdir()
+
+    def words(text, s, e):
+        toks = text.split()
+        return [{"w": x, "s": round(s + i * (e - s) / len(toks), 3), "e": round(s + (i + 1) * (e - s) / len(toks), 3)}
+                for i, x in enumerate(toks)]
+    lines = [{"id": f"L000{k}", "speaker": sp, "text": t, "start": s, "end": e, "words": words(t, s, e),
+              "status": "ok", "timing": "asr", "scene_id": "SC001"}
+             for k, (sp, t, s, e) in enumerate([("하늘", "어디 가는 길이야?", 1.0, 2.5), ("바다", "집에 가 하늘아", 3.0, 4.2),
+                                                 ("하늘", "그래 같이 가자 정말로 오늘은 아무 데도 가지 말고", 5.0, 9.0)], 1)]
+    for name, obj in (("project.json", {"title": "시험", "t0": 0.0, "t1": 30.0, "fps": 24.0, "duration": 30.0}),
+                      ("dialogue.json", {"lines": lines, "extras": []}), ("items.json", {"items": []}),
+                      ("cuts.json", {"cuts": [4.9]})):
+        (w / name).write_text(json.dumps(obj, ensure_ascii=False), encoding="utf-8")
+    with TestClient(create_app(w, media=_NoMedia())) as c:
+        svc = c.app.state.review
+        for path, body in ((None, None), ("/api/lines/L0002", {"sung": True}), ("/api/people", {"names": ["하늘"], "mode": "generic", "before": "여자"}),
+                           ("/api/lines/L0003", {"breaks": [4]})):
+            if path:
+                r = c.post(path, json=body)
+                assert r.status_code == 200, r.text
+            r = c.get("/api/state")
+            assert r.content == SafeJSONResponse(jsonable_encoder(svc.state())).body, path
