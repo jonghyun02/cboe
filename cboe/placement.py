@@ -159,10 +159,12 @@ Positions (memo 5.3), sounds in time order:
    before it, in the order of the audio (II.9 "Sound effects which interrupt dialogue should be
    treated as follows, ideally following the order of the original audio" = 대사를 끊는 효과음은 될
    수 있으면 원래 소리의 순서대로: "- 내가 어제 봤는데…" / "- [첨벙!]", then "그런 상황은 아니었어"):
-   that cell from the in-time of the dialogue cell, the later part from its first word (2 frames
-   after the sound when the sound comes later; at ⑤-2 up to half a second later, for the 5/6 s of
-   the cell before). Only when the words of the sound show at most ``INTERRUPT_LEAD`` (2 s) before
-   it is heard, the part before fits one hyphen line and both cells get 5/6 s and their reading time;
+   that cell from the in-time of the dialogue cell, the later part from its first word (at ⑤-2 up
+   to half a second later, for the 5/6 s of the cell before). Only when the sound comes before that
+   first word, its words show at most ``INTERRUPT_LEAD`` (2 s) before it is heard and stay at least
+   ``INTERRUPT_SHOW`` (0.25 s) after it (a sound heard just before, on or after the first word of the
+   later part, as when the words run on, would leave the screen as it is heard), the part before
+   fits one hyphen line and both cells get 5/6 s and their reading time;
    "…" ends the part before only where the speech stops for the sound (``INTERRUPT_PAUSE``, 0.5 s
    between the two words; I.4 "an abrupt interruption") and it has no punctuation of its own, never
    on every cut piece (audit 1-11). Otherwise, and always for a sound the speaker made (③'s form,
@@ -264,6 +266,7 @@ class _P:
         # the sound rules of this module (``INTERRUPT_LEAD`` …), in frames as the limits above
         self.lead = int(math.floor(INTERRUPT_LEAD * f + 0.5))
         self.pause_f = int(math.floor(INTERRUPT_PAUSE * f + 0.5))
+        self.show_f = int(math.floor(INTERRUPT_SHOW * f + 0.5))     # 6 frames at 23.976 fps
         self.long_f = int(math.floor(LONG_SOUND * f + 0.5))
         self.late_f = int(math.floor(LONG_LATE * f + 0.5))
 
@@ -1244,6 +1247,16 @@ def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> tuple[li
 # many seconds, else the sound goes with the piece after it, which starts at the sound, as before the 6th
 # round. Not measured (the guide's example piece has 8 syllables, about 1.5 s of speech)
 INTERRUPT_LEAD = 2.0
+# ... and only when the sound comes before the first word of the piece after it (the audio's order is
+# piece, sound, piece) early enough that the words of the sound are still on screen this many seconds
+# after it is heard, before that piece starts on its first word (TG "Subtitles should be in sync with both
+# the image and the audio" = 자막은 화면과 소리 둘 다에 맞아야 한다; TG 1 "an in-time which is on the first
+# frame of audio ... (within 1-2 frames of the first frame of audio is acceptable)" = 들어오는 시각은 소리의
+# 첫 프레임, 1-2프레임 안은 허용: so the later piece is not held back for it). Else the cell would end on the
+# frame the sound is heard (verify f1c: 121 such cells in 1000 made-up scenes) and the sound goes with the
+# later piece, which starts at the sound, as before the 6th round. The same quarter second as
+# ``flash_dur`` (style: a cell shorter than this cannot be read at all); not measured
+INTERRUPT_SHOW = 0.25
 # "…" ends that piece (I.4 "Use ellipses to indicate a pause (2 seconds or more), hesitation or an abrupt
 # interruption" = 갑작스러운 끊김에는 말줄임표) only when the words on both sides of the sound are this many
 # seconds apart (the speech stops for the sound) and the piece does not end in punctuation already; never
@@ -1468,15 +1481,16 @@ def _interrupt(x: _Cell, t: int, sp: dict, text: str, ext: bool, cells: list[_Ce
     """④ in the guide's order (II.9 "Sound effects which interrupt dialogue … ideally following the
     order of the original audio"): the piece ``a`` before the sound and the sound in one hyphen cell
     from the in-time of ``x``, "- 내가 어제 봤는데…" / "- [첨벙!]", and the piece ``b`` after it in
-    the next cell from its first word, or from 2 frames after the sound when the sound comes later
-    (so that the sound is on screen when it is heard). Only when the words of the sound show at most
-    ``INTERRUPT_LEAD`` before it, each hyphen line fits one line (II.5, I.6) and both cells get 5/6 s
-    and their reading time (General Requirements 1, II.3). "…" ends ``a`` only where the speech stops
-    for the sound (``INTERRUPT_PAUSE``) and ``a`` has no punctuation of its own: the words are never
-    changed. Returns apply, or None (the caller tries the order before the 6th round)."""
-    if t - x.start > P.lead:
-        return None
+    the next cell from its first word. Only when the sound comes before that word, the words of the
+    sound show at most ``INTERRUPT_LEAD`` before it and stay ``INTERRUPT_SHOW`` after it (on screen
+    when it is heard; the first cell ends 2 frames before ``b``), each hyphen line fits one line
+    (II.5, I.6) and both cells get 5/6 s and their reading time (General Requirements 1, II.3). "…"
+    ends ``a`` only where the speech stops for the sound (``INTERRUPT_PAUSE``) and ``a`` has no
+    punctuation of its own: the words are never changed. Returns apply, or None (the caller tries the
+    order before the 6th round)."""
     words = x.parts[0]["words"]
+    if t - x.start > P.lead or t >= words[k][1]:
+        return None                                     # the sound comes after the later piece starts
     if words[k][1] - words[k - 1][2] >= P.pause_f and not _punct_end(words[k - 1][0]):
         toks = [w[0] for w in words[:k]]
         toks[-1] += style.ELLIPSIS                       # the speech stops: an abrupt interruption (I.4)
@@ -1494,6 +1508,8 @@ def _interrupt(x: _Cell, t: int, sp: dict, text: str, ext: bool, cells: list[_Ce
         # most half a second away): 5/6 s, a must, before the in-time on its audio (TG 1, a should)
         s2 = max(s2, min(x.start + max(P.min_f, P.need(u1)) + P.gap, words[k][1] + P.win))
     end1 = s2 - P.gap
+    if end1 - t < P.show_f:
+        return None                     # the words of the sound would be gone when it is heard
     if end1 - x.start < P.min_f or P.too_fast(u1, end1 - x.start):
         return None
     b_lines = _render([b], "plain", P)

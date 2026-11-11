@@ -580,14 +580,23 @@ def test_position_4_not_when_a_part_would_be_too_short():
     (r,) = d["no_room"]
     assert r["reason"] == f"나누면 앞 칸 5/6초 미만 · 빈틈이 소리 {(F(72.8) + 2 - F(70.6)) / FPS:.2f}초 뒤"
     assert "hint" not in r          # ending the line at the sound would leave it under 5/6 s (a must)
-    # 6th round: a piece 0.6 s long before the sound gets its 5/6 s in the guide's order, the later
-    # piece waiting for it at most half a second after its first word (before: no_room)
-    d = run([L("L1", ROW, 70.0, 74.0)], [S("S1", 70.6, "[첨벙]")])
+    # 6th round: a piece 0.5 s long before a sound that comes before the next word gets its 5/6 s in
+    # the guide's order, the later piece waiting for it at most half a second after its first word
+    # (before: no_room)
+    times = [(70.0, 70.5), (70.85, 71.2), (71.2, 71.8), (71.8, 72.3), (72.3, 72.6), (72.6, 73.2), (73.2, 74.0)]
+    d = run([L("L1", ROW, 70.0, 74.0, words=W(ROW, times), timing="asr")], [S("S1", 70.54, "[첨벙]")])
     a, b = cells_of(d, "L1")
     assert a["lines"] == ["- 내가", "- [첨벙]"] and a["refs"] == ["L1", "S1"] and b["refs"] == ["L1"]
-    first_word = F(70.0 + 4.0 / 7)                                     # '어제', even word times
+    first_word = F(70.85)                                              # '어제'
     assert 0 < F(b["start"]) - first_word <= 12 and nframes(a["start"], a["end"]) >= MIN_F
+    assert F(a["end"]) - F(70.54) >= 6          # the sound's words on screen when it is heard (refix f1)
     assert a["check"]["violations"] == [] and b["check"]["violations"] == [] and d["no_room"] == []
+    # a sound heard after the next word started (here 1 frame after '어제', even word times): not in the
+    # guide's order, whose cell would end 5 frames after the sound, before the words already heard
+    # (refix f1); the old order leaves the piece before it under 5/6 s, so no_room, as before the 6th round
+    d = run([L("L1", ROW, 70.0, 74.0)], [S("S1", 70.6, "[첨벙]")])
+    assert len(cells_of(d, "L1")) == 1 and not cells_of(d, "S1")
+    assert d["no_room"][0]["reason"].startswith("나누면 앞 칸 5/6초 미만 · ")
 
 
 def test_dialogue_words_are_never_changed_by_sounds():
@@ -953,7 +962,13 @@ def test_a_top_position_goes_with_the_cell_whatever_shares_it():
     assert c["lines"] == ["[한숨] 나도 갈래"] and c["pos"] == "top"
     assert one(run([line], [S("S1", 10.0, "[쿵]")]), "L1")["pos"] == "bottom"
     cs = cells_of(run([L("L1", TEXT7, 10.0, 13.0, timing="asr")], [top(S("S1", 11.6, "[쾅]"))]), "L1")
-    # ④ the part with it: the part before the sound (II.9's order, 6th round; before, the part after it)
+    # ④ the part with it: here the next word starts 3 frames after the sound (even word times), so the
+    # part after it, which starts at the sound (refix f1: II.9's order would take the sound's words off
+    # the screen as it is heard) ...
+    assert [(c["pos"], "S1" in c["refs"]) for c in cs] == [("bottom", False), ("top", True)]
+    # ... and the part before it when the speech stops for the sound (II.9's order, 6th round)
+    cs = cells_of(run([L("L1", GUIDE, 10.0, 13.0, words=W(GUIDE, GUIDE_T), timing="asr")],
+                      [top(S("S1", 11.3, "[첨벙!]"))]), "L1")
     assert [(c["pos"], "S1" in c["refs"]) for c in cs] == [("top", True), ("bottom", False)]
     pair = [L("L1", "뭐?", 10.0, 10.2, speaker="빌"), L("L2", "응", 10.45, 10.6, speaker="세바스찬", pos="top")]
     c = one(run(pair), "L1")
@@ -1717,10 +1732,11 @@ def test_a_sound_that_interrupts_the_dialogue_goes_with_the_piece_before_it():
     assert b["lines"] == ["그런 상황은 아니었어"] and b["refs"] == ["L1"]
     assert a["start"] == sec(F(10.0)) and b["start"] == sec(F(11.8)) and nframes(a["end"], b["start"]) == 2
     assert a["check"]["violations"] == [] and b["check"]["violations"] == [] and d["no_room"] == []
-    # "…" only where the speech stops for the sound (0.7 s here): not when the words run on, nor after
-    # punctuation of its own (the words are never changed)
-    on = [(10.0, 10.3), (10.3, 10.6), (10.6, 11.25), (11.3, 12.1), (12.1, 12.5), (12.5, 13.0)]
-    a = cells_of(run([L("L1", GUIDE, 10.0, 13.0, words=W(GUIDE, on), timing="asr")], [S("S1", 11.27, "[첨벙!]")]), "L1")[0]
+    # "…" only where the speech stops for the sound (0.7 s here): not when the words go on soon after
+    # it (0.4 s here; words that run on without a pause give the sound the later piece, refix f1: the
+    # test after this one), nor after punctuation of its own (the words are never changed)
+    on = [(10.0, 10.3), (10.3, 10.6), (10.6, 11.1), (11.5, 12.1), (12.1, 12.5), (12.5, 13.0)]
+    a = cells_of(run([L("L1", GUIDE, 10.0, 13.0, words=W(GUIDE, on), timing="asr")], [S("S1", 11.15, "[첨벙!]")]), "L1")[0]
     assert a["lines"] == ["- 내가 어제 봤는데", "- [첨벙!]"]
     asked = "내가 정말 봤어? 그런 상황은 아니었어"
     a = cells_of(run([L("L1", asked, 10.0, 13.0, words=W(asked, GUIDE_T), timing="asr")], [S("S1", 11.3, "[첨벙!]")]), "L1")[0]
@@ -1738,3 +1754,33 @@ def test_a_sound_that_interrupts_the_dialogue_goes_with_the_piece_before_it():
     assert a["refs"] == ["L1"] and " ".join(a["lines"]) == "그러니까 내가 어제 분명히 봤는데"
     assert b["lines"] == ["- [첨벙!]", "- 그런 상황은 아니었어"] and b["start"] == sec(F(11.3))
     assert a["check"]["violations"] == [] and b["check"]["violations"] == []
+
+
+def test_the_words_of_a_sound_that_interrupts_the_dialogue_are_on_screen_when_it_is_heard():
+    # refix f1 (verify f1c): in II.9's order the cell of the sound ends 2 frames before the later piece,
+    # which starts on its first word (TG 1). When that word starts on, just before or after the sound
+    # (the words run on, or the sound comes late in the pause), that cell ended on the frame the sound is
+    # heard: its words were never on screen with it. Now the sound goes with the later piece, which
+    # starts at the sound, in heard order (the order before the 6th round), unless its words stay a
+    # quarter second (6 frames) after it
+    run_on = [(10.0, 10.3), (10.3, 10.6), (10.6, 11.1), (11.1, 12.1), (12.1, 12.5), (12.5, 13.0)]   # no pause
+    line = L("L1", GUIDE, 10.0, 13.0, words=W(GUIDE, run_on), timing="asr")
+    for t, lines in ((11.05, ["- [첨벙!]", "- 그런 상황은 아니었어"]), (11.2, ["- 그런 상황은 아니었어", "- [첨벙!]"]),
+                     (11.35, ["- 그런 상황은 아니었어", "- [첨벙!]"])):
+        d = run([line], [S("S1", t, "[첨벙!]")])
+        (c,) = cells_of(d, "S1")
+        assert F(c["end"]) - F(t) >= 6, (t, c)
+        assert c["lines"] == lines and c["start"] == sec(F(t)) and c["check"]["violations"] == []
+        a = cells_of(d, "L1")[0]
+        assert a["lines"] == ["내가 어제 봤는데"] and nframes(a["end"], c["start"]) == 2 and d["no_room"] == []
+    # the sound late in the pause (the next word 2 frames after it), and in words that overlap
+    for times, t in ((GUIDE_T, 11.75), ([(10.0, 10.3), (10.3, 10.6), (10.6, 11.2), (11.05, 12.1), (12.1, 12.5),
+                                         (12.5, 13.0)], 11.1)):
+        d = run([L("L1", GUIDE, 10.0, 13.0, words=W(GUIDE, times), timing="asr")], [S("S1", t, "[첨벙!]")])
+        (c,) = cells_of(d, "S1")
+        assert F(c["end"]) - F(t) >= 6 and c["start"] == sec(F(t)) and len(c["lines"]) == 2, (t, c)
+        assert c["check"]["violations"] == [] and d["no_room"] == []
+    # early enough in the pause the guide's order stays (10 frames after the sound here)
+    d = run([L("L1", GUIDE, 10.0, 13.0, words=W(GUIDE, GUIDE_T), timing="asr")], [S("S1", 11.3, "[첨벙!]")])
+    (c,) = cells_of(d, "S1")
+    assert c["lines"] == ["- 내가 어제 봤는데…", "- [첨벙!]"] and F(c["end"]) - F(11.3) == 10
