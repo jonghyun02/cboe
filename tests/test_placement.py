@@ -1290,6 +1290,24 @@ def test_join_of_one_speaker_makes_one_cell_of_the_two_texts():
     assert any("한 칸에 두기로 정한" in e["reason"] for e in d["no_room"] if e["item"] == "S1")
 
 
+def test_a_joined_cell_keeps_the_flag_of_a_line_whose_time_is_a_guess():
+    # a heard line and a guessed one (not heard: its words shared out over the script's time) put in
+    # one cell by the writer: the cell is placed as the heard line, but the guess goes on with it
+    heard = L("L1", "그러니까 오늘은", 10.0, 10.8, speaker="가람", timing="asr")
+    guessed = L("L2", "여기까지만 하자", 11.6, 12.4, speaker="가람", timing="voice", status="unheard")
+    assert "timing_estimated" in one(run([heard, guessed]), "L2")["flags"]
+    for a, b in ((heard, guessed), (dict(guessed, id="L1"), dict(heard, id="L2"))):
+        c = one(run([a, dict(b, join=True)]), "L1")
+        assert c["refs"] == ["L1", "L2"] and c["kind"] == "dialogue" and "timing_estimated" in c["flags"]
+    # two speakers: the hyphen cell has the flag too
+    other = dict(guessed, speaker="나래")
+    c = one(run([heard, dict(other, join=True)]), "L1")
+    assert c["lines"][0].startswith("- ") and "timing_estimated" in c["flags"]
+    # two heard lines: no flag
+    c = one(run([heard, dict(guessed, timing="asr", status="ok", join=True)]), "L1")
+    assert c["refs"] == ["L1", "L2"] and "timing_estimated" not in c["flags"]
+
+
 def test_join_that_cannot_be_made_says_why_on_the_line():
     def note(d, ref):
         return [n for n in one(d, ref)["check"].get("notes", []) if n.startswith("앞 줄과 한 칸으로")]

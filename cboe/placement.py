@@ -105,7 +105,8 @@ the guessed ones fitted in after: a heard line never waits for, nor is pushed by
 guessed line with no place keeps clear of it and is left to the next step). Two pieces of one line
 never overlap each other (one speaker; a piece's speech ends where the next one begins).
 A cell from a line whose time is a guess carries "timing_estimated" (so does a cell of a sound whose
-onset is a guess); a cell shorter than a quarter of a second carries "flash", so that it never goes
+onset is a guess, and the cell of a writer's join with such a line in it, also when the other line
+was heard and the cell is placed as a heard one); a cell shorter than a quarter of a second carries "flash", so that it never goes
 out unnoticed. A line with a piece left less than 5/6 s is laid out again inside the gap between
 the cells of the other lines around it (its pieces in order, each with its reading time when the
 gap holds that, else 5/6 s; a heard line from the in-time of its first piece on, never earlier).
@@ -961,6 +962,9 @@ def _join_cells(cells: list[_Cell], theirs: list[_Cell], mine: list[_Cell], ln0:
         merged = dict(pa, body=body, text=pa["prefix"] + body, words=pa["words"] + pb["words"],
                       t=min(pa["t"], pb["t"]), e=max(pa["e"], pb["e"]), whole=True, keep=True, breaks=False,
                       ids=_ids(pa) + _ids(pb), guess=bool(pa.get("guess") and pb.get("guess")),
+                      # placed as a heard line when one of the two was heard, but the guessed time
+                      # of the other still marks the cell ("timing_estimated", ``_out``)
+                      some_guess=any(p.get("guess") or p.get("some_guess") for p in (pa, pb)),
                       timing="asr" if "asr" in (pa.get("timing"), pb.get("timing")) else pa.get("timing"),
                       pos="top" if "top" in (pa.get("pos"), pb.get("pos")) else pa.get("pos"),
                       notes=list(dict.fromkeys(pa["notes"] + pb["notes"])))
@@ -2107,7 +2111,7 @@ def _out(cells: list[_Cell], cuts: list[int], P: _P, more_notes=None) -> list[di
             for r in _ids(p):
                 if r not in refs:
                     refs.append(r)
-        flags = ["timing_estimated"] if any(p.get("guess") for p in c.parts) else []
+        flags = ["timing_estimated"] if any(p.get("guess") or p.get("some_guess") for p in c.parts) else []
         flags += sorted(c.marks)
         if dur_f < P.flash_f:
             flags.append("flash")                    # a cell of a few frames never goes out unmarked

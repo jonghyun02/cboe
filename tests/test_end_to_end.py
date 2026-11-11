@@ -768,6 +768,10 @@ def test_join_position_and_manner_set_through_the_server_reach_every_file(ran, t
         cells = {tuple(c["refs"]): c for c in draft["cells"]}
         assert cells[("L0001", "L0002")]["lines"] == ["- 여기가 정말 그 집이 맞는 거지?", "- 응, 파란 대문 집이라고 했어"]
         assert cells[("L0013", "L0014")]["lines"] == ["걱정 마, 다음 차는 금방", "올 거야, 조용히 따라와"]
+        # L0014 was not heard (its time a guess): the joined cell keeps its flag, though L0013 was heard
+        assert "timing_estimated" in cells[("L0013", "L0014")]["flags"]
+        assert "timing_estimated" in st["export_check"]["flags"] and cells[("L0013", "L0014")]["id"] in \
+            st["export_check"]["flags"]["timing_estimated"]
         assert cells[("L0012",)]["lines"] == ["[보람/울먹이며] 버스가 벌써", "떠나 버렸으면 어떡하지?"]
         assert [k for k, c in cells.items() if c["pos"] == "top"] == [("S0002",), ("L0006",)]
         assert not any(c["check"].get("notes") for c in draft["cells"])      # no join left undone
