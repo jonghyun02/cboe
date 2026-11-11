@@ -360,8 +360,14 @@ def _cell_list(cells) -> list[dict]:
 def load(source) -> tuple[list[dict], dict]:
     """``(cells, meta)`` of a list of cells, a draft dict or a file (.srt .vtt .ttml .json).
     ``meta`` holds what the source says about itself: ``fps``, ``profile``. Raises ValueError for
-    what holds no cells: a list of other values, XML that is not TTML, a file of another type."""
+    what holds no cells: a list of other values, an object without ``cells`` (an items.json given by
+    mistake would look passed with no cell), XML that is not TTML, a file of another type. A draft
+    whose ``cells`` is empty is a draft of no cell."""
     if isinstance(source, dict):
+        if "cells" not in source:
+            keys = ", ".join(str(k) for k in list(source)[:4]) + (" …" if len(source) > 4 else "")
+            raise ValueError("\"cells\" 칸이 없는 JSON 객체입니다 (칸 목록이나 {\"cells\": [...]} 이어야 함"
+                             + (f" · 있는 칸: {keys})" if keys else ")"))
         return _cell_list(source.get("cells")), {"fps": source.get("fps"), "profile": source.get("profile")}
     if isinstance(source, (str, Path)):
         path = Path(source)

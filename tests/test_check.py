@@ -523,6 +523,12 @@ def test_what_holds_no_cells_is_refused(tmp_path):
     for bad in ([1, 2], {"cells": {"a": 1}}, {"cells": ["가"]}, "not cells"):
         with pytest.raises(ValueError):
             check.load(bad if not isinstance(bad, str) else [bad])
+    # an object without "cells" says what it lacks; a draft of no cell is still a draft
+    for bad in ({"foo": 1}, {"items": []}, {}):
+        with pytest.raises(ValueError, match='"cells" 칸이 없는'):
+            check.load(bad)
+    assert check.load({"cells": []}) == ([], {"fps": None, "profile": None})
+    assert check.run({"cells": []})["ok"] and check.run([])["ok"]
     (tmp_path / "n.json").write_text("5", encoding="utf-8")
     with pytest.raises(ValueError):
         check.load(tmp_path / "n.json")
@@ -541,6 +547,10 @@ def test_what_holds_no_cells_is_refused(tmp_path):
     ("empty.srt", ""),                                      # 4th review: these passed with "걸린 조항이 없습니다"
     ("words.srt", "이건 자막이 아님\n그냥 글\n"),
     ("words.vtt", "WEBVTT\n\n자막 없음\n"),
+    # 7th round: an object without "cells" (an items.json given by mistake) passed as a draft of 0 cells
+    ("notcells.json", '{"foo": 1}'),
+    ("items.json", '{"items": [{"id": "S0001", "kind": "sfx", "onset": 1.0}]}'),
+    ("object.json", "{}"),
 ])
 def test_command_line_says_2_for_what_it_cannot_read(tmp_path, capsys, name, body):
     from cboe.__main__ import main
