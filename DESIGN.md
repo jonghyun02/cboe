@@ -95,7 +95,7 @@
   export/<제목>.srt .vtt .ttml
   run_log.json  run_history.json  llm_log.jsonl  .run.lock     실행 기록, LLM 호출 기록, 실행 잠금
   gui_run.log  gui_job.json                                    GUI 로 돌린 분석의 로그와 결과
-  review.mp4  review.mp4.json  review.mp4.lock  review.mp4.<pid>.part   재생용 영상 (§7.3)
+  review.mp4  review.mp4.json  review.mp4.lock  review.mp4.<pid>.part   재생용 영상 (§7.2)
 ```
 
 단계마다 결과 파일이 있으면 건너뛴다(`--force <단계>`로 다시). 예외는 §1의 `script`(파일을 견줌)·`cues`·`agent`.
@@ -434,7 +434,7 @@
   `why`: `text_changed`(같은 화자의 글이 바뀐 줄 하나, 앞뒤 이웃이 그대로) | `same_words`(같은 글 줄 가운데 문맥이 가장 맞는 것들) | `gone`(후보 없음).
   화자 행의 `decision`은 {`final`, 저장된 다른 칸}, 후보는 화자 후보가 있는 줄만. 줄 행 다음에 화자 행. 자막·배치에 쓰지 않는다.
 - **settle**: 배치 → `no_room`에 오른 줄을 알고 다시 `compose` → 표시가 바뀌었으면 다시 배치. 자리 없는 줄 집합은 라운드마다 줄지 않고 모은다(`draft.unplaced`:
-  이름을 한 번 더 보이는 쪽이 안전하고, 사슬이 줄 하나에 한 라운드 안에 끝난다). 라운드는 많아야 min(줄 수 + 2, `SETTLE_MAX` 64)번이고, 넘으면 표시가 다른 줄을
+  이름을 한 번 더 보이는 쪽이 안전하고, '자리 없는 줄 → 다음 줄이 이름을 보임 → 긴 표시가 다음 추정 줄의 자리를 가져감' 같은 사슬이 줄마다 많아야 한 라운드라 끝난다). 라운드는 많아야 min(줄 수 + 2, `SETTLE_MAX` 64)번이고, 넘으면 표시가 다른 줄을
   `draft.unsettled`에 적고 내보내기 점검이 알린다. 돌려주는 구성은 `compose(draft)`. `draft.json`은 이것이 쓴다.
   `Project.recompute()` = `settle()[1]`이고, 실행 끝과 검수 서버가 모두 이것을 쓴다. `finish`가 줄마다 `cells`, `no_room`, `joined`(앞의 넣은 줄과 칸을 함께 씀:
   작가의 앞 줄과 한 칸, 또는 다른 화자의 하이픈 칸)를 단다.
@@ -655,12 +655,12 @@
 | `POST /api/export` · `GET /api/export/{fmt}` | `format` | 내보내기(`path` `cells` `check` `warnings` `export_check` `state`), 내려받기 |
 | `GET /api/frame?t=&w=` | | 정지 화면 JPEG(원본에서, 구간 안으로 묶음) |
 | `GET /api/envelope?step=` | | `env.npz`를 `step`초마다 가장 큰 값으로 줄인 트랙별 세기(정수 dB, 칸 수 `ENV_MAX_BUCKETS` 20000 이하, 바닥 `ENV_FLOOR_DB` -90). 파일이 없으면 404 |
-| `GET /media/video` · `GET /api/media` · `POST /api/media/build` | | 영상과 재생용 영상(§7.3). 만드는 중 `/media/video`는 409 |
+| `GET /media/video` · `GET /api/media` · `POST /api/media/build` | | 영상과 재생용 영상(§7.2). 만드는 중 `/media/video`는 409 |
 
 화면은 보기 다섯 개(후보 · 대사 · 대본에 없는 말 · 인물 · 칸)와 타임라인이다(USAGE.md '검수 화면'). 수치·표기는 상태의 `style`에서만 받는다.
 200행씩 그리고(`CHUNK`) 내려가면 더 그린다.
 
-### 7.2 화면이 읽고 보내는 것 (`static/app.js`)
+### 7.1 화면이 읽고 보내는 것 (`static/app.js`)
 
 - 읽는 상태 칸(위 목록 가운데 화면이 기대는 것): `aside`(행의 `kind`가 없으면 line), `summary.lines.aside`, `lines[].decision`(source · join · pos · manner …),
   `lines[].source`(결정이 없을 때 대본 출처), `lines[].delivery`·`joined`·`hints`(`name` · `language`)·`heard_language`, `items[].reason`의 끝 ' · 앞 줄을 먼저 정해야 함'과 `follows`,
@@ -675,7 +675,7 @@
 - 영화 시각 기준으로 일하고, `project.media`가 `/media/video`의 파일(원본 또는 t0부터의 재생용 영상)을 정한다. building 동안 2초마다 `api/media`를 묻고,
   원본을 열지 못하면 페이지당 한 번 `api/media/build`를 보낸다.
 
-### 7.3 재생용 영상 (`cboe/proxy.py`)
+### 7.2 재생용 영상 (`cboe/proxy.py`)
 
 - `playable`: mp4·mov·m4v 또는 webm이고 영상 h264·vp8·vp9·av1, 소리 aac·mp3·opus·vorbis·flac(또는 없음)이면 원본을 그대로 준다(mkv는 늘 만든다).
 - `build`: `-ss t0 -t (t1-t0)`를 입력 앞에 두어 구간 밖은 읽지도 쓰지도 않는다(먼저 `guard.check_window`). H.264 + AAC, 폭 960 이하, 원본 fps, 키프레임 약 1초,
@@ -691,7 +691,7 @@
 - `Worker`: 작업 폴더마다 뒤의 스레드 하나, `status()` = none | source | building | ready | failed, `close()`가 ffmpeg를 끝낸다. 서버가 멈출 때와 스튜디오가 앱을 내릴 때
   (`ReviewService.close`) 부른다.
 
-### 7.1 구현하며 정한 것 (2026-10-19, 지금도 맞는 것)
+### 7.3 구현하며 정한 것 (2026-10-19, 지금도 맞는 것)
 
 - 받아쓰기: faster-whisper의 VAD 이어붙이기는 무음 뒤 첫 낱말 시각을 앞 구간 끝에 붙인다. Silero VAD를 직접 돌려 `MAX_CHUNK_S`(25초) 이하 묶음마다 따로 받아쓴다.
   대사에 나오는 인물 이름만 힌트로 주고(`hotword_names`), 힌트 이름만 되풀이한 묶음은 `words`에서 빼서 `hint_echo`에 둔다.
