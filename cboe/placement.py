@@ -155,7 +155,9 @@ the onset.
 
 Positions (memo 5.3), sounds in time order:
  ① no cell on screen at the sound (cells before it may be shortened to their floor: speech end,
-   5/6 s and 14 units/s) and at least 5/6 s free after it: an own cell;
+   5/6 s and 14 units/s, and ``INTERRUPT_SHOW`` after a sound they hold after their in-time, ④;
+   this floor holds wherever a cell is shortened for a sound) and at least 5/6 s free after it: an
+   own cell;
  ② within 0.5 s of the start of a one-line cell, other source: the same cell, "- " lines in heard
    order (two sounds of a sound-only cell too, II.5);
  ③ the same, sound made by the speaker (source_line is that line): no hyphen,
@@ -404,9 +406,12 @@ class _Cell:
 
 
 def _floor(c: _Cell, P: _P) -> int:
-    """The earliest out-time ``c`` may be shortened to: its speech, 5/6 s and the reading speed."""
+    """The earliest out-time ``c`` may be shortened to: its speech, 5/6 s and the reading speed,
+    and ``INTERRUPT_SHOW`` after a sound it holds after its in-time (④'s "- 내가 어제 봤는데…" /
+    "- [첨벙!]": the words of the sound stay after it is heard; 7th round, G3-12)."""
     se = c.speech_end()
-    lo = max(se if se is not None else c.start, c.start + P.min_f, c.start + P.need(c.units))
+    lo = max(se if se is not None else c.start, c.start + P.min_f, c.start + P.need(c.units),
+             max((p["t"] + P.show_f for p in c.sounds() if p["t"] > c.start), default=c.start))
     return min(c.end, lo)
 
 

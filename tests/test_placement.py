@@ -1918,6 +1918,20 @@ def test_the_words_of_a_sound_that_interrupts_the_dialogue_are_on_screen_when_it
     assert c["lines"] == ["- 내가 어제 봤는데…", "- [첨벙!]"] and F(c["end"]) - F(11.3) == 10
 
 
+def test_a_second_sound_in_the_same_pause_never_cuts_the_first_off_as_it_is_heard():
+    # 7차 (G3-12): the first sound in II.9's order, a second one 0.1-0.3 s later joins the later piece
+    # (②), whose start is pulled back to it: the cell of the first may not end before it has shown its
+    # sound INTERRUPT_SHOW (6 frames) after it is heard (_floor; before: 0-5 frames)
+    for t1, t2 in ((11.2, 11.3), (11.2, 11.35), (11.2, 11.4), (11.2, 11.5), (11.3, 11.4), (11.3, 11.6)):
+        for second in (S("S2", t2, "[쿵]"), S("S2", t2, "[잔잔한 음악]", kind="music", t1=t2 + 6),
+                       S("S2", t2, "[빗소리]", t1=t2 + 3)):
+            d = run([L("L1", GUIDE, 10.0, 13.0, words=W(GUIDE, GUIDE_T), timing="asr")], [S("S1", t1, "[첨벙!]"), second])
+            (c,) = cells_of(d, "S1")
+            assert c["lines"] == ["- 내가 어제 봤는데…", "- [첨벙!]"], (t1, t2, d["cells"])
+            assert F(c["end"]) - F(t1) >= 6, (t1, t2, c)
+            assert cells_of(d, "S2") or any(e["item"] == "S2" for e in d["no_room"])
+
+
 # --------------------------------------------------------------------------- remembered results (감사 6-08)
 
 MEMO_WORDS = ["가", "나는", "오늘", "그래서", "정말로", "어디", "있었어", "모르겠어요", "괜찮아", "빨리", "왔어?", "아니야.",
