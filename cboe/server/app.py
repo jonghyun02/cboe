@@ -44,6 +44,7 @@ being made ``/media/video`` is 409. Stills (``/api/frame``) are still read from 
 """
 from __future__ import annotations
 
+import gc
 import json
 import math
 from html import escape
@@ -477,12 +478,45 @@ class FrameGrabber:
 
 
 # ------------------------------------------------------------------ service
+class WorkLock:
+    """The lock of a work folder (re-entrant), with Python's cycle collector paused while any such
+    lock is held (감사 6-08). One decision makes and drops millions of objects (the composition, the
+    placement, a state of 1.27 MB); the collector ran 1-2 full passes over all of them inside each
+    request (써니: 0.06-0.23 s of 0.35-0.97 s). Almost all of it goes by reference counting the
+    moment it is dropped (a full pass after a request finds some 60 objects in cycles), and the
+    collector works again as soon as no lock is held. When to collect changes no result."""
+
+    _guard = threading.Lock()
+    _held = 0                                 # locks held now, in every service of this process
+    _resume = False                           # whether the collector was on before the first
+
+    def __init__(self):
+        self._lock = threading.RLock()
+
+    def __enter__(self):
+        self._lock.acquire()
+        with WorkLock._guard:
+            if WorkLock._held == 0:
+                WorkLock._resume = gc.isenabled()
+                gc.disable()
+            WorkLock._held += 1
+        return self
+
+    def __exit__(self, *exc):
+        with WorkLock._guard:
+            WorkLock._held -= 1
+            if WorkLock._held == 0 and WorkLock._resume:
+                gc.enable()
+        self._lock.release()
+        return False
+
+
 class ReviewService:
     """One work folder behind one lock: decisions, placement, screen state."""
 
     def __init__(self, work, media=None):
         self.project = Project(work)
-        self.lock = threading.RLock()
+        self.lock = WorkLock()
         self.version = 0
         self.error: str | None = None
         self.exports: dict[str, Path] = {}

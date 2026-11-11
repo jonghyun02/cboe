@@ -2,6 +2,7 @@
 """Review server (cboe.server): state, decisions, bulk, placement fixes, export, media."""
 from __future__ import annotations
 
+import gc
 import importlib.util
 import json
 import sys
@@ -454,3 +455,58 @@ def test_state_and_decisions_answer_what_fastapi_would_answer(tmp_path):
                 assert r.status_code == 200, r.text
             r = c.get("/api/state")
             assert r.content == SafeJSONResponse(jsonable_encoder(svc.state())).body, path
+        # the cycle collector rests while the work folder's lock is held, and only then
+        seen = []
+        real = svc.project.set_line
+
+        def spy(*a, **k):
+            seen.append(gc.isenabled())
+            return real(*a, **k)
+        svc.project.set_line = spy
+        assert gc.isenabled()
+        assert c.post("/api/lines/L0001", json={"sung": True}).status_code == 200
+        assert c.post("/api/lines/L0001", json={"breaks": [99]}).status_code == 400     # refused inside the lock
+        assert seen == [False, False] and gc.isenabled()
+
+
+def test_the_work_lock_pauses_the_cycle_collector_while_any_is_held():
+    import threading
+
+    from cboe.server.app import WorkLock
+    a, b = WorkLock(), WorkLock()
+    assert gc.isenabled()
+    with a:
+        assert not gc.isenabled()
+        with a:                                   # re-entrant
+            with b:
+                assert not gc.isenabled()
+        assert not gc.isenabled()
+    assert gc.isenabled()
+    with pytest.raises(RuntimeError):
+        with a:
+            raise RuntimeError("x")
+    assert gc.isenabled()
+    # one thread holds a while another takes and leaves b: on again only when neither is held
+    inside, leave = threading.Event(), threading.Event()
+
+    def hold():
+        with a:
+            inside.set()
+            leave.wait(10)
+    t = threading.Thread(target=hold)
+    t.start()
+    inside.wait(10)
+    with b:
+        pass
+    assert not gc.isenabled()
+    leave.set()
+    t.join(10)
+    assert gc.isenabled()
+    # a collector someone else turned off stays off
+    gc.disable()
+    try:
+        with a:
+            pass
+        assert not gc.isenabled()
+    finally:
+        gc.enable()
