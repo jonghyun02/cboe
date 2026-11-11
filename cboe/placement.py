@@ -851,29 +851,50 @@ def _whole(ln: dict) -> tuple[str, str]:
     return style.line_labels(ln)[0], _body(" ".join(str(ln.get("text") or "").split()).split(" "), bool(ln.get("sung")))
 
 
-def _join(cells: list[_Cell], lines: list, P: _P) -> list[_Cell]:
+def _join(cells: list[_Cell], lines: list, P: _P, refused=None) -> set:
     """``join`` of a line (the writer): one cell with the line before it, the one placed just
     before it in script order. Two speakers: one hyphen cell, '- ' a line each (I.6), however far
     apart the two are; one speaker (the same ``person``): one cell of the two texts, a space between,
-    the words and their times of both, the label of the first. Only when that cell fits (one line of
-    16 units each as hyphen lines, else 2 x 16 units) and the speech of the two lasts at most 7 s
-    (GR 1), the line before is in no cell with another line yet (two lines a cell), neither is cut
-    in pieces and no other line has a cell between them. Otherwise the line keeps its own cells and
-    they say why in ``check.notes`` (``JOIN_NOTE``). The cell gets the checks of any other cell."""
+    the words and their times of both, the label of the first. Only when the two are of one scene
+    (TG 4), the label of the first does for both of one speaker (``_label_lost``: the same language,
+    II.6 "in each event"; no source or manner the first does not show), that cell fits (one line of
+    16 units each as hyphen lines, else
+    2 x 16 units) and the speech of the two lasts at most 7 s (GR 1), the line before is in no cell
+    with another line yet (two lines a cell), neither is cut in pieces and no other line has a cell
+    between them. Otherwise the line keeps its own cells and they say why in ``check.notes``
+    (``JOIN_NOTE``). The cell gets the checks of any other cell. ``refused``: {line id: why} of the
+    joins refused already (``_dialogue_cells``: not tried again, only said); a join refused here is
+    added to it. Returns the script places (``order``) of the lines in a join made."""
+    refused = {} if refused is None else refused
+    made = set()
     seen = sorted({(p["order"], p["id"]) for c in cells for p in c.dialogue()})
     for (k0, before), (k, lid) in zip(seen, seen[1:]):
         if not isinstance(lines[k], dict) or not lines[k].get("join"):
             continue
         mine = [c for c in cells if any(lid in _ids(p) for p in c.dialogue())]
         theirs = [c for c in cells if any(before in _ids(p) for p in c.dialogue())]
-        why = _join_cells(cells, theirs, mine, lines[k0], lines[k], P)
+        why = refused.get(lid) or _join_cells(cells, theirs, mine, lines[k0], lines[k], P)
         if why:
+            refused[lid] = why
             note = JOIN_NOTE.format(why)
             for c in mine:
                 for p in c.dialogue():
                     if lid in _ids(p) and note not in p["notes"]:
                         p["notes"].append(note)
-    return cells
+        else:
+            made.update((k0, k))
+    return made
+
+
+def _label_lost(ln0: dict, ln: dict) -> bool:
+    """Whether one cell of a speaker's two lines, under the label of the first ``ln0``, would show
+    the second ``ln`` wrongly: another language (II.6 "use [in language] at the beginning of the
+    dialogue in each event"), or a word after the name the first does not have (``label_extra``: a
+    source, a manner of speech). The source goes with the name only, so a second line without its
+    name shows none and goes on under the first's (state.label_extra)."""
+    if (ln0.get("language") or None) != (ln.get("language") or None):
+        return True
+    return not set(ln.get("label_extra") or ()) <= set(ln0.get("label_extra") or ())
 
 
 def _join_cells(cells: list[_Cell], theirs: list[_Cell], mine: list[_Cell], ln0: dict, ln: dict, P: _P):
@@ -883,10 +904,14 @@ def _join_cells(cells: list[_Cell], theirs: list[_Cell], mine: list[_Cell], ln0:
     pa, pb = a.dialogue()[0], b.dialogue()[0]
     if a.mode != "plain" or len(a.parts) > 1:
         return "앞 줄이 이미 다른 줄과 한 칸"
+    if pa.get("scene") and pb.get("scene") and pa["scene"] != pb["scene"]:
+        return "장면이 다름"                         # one cell never spans a scene change (TG 4)
     one = len(theirs) == 1 and len(mine) == 1
     (h0, w0), (h1, w1) = ((pa["prefix"], pa["body"]) if len(theirs) == 1 else _whole(ln0),
                           (pb["prefix"], pb["body"]) if len(mine) == 1 else _whole(ln))
     same = pa.get("speaker") == pb.get("speaker")
+    if same and _label_lost(ln0, ln):
+        return "화자 표시가 다름"                     # [영어] · 출처 · 말투 of the second line (II.6, II.8)
     if same and not P.fits(h0 + w0 + " " + w1):
         return f"너무 김: {P.max_lines}줄 {P.max_units:g}자 초과"
     if not same and any(units(style.tidy_line(style.HYPHEN + h + w)) > P.max_units + EPS
@@ -1259,27 +1284,39 @@ def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> tuple[li
                 starts.append(P.fr(times[0][0]))
                 spans.append((P.fr(times[0][0]), P.fr(max(e for _, e in times)), k))
     starts.sort()
-    for k, ln in enumerate(lines or []):
-        if isinstance(ln, dict):
-            parts.extend(_dialogue_parts(ln, P, k, starts, spans=spans))
-    parts = _in_window(parts, w0, w1)
-    # a writer's join holds both lines whole: no cut at a pause in either (the writer's choice first)
-    redo = sorted({p["order"] for p in parts if p["paused"]} & _joined(parts, list(lines or [])))
-    if redo:
-        parts = [p for p in parts if p["order"] not in redo]
-        for k in redo:
-            parts.extend(_in_window(_dialogue_parts(lines[k], P, k, starts, pauses=False), w0, w1))
-    parts.sort(key=lambda p: (p["t"], p["order"]))       # script order for equal times
-    cells: list[_Cell] = []
-    prev = None
-    for p in parts:
-        s = _snap_in(max(p["t"], w0), p["e"], prev, cuts, P, w0)
-        if prev is not None and s < prev.start + P.gap + 1:
-            s = prev.start + P.gap + 1                   # lines that start together: keep the order
-        c = _Cell(s, s + 1, [p], "plain", P, next(seq))
-        cells.append(c)
-        prev = c
-    cells = _join(cells, list(lines or []), P)           # the writer's "one cell with the line before"
+
+    def all_parts():
+        out = []
+        for k, ln in enumerate(lines or []):
+            if isinstance(ln, dict):
+                out.extend(_dialogue_parts(ln, P, k, starts, spans=spans))
+        return _in_window(out, w0, w1)
+    parts = all_parts()
+    # a writer's join holds both lines whole: no cut at a pause in either (the writer's choice first);
+    # a line none of whose joins is made keeps its cuts at the pauses: laid out again without the
+    # hold, the joins refused only say why again (``refused``), as the first time
+    held = {p["order"] for p in parts if p["paused"]} & _joined(parts, list(lines or []))
+    refused: dict = {}
+    while True:
+        if held:
+            parts = [p for p in parts if p["order"] not in held]
+            for k in sorted(held):
+                parts.extend(_in_window(_dialogue_parts(lines[k], P, k, starts, pauses=False), w0, w1))
+        parts.sort(key=lambda p: (p["t"], p["order"]))   # script order for equal times
+        cells: list[_Cell] = []
+        prev = None
+        for p in parts:
+            s = _snap_in(max(p["t"], w0), p["e"], prev, cuts, P, w0)
+            if prev is not None and s < prev.start + P.gap + 1:
+                s = prev.start + P.gap + 1               # lines that start together: keep the order
+            c = _Cell(s, s + 1, [p], "plain", P, next(seq))
+            cells.append(c)
+            prev = c
+        made = _join(cells, list(lines or []), P, refused)     # the writer's "one cell with the line before"
+        if not held - made:
+            break
+        held &= made
+        parts = all_parts()                              # fresh parts: _join wrote notes into these
     cells = _untangle(cells, P, w0, w1)                  # overlapping lines: never a one-frame cell
     cells = _pair_short(cells, P, w1)
     _dialogue_outs(cells, P, w1, _scene_caps(cells, cuts, P))

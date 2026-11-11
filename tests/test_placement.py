@@ -1450,6 +1450,62 @@ def test_a_writer_join_holds_a_line_with_a_pause_in_one_cell():
     assert len(cs) == 1 and cs[0]["refs"] == ["L1", "L2"]
 
 
+def test_a_writer_join_that_is_refused_leaves_the_line_cut_at_its_pause():
+    # 7차 (G3-08): a join refused holds nothing; the line keeps the cut at its pause as without the
+    # join, and every piece says why (before: one cell of 5.3 s, '그래 알았어' 3 s before it is said)
+    def view(d, ref):
+        return [(c["start"], c["end"], c["lines"]) for c in cells_of(d, ref)]
+    why = {"가람": "앞 줄과 한 칸으로 묶지 못함 · 7초 초과", "나래": "앞 줄과 한 칸으로 묶지 못함 · 너무 김: 하이픈 줄 16자 초과"}
+    for who, text, times in (("가람", PAUSED, PAUSED_T),
+                             ("나래", "잠깐만 기다려 그래그래그래 알았다니까요오", [(10.0, 10.4), (10.4, 10.9), (13.9, 14.3), (14.3, 14.9)])):
+        a = L("L0", "어디야", 6.5 if who == "가람" else 9.0, 6.9 if who == "가람" else 9.4, speaker="가람", name="가람", timing="asr")
+        b = L("L1", text, 10.0, times[-1][1], words=W(text, times), speaker=who, name=who, timing="asr")
+        alone, asked = run([a, b]), run([a, dict(b, join=True)])
+        assert len(cells_of(alone, "L1")) == 2 and view(asked, "L1") == view(alone, "L1"), (who, asked["cells"])
+        assert all(c["check"].get("notes") == [why[who]] for c in cells_of(asked, "L1")), asked["cells"]
+        assert view(asked, "L0") == view(alone, "L0")
+    # a line before with a pause whose join is refused is cut at its pause too
+    a = L("L0", PAUSED, 10.0, 14.79, words=W(PAUSED, PAUSED_T), speaker="가람", name="가람", timing="asr")
+    late = L("L1", "응", 17.5, 17.8, speaker="가람", name="가람", timing="asr", join=True)     # 7.8 s after L0 begins
+    d = run([a, late])
+    assert len(cells_of(d, "L0")) == 2 and one(d, "L1")["check"]["notes"] == ["앞 줄과 한 칸으로 묶지 못함 · 7초 초과"]
+
+
+def test_a_writer_join_is_not_made_across_scenes_nor_under_a_label_the_second_line_lacks():
+    # 7차: one cell never spans a scene change (G3-06, TG 4), and one speaker's two lines go under the
+    # label of the first only when it does for the second (G3-07: II.6 "use [in language] at the
+    # beginning of the dialogue in each event"; before: '[가람] 잠깐만 오케이', the [영어] gone)
+    def note(d, ref):
+        return sorted({n for c in cells_of(d, ref) for n in c["check"].get("notes", []) if n.startswith("앞 줄과")})
+    a = L("L1", "어디 가는 거야?", 10.0, 10.8, speaker="가람", name="가람", timing="asr", scene_id="SC1")
+    for who in ("나래", "가람"):
+        b = L("L2", "집에 간다니까", 12.0, 12.6, speaker=who, name=who, timing="asr", scene_id="SC2", join=True)
+        d = run([a, b], cuts=[11.5])
+        assert [c["refs"] for c in d["cells"]] == [["L1"], ["L2"]] and note(d, "L2") == ["앞 줄과 한 칸으로 묶지 못함 · 장면이 다름"]
+        assert one(run([a, dict(b, scene_id="SC1")], cuts=[11.5]), "L1")["refs"] == ["L1", "L2"]     # one scene: joined
+        assert one(run([dict(a, scene_id=None), b], cuts=[11.5]), "L1")["refs"] == ["L1", "L2"]      # no scene known
+    x = L("L1", "잠깐만", 10.0, 10.5, speaker="가람", name="가람", show=True, timing="asr")
+    y = L("L2", "조용히 해", 11.0, 11.4, speaker="가람", name="가람", show=True, timing="asr", join=True)
+    for first, second, label in (({}, {"language": "영어"}, "[가람/영어] 조용히 해"),
+                                 ({"language": "영어"}, {}, "[가람] 조용히 해"),
+                                 ({}, {"label_extra": ["속삭이며"]}, "[가람/속삭이며] 조용히 해"),
+                                 ({"label_extra": ["속마음"]}, {"label_extra": ["속삭이며"]}, "[가람/속삭이며] 조용히 해")):
+        d = run([dict(x, **first), dict(y, **second)])
+        assert [c["refs"] for c in d["cells"]] == [["L1"], ["L2"]], d["cells"]
+        assert one(d, "L2")["lines"] == [label] and note(d, "L2") == ["앞 줄과 한 칸으로 묶지 못함 · 화자 표시가 다름"]
+    # the same language, or a source shown with the first name only (the second without its name
+    # shows none and goes on under it): one cell under the first label, as before
+    for first, second, text in (({"language": "영어"}, {"language": "영어", "show_name": False}, "[가람/영어] 잠깐만 조용히 해"),
+                                ({"label_extra": ["속마음"]}, {"show_name": False}, "[가람/속마음] 잠깐만 조용히 해"),
+                                ({"label_extra": ["속마음", "속삭이며"]}, {"show_name": False, "label_extra": ["속삭이며"]},
+                                 "[가람/속마음/속삭이며] 잠깐만 조용히 해")):
+        c = one(run([dict(x, **first), dict(y, **second)]), "L2")
+        assert c["refs"] == ["L1", "L2"] and " ".join(c["lines"]) == text and "notes" not in c["check"], c
+    # two speakers: each keeps its own label in the hyphen cell
+    c = one(run([x, dict(y, speaker="나래", name="나래", language="영어")]), "L2")
+    assert c["refs"] == ["L1", "L2"] and c["lines"] == ["- [가람] 잠깐만", "- [나래/영어] 조용히 해"]
+
+
 QUOTED = "우리 반 반장이 '오늘은 청소 당번이 아니니까 먼저 가도 돼' 하고 말해 줬어 그래서 그냥 왔지"   # made up
 
 
