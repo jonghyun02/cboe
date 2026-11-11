@@ -677,6 +677,23 @@ def test_nameless_rows_of_two_subtitle_cells_are_not_put_together(tmp_path, monk
     assert any("5/6" in v for v in cells[("L0001",)]["check"]["violations"])
 
 
+def test_the_rows_of_a_subtitle_cell_keep_their_order_when_the_second_is_not_heard(tmp_path, monkeypatch):
+    # the same file, '들어와.' not heard: alignment shares its words out from the cell's start, before
+    # the heard '나야.' above it. The hyphen cell still has the rows in the order the file has them
+    work = make_work(tmp_path / "w")
+    (work / "subs.srt").write_text(ROWS_SRT, encoding="utf-8")
+    write_json(work / "project.json", dict(read_json(work / "project.json"), script=str(work / "subs.srt")))
+    run_pipeline(work, monkeypatch)
+    dlg = {ln["id"]: ln for ln in read_json(work / "dialogue.json")["lines"]}
+    heard = [w["s"] for w in dlg["L0002"]["words"]]
+    shared = [w["s"] for w in dlg["L0003"]["words"]]
+    assert shared[0] < heard[0]                         # the second row's words come first in time
+    cells = [c for c in read_json(work / "draft.json")["cells"] if c["kind"] == "dialogue"]
+    assert [c["refs"] for c in cells] == [["L0001"], ["L0002", "L0003"]]
+    assert cells[1]["lines"] == ["- 나야", "- 들어와"]
+    assert cells[1]["start"] >= round(heard[0] - 0.5, 3)
+
+
 # ================================================================== 8. running again
 def test_a_second_run_and_an_edited_script_keep_the_writers_decisions(decided, tmp_path, monkeypatch):
     work = copy_work(decided[0], tmp_path / "again")

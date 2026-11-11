@@ -1338,6 +1338,25 @@ def _joined(parts: list[dict], lines: list) -> set:
     return out
 
 
+def _in_order(parts: list) -> None:
+    """Sort ``parts`` in time order, script order for equal times (a shooting script). The rows of one
+    cell of a subtitle script (``_turn_cell``) keep the order the file writes them in whatever their
+    times: the file has them in the order they are spoken (I.6 "- " a speaker a line), and the time of
+    a row that was not heard is only its words shared out from the cell's start, before the heard row
+    above it. Those rows take the places the group has in time order, in script order (a line's
+    pieces in time order), so no other line moves."""
+    parts.sort(key=lambda p: (p["t"], p["order"]))
+    rows: dict = {}
+    for i, p in enumerate(parts):
+        cell = _turn_cell(p)
+        if cell is not None:
+            rows.setdefault(cell, []).append(i)
+    for at in rows.values():
+        if len(at) > 1:
+            for i, p in zip(at, sorted((parts[i] for i in at), key=lambda p: (p["order"], p["t"]))):
+                parts[i] = p
+
+
 def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> tuple[list[_Cell], list[dict]]:
     parts = []
     starts = []                                          # where each line begins (_split: room of a last piece)
@@ -1367,7 +1386,7 @@ def _dialogue_cells(lines, cuts: list[int], P: _P, w0: int, w1, seq) -> tuple[li
             parts = [p for p in parts if p["order"] not in held]
             for k in sorted(held):
                 parts.extend(_in_window(_dialogue_parts(lines[k], P, k, starts, pauses=False), w0, w1))
-        parts.sort(key=lambda p: (p["t"], p["order"]))   # script order for equal times
+        _in_order(parts)                                 # script order for equal times; rows of a subtitle cell
         cells: list[_Cell] = []
         prev = None
         for p in parts:

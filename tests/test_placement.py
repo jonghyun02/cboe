@@ -393,6 +393,23 @@ def test_two_nameless_turns_of_a_subtitle_script_share_a_hyphen_cell_without_lab
     assert c["lines"] == ["- 오늘은 어디 갔었어?", "- 그냥 집에 있었어"] and c["check"]["violations"] == []
 
 
+def test_the_rows_of_a_subtitle_cell_keep_the_files_order_whatever_their_times():
+    # 7th round: the second row not heard (its words shared out from the cell's start) came before the
+    # heard first row in time, and the hyphen cell showed the two rows the other way round
+    def row(lid, text, s, e, turn):
+        return L(lid, text, s, e, person="#" + turn, turn=turn, timing="script")
+    a, b = row("L1", "나야", 10.3, 10.6, "1-1"), row("L2", "들어와", 10.0, 10.3, "1-2")
+    c = one(run([a, b]), "L1")
+    assert c["refs"] == ["L1", "L2"] and c["lines"] == ["- 나야", "- 들어와"] and c["start"] == sec(F(10.3))
+    # two rows too long for one hyphen cell: their own cells, in the file's order too
+    la = row("L1", "오늘은 하루 종일 도대체 어디에 갔었는지 말해 봐", 11.0, 13.0, "1-1")
+    lb = row("L2", "그냥 집에 하루 종일 있었다고 몇 번이나 말했잖아", 10.0, 12.5, "1-2")
+    assert [x["refs"] for x in run([la, lb])["cells"]] == [["L1"], ["L2"]]
+    # lines of a shooting script (no turn) keep the order of their times, as before
+    named = [dict(a, person="가람", turn=None), dict(b, person="나래", turn=None)]
+    assert one(run(named), "L1")["lines"] == ["- 들어와", "- 나야"]
+
+
 # a subtitle file as the script (made-up text): read, aligned, laid out as the review page does
 
 def _srt_project(tmp, srt, asr):
