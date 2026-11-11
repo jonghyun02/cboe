@@ -73,7 +73,7 @@ import numpy as np
 from .. import people
 from ..util import log, read_json, write_json
 
-KEEP =re.compile(r"[0-9A-Za-z가-힣ㄱ-ㆎ]")
+KEEP = re.compile(r"[0-9A-Za-z가-힣ㄱ-ㆎ]")
 VOICE = ("Speech", "Male speech, man speaking", "Female speech, woman speaking", "Child speech, kid speaking",
          "Conversation", "Narration, monologue", "Human voice", "Whispering", "Shout", "Yell", "Screaming",
          "Battle cry", "Children shouting", "Laughter", "Belly laugh", "Giggle", "Chuckle, chortle", "Snicker",
@@ -154,7 +154,7 @@ ROLE_WORDS = frozenset((
     "대리", "비서", "직원", "종업원", "담당", "매니저", "리더", "dj", "기자", "형사", "경찰", "순경", "판사", "검사",
     "변호사", "의사", "간호사", "기사", "손님", "주인", "학생", "교수", "박사",
     "소년", "소녀", "아이", "꼬마", "노인", "청년"))
-EXTRA_GAP = 0.8      # s of silence that ends a group of ASR words that are in no script line
+EXTRA_GAP = 0.8       # s of silence that ends a group of ASR words that are in no script line
 # groups made only of these (and vocalisations) are not kept as speech that is in no script line
 INTERJECTIONS = {"네", "예", "응", "야", "얘", "어머", "어머나", "아이고", "에이", "참", "뭐", "자", "음", "흠", "헐", "엥"}
 EXTRA_SHORT = 2       # a group of this many letters or fewer is marked "short" (a word fragment, mostly)
@@ -298,8 +298,9 @@ class Voice:
             if sung:
                 s["sing"] = probs[:, sung].max(axis=1)
             fx, _, _ = sed_load(self.p, "effects")
-            vfx = np.maximum(fx[:, [names.index(c) for c in VOCAL_FX]].max(axis=1),
-                             probs[:, [names.index(c) for c in VOCAL_FX]].max(axis=1))
+            vx = [names.index(c) for c in VOCAL_FX if c in names]      # a file without some classes runs
+            vfx = (np.maximum(fx[:, vx].max(axis=1), probs[:, vx].max(axis=1)) if vx
+                   else np.zeros(len(probs), np.float32))
             del probs, fx
             env = load_env(self.p)
             sp, lev = env["speech"], env["effects"]
@@ -1041,6 +1042,8 @@ def _role_word(name: str) -> bool:
     """A name of common words only (``ROLE_WORDS``, also with '님' or '들'): '엄마', '사장님',
     '학생들', '담임 선생님'."""
     def one(w: str) -> bool:
+        if w in ROLE_WORDS:                    # before the '들' comes off: '아들' (6차 확인 G4-09)
+            return True
         w = w[:-1] if len(w) > 1 and w.endswith("들") else w
         return w in ROLE_WORDS or (len(w) > 1 and w.endswith("님") and w[:-1] in ROLE_WORDS)
 
@@ -1048,16 +1051,18 @@ def _role_word(name: str) -> bool:
     return bool(words) and all(one(w) for w in words)
 
 
-def _name_keys(names) -> list[tuple[str, int]]:
+def _name_keys(names, role_words: bool = False) -> list[tuple[str, int]]:
     """(letters, words) of the characters' names the ASR may mishear: every person of a speaker
     name ('가람/나래'), without the role names (``people.is_role``: '경비2', '남자') and the names
     made of common words for a family member, a title or a role (``ROLE_WORDS``: '엄마', '선생님')
-    — a common word the ASR hears as well as any other."""
+    — a common word the ASR hears as well as any other. ``role_words``: those kept too (the
+    names a character may be called by, for 'another character's name heard there')."""
     out: list[tuple[str, int]] = []
     for n in names or ():
         for one in people.parts(n):
             k = "".join(norm_chars(one))
-            if k and not people.is_role(one) and not _role_word(one) and (k, len(one.split())) not in out:
+            if k and not people.is_role(one) and (role_words or not _role_word(one)) \
+                    and (k, len(one.split())) not in out:
                 out.append((k, len(one.split())))
     return out
 
@@ -1113,6 +1118,7 @@ def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str
     the script text is kept, what was heard stays in ``asr_text``). Returns (diff, hints)."""
     keys = [k for k in ("".join(norm_chars(str(n))) for n in names or ()) if len(k) >= 2]
     nkeys = _name_keys(names)
+    okeys = _name_keys(names, role_words=True)
     sw = text.split()
     s_c, s_o, h_c, h_o = [], [], [], []
     for i, w in enumerate(sw):
@@ -1164,9 +1170,11 @@ def compare(text: str, heard: list[str], names=()) -> tuple[list[dict], list[str
         # 그래서, not 쌤 for 선생님)
         if _sound_like("".join(a for a, _ in c["sub"]), "".join(b for _, b in c["sub"])) < NAME_SOUND_MIN:
             return False
+        # not another character's name heard there — one named by a common word too ('오빠' heard
+        # for '오빈아', 6차 확인 G4-10)
         said = {name_at[i] for i in c["s"]}
         return not any(key not in said and key in hw and people._called(key, False).fullmatch(hw)
-                       for hw in ("".join(norm_chars(heard[j])) for j in c["h"]) for key, _ in nkeys)
+                       for hw in ("".join(norm_chars(heard[j])) for j in c["h"]) for key, _ in okeys)
 
     def widen(ss: set, hs: set) -> tuple[set, set]:
         """Whole words on both sides: the script words whose letters the heard words of the

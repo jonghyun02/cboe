@@ -67,7 +67,8 @@ def test_a_word_that_does_not_sound_like_the_name_is_a_different_word():
     assert align._sound_like("", "가람") == 0.0
 
 
-ROLE_NAMES = ["가람", "선생님", "엄마", "담임", "할아버지", "사장님", "학생들", "담임 선생님", "오 반장", "가람 엄마"]
+ROLE_NAMES = ["가람", "선생님", "엄마", "담임", "할아버지", "사장님", "학생들", "담임 선생님", "오 반장", "가람 엄마",
+              "아들"]
 
 
 def test_a_speaker_named_by_a_family_word_or_a_title_is_no_name_to_mishear():
@@ -76,10 +77,21 @@ def test_a_speaker_named_by_a_family_word_or_a_title_is_no_name_to_mishear():
                         ("엄마가 그랬잖아", "아빠가 그랬잖아"), ("담임이 불렀어", "교장이 불렀어"),
                         # sounds alike, but the name is a common word the ASR knows: still a
                         # different word, as it was before the name hint
-                        ("할아버지 오셨어요", "하라부지 오셨어요")]:
+                        ("할아버지 오셨어요", "하라부지 오셨어요"),
+                        # a list word that ends in '들' itself (6차 확인 G4-09)
+                        ("아들아 이리 좀 와", "아드리야 이리 좀 와")]:
         assert _differs(text, heard, ROLE_NAMES), text
     keys = [k for k, _ in align._name_keys(ROLE_NAMES)]
     assert keys == ["가람", "오반장", "가람엄마"]                 # a name in it: kept
+    assert all(align._role_word(w) for w in align.ROLE_WORDS)
+    assert align._role_word("아들") and align._role_word("아들들") and align._role_word("선생님들")
+
+
+def test_a_character_named_by_a_common_word_heard_at_a_name_is_still_another_name():
+    # 6차 확인 G4-10: '오빠' is no name to mishear, but a character called so: heard where the
+    # script says another character's name, it may have been said so — no name hint
+    assert _differs("오빈아 같이 가자", "오빠 같이 가자", ["오빈", "오빠"])
+    assert not _differs("가람아 밥 먹자", "카라마 밥 먹자", ["가람", "오빠"])     # a name misheard: as before
 
 
 # ------------------------------------------------------------------ the align stage
@@ -209,13 +221,13 @@ def test_language_names_come_from_the_tables_in_use():
 SED_NAMES = sorted(set(align.VOICE) | set(align.VOCAL_FX) | {"Music", "Male singing", "Choir"})
 
 
-def _scores(tmp_path, n, sing=()):
-    probs = np.zeros((n, len(SED_NAMES)), np.float16)
-    probs[:, SED_NAMES.index("Speech")] = 0.6
+def _scores(tmp_path, n, sing=(), names=SED_NAMES):
+    probs = np.zeros((n, len(names)), np.float16)
+    probs[:, names.index("Speech")] = 0.6
     for a, b, v in sing:
-        probs[round(a * 25):round(b * 25), SED_NAMES.index("Male singing")] = v
+        probs[round(a * 25):round(b * 25), names.index("Male singing")] = v
     for track in ("mix", "effects"):
-        np.savez(tmp_path / f"sed_{track}.npz", probs=probs, classes=np.array(SED_NAMES), t0=0.0, fps=25.0)
+        np.savez(tmp_path / f"sed_{track}.npz", probs=probs, classes=np.array(names), t0=0.0, fps=25.0)
     np.savez(tmp_path / "env.npz", speech=np.full(n, -80.0), effects=np.full(n, -80.0), hop=0.04)
 
 
@@ -239,6 +251,21 @@ def test_speech_in_no_script_line_inside_a_singing_region_is_sung(tmp_path):
 def test_singing_regions_join_over_short_gaps_and_need_a_clear_score(tmp_path):
     _scores(tmp_path, 40 * 25, sing=[(2.0, 4.0, 0.5), (5.0, 7.0, 0.5), (20.0, 26.0, 0.2)])
     assert align.Voice(Project(tmp_path)).singing() == [(2.0, 7.0)]      # the weak one never reaches SING_ON
+
+
+def test_a_score_file_without_some_vocal_classes_still_runs(tmp_path):
+    # 6차 확인 G4-01: a score file without a VOCAL_FX class ('Breathing') stopped the stage with
+    # ValueError on every run (the singing regions load the scores), with or without a script
+    names = [c for c in SED_NAMES if c != "Breathing"]
+    _scores(tmp_path, 40 * 25, sing=[(7.0, 13.0, 0.6)], names=names)
+    d, res = _run(tmp_path, [dict(x) for x in SONG_SCRIPT], _words(SONG_SAID), t_end=40.0)
+    assert d["singing"] == [[7.0, 13.0]] and res["sung"] == 1
+    # none of them at all: no vocal event is found, the voice and the singing still are
+    names = [c for c in SED_NAMES if c not in align.VOCAL_FX]
+    _scores(tmp_path, 40 * 25, sing=[(7.0, 13.0, 0.6)], names=names)
+    v = align.Voice(Project(tmp_path))
+    assert v.singing() == [(7.0, 13.0)] and v.regions(0.0, 40.0)
+    assert not any(k == "vocal" for *_, k in v.regions(0.0, 40.0))
 
 
 def test_without_the_score_files_nothing_is_sung(tmp_path):
