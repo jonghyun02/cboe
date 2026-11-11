@@ -269,6 +269,13 @@ class _P:
         self.show_f = int(math.floor(INTERRUPT_SHOW * f + 0.5))     # 6 frames at 23.976 fps
         self.long_f = int(math.floor(LONG_SOUND * f + 0.5))
         self.late_f = int(math.floor(LONG_LATE * f + 0.5))
+        # everything above comes from the frame rate and the settings: the key of what is
+        # remembered for these limits (``_split_memo``); None when a setting cannot be a key
+        try:
+            self.key = (self.fps, tuple(sorted(s.items())))
+            hash(self.key)
+        except TypeError:
+            self.key = None
 
     def fr(self, t: float) -> int:
         return int(round(float(t) * self.fps))
@@ -569,6 +576,51 @@ def _split(toks: list[str], times: list, text_of, P: _P, after=None, others=None
     return out[::-1]
 
 
+# 같은 입력의 결과를 기억해 둔다 (감사 6-08: 작가가 하나 고칠 때마다 배치를 처음부터 다시 하고, 그때마다 바뀌지
+# 않은 줄도 조각 나누기를 다시 계산했다). ``_split`` 이 읽는 것은 낱말, 낱말 시각을 프레임으로 바꾼 값(``P.fr``
+# 로만 읽는다), 조각의 글을 만드는 머리표·이어지는 표·노래 여부, 한도(``P.key``), ``after``, 그리고 ``others``
+# 에서는 낱말 첫 프레임마다 그 뒤에 처음 시작하는 줄의 프레임뿐이다(``_room``: ``after`` 가 없을 때만). 그것을
+# 모두 열쇠에 넣으므로 기억해 둔 결과는 다시 계산한 것과 같다. ``MEMO = False`` 이면 기억하지 않는다
+MEMO = True
+_SPLIT_MEMO: dict = {}
+_SPLIT_MAX = 32768
+
+
+def clear_memo() -> None:
+    """Forget the remembered cuts of lines (``_split_memo``) and the wrapped lines (textutil)."""
+    from . import textutil
+    _SPLIT_MEMO.clear()
+    textutil.clear_memo()
+
+
+def _split_memo(toks: list[str], times: list, head: str, cont: str, sung: bool, P: _P, after=None,
+                others=None) -> list[tuple[int, int]]:
+    """``_split`` of the words ``toks`` whose piece i..j is written ``(head if i == 0 else cont) +
+    _body(toks[i:j], sung)``, remembered by everything it reads (above)."""
+    def text_of(i, j):
+        return (head if i == 0 else cont) + _body(toks[i:j], sung)
+
+    if not MEMO or P.key is None:
+        return _split(toks, times, text_of, P, after, others)
+    import bisect
+    try:
+        frames = tuple((P.fr(s), P.fr(e)) for s, e in times)
+        nxt = None
+        if after is None and others is not None:   # _room: the next line start after a first word
+            nxt = tuple(others[k] if k < len(others) else None
+                        for k in (bisect.bisect_right(others, a) for a, _ in frames))
+        key = (tuple(toks), frames, head, cont, bool(sung), P.key, type(after), after, others is None, nxt)
+        got = _SPLIT_MEMO.get(key)
+    except (TypeError, ValueError, OverflowError):   # a value that cannot be a key: no memo
+        return _split(toks, times, text_of, P, after, others)
+    if got is None:
+        got = tuple(_split(toks, times, text_of, P, after, others))
+        if len(_SPLIT_MEMO) >= _SPLIT_MAX:
+            _SPLIT_MEMO.clear()
+        _SPLIT_MEMO[key] = got
+    return list(got)
+
+
 def _body(words: list, sung: bool) -> str:
     """The words of one piece as displayed: ♪ … ♪ around a sung piece (II.7)."""
     text = " ".join(w if isinstance(w, str) else w[0] for w in words)
@@ -613,8 +665,9 @@ def _dialogue_parts(ln: dict, P: _P, order: int = 0, others=None, pauses: bool =
     def cut_at(points):                              # the writer's cut points, or the pauses; a piece
         ranges, more = [], False                     # that does not fit is cut further
         for a, b in zip([0] + points, points + [n]):
-            sub = _split(toks[a:b], times[a:b], lambda i, j, a=a: text_of(a + i, a + j), P,
-                         after=P.fr(times[b][0]) if b < n else None, others=others)
+            # text_of(a + i, a + j): the line's label only on the piece that starts the line
+            sub = _split_memo(toks[a:b], times[a:b], head if a == 0 else cont, cont, sung, P,
+                              after=P.fr(times[b][0]) if b < n else None, others=others)
             more = more or len(sub) > 1
             ranges += [(a + i, a + j) for i, j in sub]
         return ranges, more
@@ -637,7 +690,7 @@ def _dialogue_parts(ln: dict, P: _P, order: int = 0, others=None, pauses: bool =
             paused.remove(bad[0])
             ranges = None
         if ranges is None:
-            ranges = _split(toks, times, text_of, P, others=others)
+            ranges = _split_memo(toks, times, head, cont, sung, P, others=others)
     keep = bool(ln.get("keep")) and not cuts
     if keep and len(ranges) > 1:
         notes.append(f"한 칸에 두기: {P.max_lines}줄 {P.max_units:g}자·{P.max_dur:g}초를 넘어 나눔")

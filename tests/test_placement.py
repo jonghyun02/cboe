@@ -1784,3 +1784,135 @@ def test_the_words_of_a_sound_that_interrupts_the_dialogue_are_on_screen_when_it
     d = run([L("L1", GUIDE, 10.0, 13.0, words=W(GUIDE, GUIDE_T), timing="asr")], [S("S1", 11.3, "[첨벙!]")])
     (c,) = cells_of(d, "S1")
     assert c["lines"] == ["- 내가 어제 봤는데…", "- [첨벙!]"] and F(c["end"]) - F(11.3) == 10
+
+
+# --------------------------------------------------------------------------- remembered results (감사 6-08)
+
+MEMO_WORDS = ["가", "나는", "오늘", "그래서", "정말로", "어디", "있었어", "모르겠어요", "괜찮아", "빨리", "왔어?", "아니야.",
+              "지금", "그러니까", "말이야", "우리", "같이", "가자", "진짜", "뭐라고?", "엄청나게", "기다려", "잠깐만요,",
+              "OK", "3.5초", "아...", "그래!", "누구세요", "이렇게나", "도대체가", "왜", "응", "다시는", "안", "돼"]
+
+
+def random_scene(seed):
+    """A made-up scene: lines of random words and word times (pauses, overlaps, guesses, the
+    writer's cuts and joins, labels, languages, songs), sounds and shot changes."""
+    import random
+    rnd = random.Random(seed)
+    t, lines, sounds = rnd.uniform(0, 3), [], []
+    for i in range(rnd.randint(3, 14)):
+        toks = [rnd.choice(MEMO_WORDS) for _ in range(rnd.randint(1, 16))]
+        dur = max(0.3, sum(units(w) for w in toks) / rnd.uniform(4.0, 9.0))
+        w8 = [rnd.uniform(0.3, 2.0) for _ in toks]
+        ws, acc = [], t
+        for k, w in enumerate(toks):
+            b = acc + dur * w8[k] / sum(w8)
+            gap = rnd.choice([0.0, 0.0, 0.05, 2.5]) if k + 1 < len(toks) else 0.0
+            ws.append({"w": w, "s": round(acc, 3), "e": round(b, 3)})
+            acc = b + gap
+        sp = rnd.choice(["하늘", "바다", "구름", "영희/철수", "경찰1", None])
+        ln = {"id": f"L{i + 1:04d}", "speaker": sp, "text": " ".join(toks), "start": round(t, 3), "end": round(acc, 3),
+              "words": ws, "timing": "asr", "status": "ok", "name": sp, "person": sp,
+              "show_name": bool(sp) and rnd.random() < 0.6, "label_extra": rnd.choice([[], [], ["속마음"], ["전화"]]),
+              "language": rnd.choice([None, None, None, "영어"]), "sung": rnd.random() < 0.1,
+              "scene_id": f"SC{i // 4 + 1:03d}"}
+        if rnd.random() < 0.2:
+            ln["timing"], ln["status"] = rnd.choice(["voice", "even"]), "unheard"
+        if len(toks) > 2 and rnd.random() < 0.2:
+            ln["breaks"] = sorted(rnd.sample(range(1, len(toks)), rnd.randint(1, min(3, len(toks) - 1))))
+        elif rnd.random() < 0.15:
+            ln["keep"] = True
+        if i and rnd.random() < 0.1:
+            ln["join"] = True
+        if rnd.random() < 0.1:
+            ln["pos"] = "top"
+        lines.append(ln)
+        t = acc + rnd.choice([-0.5, -0.1, 0.0, 0.1, 0.3, 0.6, 1.2, 3.0])
+    for k in range(rnd.randint(0, 6)):
+        on = round(rnd.uniform(0, t), 3)
+        ph = rnd.choice(["[쿵]", "[문 닫히는 소리]", "[잔잔한 음악]", "[휴대폰 진동]"])
+        sounds.append({"id": f"S{k + 1:04d}", "kind": "music" if "음악" in ph else "sfx", "onset": on,
+                       "t1": on + rnd.uniform(0.2, 4), "phrase": ph, "short": ph, "source_line": None, "move_to": None})
+    cuts = sorted(round(rnd.uniform(0, t), 3) for _ in range(rnd.randint(0, 12)))
+    return lines, sounds, cuts, rnd.choice([23.976, 24.0, 25.0, 29.97]), t
+
+
+def _placed(scene, settings=None):
+    import copy
+    lines, sounds, cuts, fps, t = scene
+    d = place(copy.deepcopy(lines), copy.deepcopy(sounds), list(cuts), fps, window=(0.0, t + 10), settings=settings)
+    return json.dumps(d, ensure_ascii=False)
+
+
+def test_the_memo_gives_the_draft_computing_everything_again_gives(monkeypatch):
+    from cboe import placement, style, textutil
+    scenes = [random_scene(seed) for seed in range(40)]
+    kinds = [None, style.get("children").settings()]
+    monkeypatch.setattr(placement, "MEMO", False)
+    monkeypatch.setattr(textutil, "MEMO", False)
+    want = [_placed(sc, k) for sc in scenes for k in kinds]
+    monkeypatch.setattr(placement, "MEMO", True)
+    monkeypatch.setattr(textutil, "MEMO", True)
+    placement.clear_memo()
+    assert [_placed(sc, k) for sc in scenes for k in kinds] == want      # filling the memo
+    assert placement._SPLIT_MEMO and textutil._WRAP_MEMO
+    assert [_placed(sc, k) for sc in scenes for k in kinds] == want      # from the memo
+    # the same lines at another frame rate or profile: what is remembered for one is not the other's
+    lines, sounds, cuts, _fps, t = scenes[3]
+    for fps in (23.976, 25.0, 30.0):
+        for k in kinds:
+            sc = (lines, sounds, cuts, fps, t)
+            got = _placed(sc, k)
+            monkeypatch.setattr(placement, "MEMO", False)
+            monkeypatch.setattr(textutil, "MEMO", False)
+            assert got == _placed(sc, k), (fps, k)
+            monkeypatch.setattr(placement, "MEMO", True)
+            monkeypatch.setattr(textutil, "MEMO", True)
+
+
+def test_the_split_memo_keys_everything_split_reads():
+    import random
+
+    from cboe import placement, style
+
+    def direct(toks, times, head, cont, sung, P, after, others):
+        def text_of(i, j):
+            return (head if i == 0 else cont) + placement._body(toks[i:j], sung)
+        return placement._split(toks, times, text_of, P, after, others)
+
+    placement.clear_memo()
+    rnd = random.Random(7)
+    adult, children = style.get("adult").settings(), style.get("children").settings()
+    changed: dict = {}
+    for trial in range(150):
+        toks = [rnd.choice(MEMO_WORDS) for _ in range(rnd.randint(6, 16))]
+        t0, times = 10.0, []
+        for _w in toks:
+            d = rnd.uniform(0.1, 0.5)
+            times.append((t0, t0 + d))
+            t0 += d + rnd.choice([0.0, 0.05, 0.3])
+        P = placement._P(23.976, adult)
+        common = {"toks": dict(toks=toks[:1] + ["도대체가가가가"] + toks[2:]),
+                  "times": dict(times=[(10.0 + (a - 10.0) * 1.6, 10.0 + (b - 10.0) * 1.6) for a, b in times]),
+                  "head": dict(head="[하늘/속마음/영어] "), "cont": dict(cont="[영어 아닌 다른 말] "),
+                  "sung": dict(sung=True), "P": dict(P=placement._P(23.976, children))}
+        line_end = P.fr(times[-1][1])
+        bases = [  # the next line known, no next line, a writer's cut ('after' the next piece's frame)
+            (dict(toks=toks, times=times, head="", cont="", sung=False, P=P, after=None, others=[P.fr(t0) + 3]),
+             {"others": dict(others=None), "next line": dict(others=[P.fr(times[-1][0]) + 2])}),
+            (dict(toks=toks, times=times, head="", cont="", sung=False, P=P, after=None, others=None),
+             {"others": dict(others=[line_end + 1])}),
+            (dict(toks=toks, times=times, head="", cont="", sung=False, P=P, after=line_end + 40, others=[line_end + 3]),
+             {"after": dict(after=line_end + 2)})]
+        for base, own in bases:
+            # one input changed at a time: each of them is in the key (the memo is warm with the others)
+            want0 = direct(**base)
+            assert placement._split_memo(**base) == want0
+            for name, change in dict(common, **own).items():
+                args = dict(base, **change)
+                want = direct(**args)
+                assert placement._split_memo(**args) == want, (trial, name)
+                changed[name] = changed.get(name, 0) + (want != want0)
+            assert placement._split_memo(**base) == want0          # and the first one is still right
+    variants = list(common) + ["others", "next line", "after"]
+    # every input does change the cuts of some line: none of them may be left out of the key
+    assert all(changed.get(name, 0) > 0 for name in variants), changed

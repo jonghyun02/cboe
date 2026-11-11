@@ -1518,3 +1518,255 @@ def test_rows_carry_the_new_hints_of_alignment_and_the_language_heard(tmp_path):
     assert rows["L0001"]["hints"] == ["name"] and "heard_language" not in rows["L0001"]
     assert (rows["L0002"]["hints"], rows["L0002"]["heard_language"]) == (["language"], "영어")
     assert "hints" not in rows["L0003"] and "heard_language" not in rows["L0003"]
+
+
+# =================================================================== 7차: 기억해 둔 결과 (감사 6-08)
+MEMO_WORDS = ["누구세요", "옆집", "사람이에요", "그래요", "하늘", "씨", "맞죠?", "네", "맞아요", "어디", "가", "바다야", "정말로",
+              "괜찮아", "잠깐만요,", "같이", "가자", "모르겠어요.", "왜", "그랬어?", "구름아", "기다려", "빨리", "와"]
+
+
+def _memo(monkeypatch, on: bool):
+    from cboe import people, placement, state, textutil
+    for m in (textutil, placement, people, state):
+        monkeypatch.setattr(m, "MEMO", on)
+
+
+def _clear_memo():
+    from cboe import people, placement, state
+    placement.clear_memo()
+    people.clear_memo()
+    state.clear_memo()
+
+
+def random_lines(seed):
+    """Made-up lines of a few scenes: names, times that overlap or pause, some heard otherwise,
+    unheard, out of the film, sung or in another language."""
+    import random
+    rnd = random.Random(seed)
+    out, t = [], 10.0
+    for i in range(rnd.randint(8, 18)):
+        toks = [rnd.choice(MEMO_WORDS) for _ in range(rnd.randint(1, 12))]
+        text = " ".join(toks)
+        sp = rnd.choice(["하늘", "바다", "구름", "경찰1", "하늘/바다"])
+        scene = "SC001" if t < 21 else "SC003"
+        if rnd.random() < 0.08:
+            out.append(line(f"L{i + 1:04d}", sp, text, None, None, status="absent", scene="SC002"))
+            continue
+        dur = max(0.4, len(text) / rnd.uniform(5.0, 9.0))
+        kind = rnd.random()
+        if kind < 0.15:
+            ln = line(f"L{i + 1:04d}", sp, text, round(t, 3), round(t + dur, 3), status="unheard", timing="voice",
+                      scene=scene)
+        elif kind < 0.3:
+            ln = line(f"L{i + 1:04d}", sp, text, round(t, 3), round(t + dur, 3), status="differs", scene=scene,
+                      asr_text=" ".join(toks[:-1] + ["뭐"]),
+                      diff=[{"kind": "word", "script": toks[-1], "heard": "뭐", "at": [len(toks) - 1, len(toks)]}])
+        else:
+            ln = line(f"L{i + 1:04d}", sp, text, round(t, 3), round(t + dur, 3), scene=scene)
+        if rnd.random() < 0.08:
+            ln["sung"] = True
+        if rnd.random() < 0.08:
+            ln["language"] = "영어"
+        out.append(ln)
+        t += dur + rnd.choice([-0.3, 0.0, 0.1, 0.4, 1.0, 2.5])
+    return out
+
+
+def random_decisions(seed, lines):
+    """The writer's decisions through the API, in a random order (some of them are refused)."""
+    import random
+    rnd = random.Random(1000 + seed)
+    ids = [ln["id"] for ln in lines]
+    timed = [ln for ln in lines if ln["start"] is not None]
+    out = []
+    for _ in range(14):
+        ln = rnd.choice(timed)
+        lid = ln["id"]
+        k = rnd.randrange(12)
+        if k == 0:
+            out.append(("/api/lines/" + rnd.choice(ids), {"include": rnd.choice([False, None])}))
+        elif k == 1:
+            out.append(("/api/lines/" + lid, {"sung": rnd.choice([True, None])}))
+        elif k == 2:
+            out.append(("/api/lines/" + lid, {"join": rnd.choice([True, None])}))
+        elif k == 3:
+            out.append(("/api/lines/" + lid, {"pos": rnd.choice(["top", None]), "manner": rnd.choice(["속삭이며", None])}))
+        elif k == 4:
+            out.append(("/api/lines/" + lid, {"text": "정말로 그랬어 기다려 빨리 와", "text_from": "writer"}))
+        elif k == 5:
+            out.append((f"/api/lines/{lid}/speaker", {"name": rnd.choice(["구름", "한별"]),
+                                                      "scope": rnd.choice(["line", "person", "from_here"])}))
+        elif k == 6:
+            out.append(("/api/items/" + rnd.choice(["S0001", "S0002", "M0001", "C0001"]),
+                        {"decision": rnd.choice(["include", "exclude"])}))
+        elif k == 7:
+            out.append(("/api/items/P" + lid[1:], {"decision": rnd.choice(["include", "exclude", None])}))
+        elif k == 8:
+            out.append(("/api/people", rnd.choice([{"names": ["하늘"], "mode": "generic", "before": "여자"},
+                                                   {"names": ["바다"], "mode": "name"}, {"names": ["하늘"], "mode": None},
+                                                   {"names": ["구름"], "reveal": "never"}])))
+        elif k == 9:
+            out.append(("/api/added", {"kind": "sfx", "start": round(rnd.uniform(10, 40), 2), "end": 46.0, "phrase": "[쿵]"}))
+        elif k == 10:
+            out.append(("/api/extras/X0001", {"action": rnd.choice(["line", "ignore", "clear"])}))
+        else:
+            out.append(("/api/lines/" + lid, {"breaks": [1]} if len(ln["text"].split()) > 1 else {"keep": True}))
+    return out
+
+
+class _NoMedia:
+    def start(self):
+        return self
+
+    def status(self):
+        return {"state": "none", "t0": 0.0, "progress": None, "note": None}
+
+    def close(self):
+        pass
+
+
+def _body(r, work):
+    # the one path in the state is the work folder: the same bytes in both once it is taken out
+    return r.content.replace(json.dumps(str(work), ensure_ascii=False)[1:-1].encode("utf-8"), b"WORK")
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2])
+def test_the_memo_gives_the_drafts_and_states_computing_everything_again_gives(tmp_path, monkeypatch, seed):
+    import time as time_mod
+    real = time_mod.strftime
+    monkeypatch.setattr(time_mod, "strftime", lambda f, *a: "2026-01-01T00:00:00" if "%H" in f else real(f, *a))
+    ls = random_lines(seed)
+    on, off = make(tmp_path / "on", lines=ls), make(tmp_path / "off", lines=ls)
+    _clear_memo()
+    with TestClient(create_app(on.work, media=_NoMedia())) as a, TestClient(create_app(off.work, media=_NoMedia())) as b:
+        def both(method, path, body=None):
+            _memo(monkeypatch, True)
+            ra = a.request(method, path, json=body)
+            _memo(monkeypatch, False)
+            rb = b.request(method, path, json=body)
+            assert ra.status_code == rb.status_code, (path, body)
+            assert _body(ra, on.work) == _body(rb, off.work), (path, body)
+            assert on.path("draft.json").read_bytes() == off.path("draft.json").read_bytes(), (path, body)
+            return ra
+        both("GET", "/api/state")
+        statuses = [both("POST", path, body).status_code for path, body in random_decisions(seed, ls)]
+        both("GET", "/api/state")
+        assert statuses.count(200) >= 7                   # most decisions went through (some are refused)
+
+
+def test_the_memo_follows_every_file_it_reads(tmp_path, monkeypatch):
+    import os
+
+    from cboe import state as state_mod
+    p = make(tmp_path)
+
+    def both():
+        _memo(monkeypatch, True)
+        comp, d = p.settle()
+        got = json.dumps([d, comp["lines"], comp["items"], comp["people"], p.export_check(comp, d)], ensure_ascii=False)
+        _memo(monkeypatch, False)
+        comp, d = p.settle()
+        want = json.dumps([d, comp["lines"], comp["items"], comp["people"], p.export_check(comp, d)], ensure_ascii=False)
+        assert got == want
+        return d
+
+    _clear_memo()
+    first = both()
+    assert state_mod._FILES                                # the files were remembered
+    pj = read_json(p.path("project.json"))
+    write_json(p.path("project.json"), dict(pj, fps=25.0))
+    assert both()["fps"] == 25.0 != first["fps"]
+    write_json(p.path("project.json"), dict(pj, fps=25.0, profile="children"))
+    assert both()["profile"] == "children"
+
+    # a script line rewritten with as many bytes and its old time stamp: still read again
+    path = p.path("dialogue.json")
+    before = path.read_bytes()
+    st = os.stat(path)
+    after = before.replace("누구세요?".encode("utf-8"), "누구니요?".encode("utf-8"))
+    assert len(after) == len(before) and after != before
+    path.write_bytes(after)
+    os.utime(path, ns=(st.st_atime_ns, st.st_mtime_ns))
+    d = both()
+    assert any("누구니요" in x for c in d["cells"] for x in c["lines"])
+
+    script = read_json(p.path("script.json"))
+    write_json(p.path("script.json"), dict(script, people=[dict(script["people"][0], name="새별")] + script["people"][1:]))
+    both()
+    items = read_json(p.path("items.json"))
+    write_json(p.path("items.json"), {"items": [dict(it, rec="exclude") if it["id"] == "S0001" else it for it in items["items"]]})
+    both()
+    write_json(p.path("cuts.json"), {"cuts": [10.4, 16.2, 40.3]})
+    both()
+    heard = len(p.export_check()["heard_no_cell"])
+    write_json(p.path("asr.json"), {"words": ASR + [{"w": "저기", "s": 90.0, "e": 90.5}, {"w": "누구야", "s": 90.6, "e": 91.2}]})
+    both()
+    assert len(p.export_check()["heard_no_cell"]) == heard + 1
+    # two names heard alone (an older asr.json: the hotword hint, script.json characters, repeated)
+    write_json(p.path("asr.json"), {"words": ASR + [{"w": "하늘", "s": 95.0, "e": 95.5}, {"w": "바다", "s": 95.6, "e": 96.1}]})
+    both()
+    assert len(p.export_check()["heard_no_cell"]) == heard
+    script = read_json(p.path("script.json"))
+    write_json(p.path("script.json"), dict(script, characters=["하늘", "구름"]))
+    both()
+    assert len(p.export_check()["heard_no_cell"]) == heard + 1        # 바다 is no hint now: heard
+    write_json(p.path("review.json"), {"people": {"하늘": {"mode": "generic", "before": "여자"}}})
+    both()
+
+
+def test_the_label_memo_keys_everything_display_reads(monkeypatch):
+    from cboe import people
+    base = [{"id": "L1", "person": "하늘", "scene_id": "SC1", "show": True, "text": "안녕 반가워"},
+            {"id": "L2", "person": "바다", "scene_id": "SC1", "show": True, "text": "어디 가는 길이야"},
+            {"id": "L3", "person": "구름", "scene_id": "SC1", "show": True, "text": "하늘아 같이 가자"},
+            {"id": "L4", "person": "하늘", "scene_id": "SC1", "show": True, "text": "그래 가자"},
+            {"id": "L5", "person": "바다", "scene_id": "SC2", "show": False, "text": "나도 갈래"}]
+    dec = {"하늘": {"mode": "generic", "before": "남자"}, "바다": {"mode": "generic", "before": "남자"}}
+
+    def with_line(k, **change):
+        return [dict(x, **change) if i == k else dict(x) for i, x in enumerate(base)]
+    variants = {"show": (with_line(0, show=False), dec), "person": (with_line(1, person="구름"), dec),
+                "scene": (with_line(1, scene_id="SC2"), dec), "text": (with_line(2, text="같이 가자"), dec),
+                "id": (with_line(3, id="L9"), dec), "show as 1": (with_line(0, show=1), dec),
+                "decision": (base, {"하늘": {"mode": "generic", "before": "여자"}}),
+                "reveal": (base, dict(dec, 하늘=dict(dec["하늘"], reveal="never")))}
+
+    def now(lines, d):
+        monkeypatch.setattr(people, "MEMO", False)
+        out = people.display(lines, d)
+        monkeypatch.setattr(people, "MEMO", True)
+        return out
+    people.clear_memo()
+    want0 = now(base, dec)
+    assert people.display(base, dec) == want0 and people.display(base, dec) == want0
+    differs = {}
+    for name, (lines, d) in variants.items():
+        want = now(lines, d)
+        assert people.display(lines, d) == want, name
+        differs[name] = want != want0
+    assert people.display(base, dec) == want0
+    # every one of them changes the labels (so each must be in the key), but show=1 is show=True
+    assert all(differs[k] for k in variants if k != "show as 1") and not differs["show as 1"], differs
+    got = people.display(base, dec)
+    got["labels"]["L1"] = "x"                              # a copy every time
+    assert people.display(base, dec) == want0
+    # maybe_same: the names and what the writer said
+    names = ["김가람", "가람", "하늘"]
+    assert people.maybe_same(names) == {"김가람": ["가람"], "가람": ["김가람"]}
+    assert people.maybe_same(names, {"가람": {"not_same": ["김가람"]}}) == {}
+    assert people.maybe_same(names[1:]) == {} and people.maybe_same(names) == {"김가람": ["가람"], "가람": ["김가람"]}
+
+
+def test_a_file_read_from_the_memo_is_a_copy(tmp_path, monkeypatch):
+    from cboe import state as state_mod
+    _memo(monkeypatch, True)
+    p = make(tmp_path)
+    state_mod.clear_memo()
+    a = p.dialogue()
+    a[0]["text"] = "바뀐 글"
+    a.append({"id": "L9999"})
+    b = p.dialogue()
+    assert b[0]["text"] == LINES[0]["text"] and len(b) == len(LINES)
+    assert state_mod._read(p.path("없는 파일.json"), {"x": 1}) == {"x": 1}
+    _memo(monkeypatch, False)
+    assert p.dialogue() == b

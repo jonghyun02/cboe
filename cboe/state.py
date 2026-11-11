@@ -114,6 +114,73 @@ HEARD_GAP = 1.0
 HEARD_PAD = 0.5
 HEARD_SHORT = 0.3
 
+# 바뀌지 않은 파일은 다시 풀지 않는다 (감사 6-08: 작가가 하나 고칠 때마다 dialogue.json · items.json ·
+# script.json 을 여러 번 읽어 JSON 을 다시 풀었다). 파일의 바이트를 지난번에 푼 바이트와 견주어 같을 때만 그때
+# 푼 값의 사본(``marshal``)을 준다: 같은 바이트는 같은 값으로 풀리므로 결과는 다시 푼 것과 같고, 받은 쪽이
+# 고쳐도 기억은 그대로다. 시각이나 크기가 아니라 바이트를 견주므로 같은 순간에 고쳐 쓴 파일도 놓치지 않는다.
+# ``MEMO = False`` 이면 ``util.read_json`` 그대로 늘 읽어 푼다(시험이 두 길을 견준다)
+MEMO = True
+_FILES: dict = {}                             # path -> (bytes, marshal of what they gave)
+_FILES_MAX = 64
+# a speaker run of an older asr.json: whether one stretch is only the hotword hint repeated
+# (``_heard_no_cell``: ``asr.hint_echo`` of its words and the hint), remembered by both
+_ECHO_MEMO: dict = {}
+_ECHO_MAX = 16384
+
+
+def clear_memo() -> None:
+    """Forget the files read (``_read``) and the hint echoes (``_heard_no_cell``)."""
+    _FILES.clear()
+    _ECHO_MEMO.clear()
+
+
+def _read(path, default=None):
+    """``util.read_json(path, default)``, not parsed again while the file's bytes are those parsed
+    last time (``MEMO``): then a fresh copy of what they gave."""
+    if not MEMO:
+        return read_json(path, default)
+    import io
+    import json
+    import marshal
+    path = Path(path)
+    if not path.exists():                     # as read_json
+        return default
+    data = path.read_bytes()
+    key = str(path)
+    got = _FILES.get(key)
+    if got is not None and got[0] == data:
+        return marshal.loads(got[1])
+    # what Path.read_text(encoding="utf-8") makes of these bytes (newlines too), as read_json
+    obj = json.loads(io.TextIOWrapper(io.BytesIO(data), encoding="utf-8").read())
+    try:
+        blob = marshal.dumps(obj)
+    except ValueError:
+        return obj
+    if len(_FILES) >= _FILES_MAX:
+        _FILES.clear()
+    _FILES[key] = (data, blob)
+    return obj
+
+
+def _echo_only(toks: list[str], hotwords) -> bool:
+    """``all(asr.hint_echo(toks, hotwords))``, remembered by the words and the hint (``MEMO``)."""
+    from .stages.asr import hint_echo
+    if not MEMO:
+        return all(hint_echo(toks, hotwords))
+    try:
+        # the hint's names with their types: hint_echo reads str(name), and True == 1 as a key
+        key = (tuple(toks), type(hotwords),
+               hotwords if isinstance(hotwords, str) else tuple((type(x), x) for x in hotwords))
+        got = _ECHO_MEMO.get(key)
+    except TypeError:
+        return all(hint_echo(toks, hotwords))
+    if got is None:
+        got = all(hint_echo(toks, hotwords))
+        if len(_ECHO_MEMO) >= _ECHO_MAX:
+            _ECHO_MEMO.clear()
+        _ECHO_MEMO[key] = got
+    return got
+
 
 class ReviewError(ValueError):
     """A writer's change that cannot be applied (the server answers 400 with this Korean text)."""
@@ -491,28 +558,28 @@ class Project:
 
     @property
     def meta(self) -> dict:
-        return read_json(self.path("project.json"), {}) or {}
+        return _read(self.path("project.json"), {}) or {}
 
     def dialogue(self) -> list[dict]:
-        return (read_json(self.path("dialogue.json"), {}) or {}).get("lines", [])
+        return (_read(self.path("dialogue.json"), {}) or {}).get("lines", [])
 
     def extras(self) -> list[dict]:
         """dialogue.json ``extras``: speech the ASR heard that is in no script line."""
-        return (read_json(self.path("dialogue.json"), {}) or {}).get("extras", []) or []
+        return (_read(self.path("dialogue.json"), {}) or {}).get("extras", []) or []
 
     def scenes(self) -> list[dict]:
-        return (read_json(self.path("scenes.json"), {}) or {}).get("scenes", []) or []
+        return (_read(self.path("scenes.json"), {}) or {}).get("scenes", []) or []
 
     def items(self) -> list[dict]:
-        return (read_json(self.path("items.json"), {}) or {}).get("items", [])
+        return (_read(self.path("items.json"), {}) or {}).get("items", [])
 
     def cuts(self) -> list[float]:
-        return (read_json(self.path("cuts.json"), {}) or {}).get("cuts", [])
+        return (_read(self.path("cuts.json"), {}) or {}).get("cuts", [])
 
     def characters(self, review: dict | None = None) -> list[str]:
         """Names for the writer to pick: the script's, the speakers of the lines, then the names the
         writer gave (lines, items, added lines)."""
-        script = read_json(self.path("script.json"), {}) or {}
+        script = _read(self.path("script.json"), {}) or {}
         review = review if review is not None else self.review()
         names = list(script.get("characters", []))
         given = [ln.get("speaker") for ln in self.dialogue()]
@@ -524,7 +591,7 @@ class Project:
         return names
 
     def review(self) -> dict:
-        r = read_json(self.path("review.json"), {}) or {}
+        r = _read(self.path("review.json"), {}) or {}
         for sec in ("items", "placement", "lines", "added", "extras", "people"):
             if not isinstance(r.get(sec), dict):
                 r[sec] = {}
@@ -1392,17 +1459,17 @@ class Project:
         from . import style
         from .stages import recommend
         review = review if review is not None else self.review()
-        dj = read_json(self.path("dialogue.json"), {}) or {}
+        dj = _read(self.path("dialogue.json"), {}) or {}
         dlg = [ln for ln in dj.get("lines", []) if isinstance(ln, dict) and ln.get("id")]
         extras = [x for x in dj.get("extras", []) or [] if isinstance(x, dict)]
         items = self.items()
-        script = read_json(self.path("script.json"), {}) or {}
+        script = _read(self.path("script.json"), {}) or {}
         scenes = self.scenes()
         cache: dict = {}
 
         def asr():
             if "w" not in cache:
-                cache["w"] = (read_json(self.path("asr.json"), {}) or {}).get("words", []) or []
+                cache["w"] = (_read(self.path("asr.json"), {}) or {}).get("words", []) or []
             return cache["w"]
 
         line_dec, lindex = self._line_decisions(review, dlg)
@@ -1626,7 +1693,7 @@ class Project:
         return self.settle(comp)[1]
 
     def draft(self) -> dict:
-        d = read_json(self.path("draft.json"))
+        d = _read(self.path("draft.json"))
         return d if d is not None else self.recompute()
 
     # ----------------------------------------------------------------- export
@@ -1706,7 +1773,7 @@ class Project:
         import bisect
 
         from .stages.align import INTERJECTIONS, is_vocalisation, norm_chars
-        asr = read_json(self.path("asr.json"), {}) or {}
+        asr = _read(self.path("asr.json"), {}) or {}
         t0, t1 = self._window()
         ws = []
         for w in asr.get("words") or []:
@@ -1761,7 +1828,7 @@ class Project:
             groups.append(cur)
         hotwords = None
         if "hint_echo" not in asr:                         # an older asr.json: the echoes are in "words"
-            script = read_json(self.path("script.json"), {}) or {}
+            script = _read(self.path("script.json"), {}) or {}
             hotwords = asr["hotwords"] if "hotwords" in asr else script.get("characters")
         script_lines = [ln for ln in comp["lines"] if ln.get("idx") is not None
                         and _num(ln.get("start")) is not None and _num(ln.get("end")) is not None]
@@ -1775,8 +1842,7 @@ class Project:
             if len(g) == 1 and e - s < HEARD_SHORT:
                 continue
             if hotwords:
-                from .stages.asr import hint_echo
-                if all(hint_echo(toks, hotwords)):
+                if _echo_only(toks, hotwords):
                     continue
             xs = [kept(a, b) for a, b, _ in g]
             xid = max({x["id"] for x in xs if x}, key=lambda i: sum(1 for x in xs if x and x["id"] == i), default=None)

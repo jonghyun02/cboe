@@ -226,7 +226,83 @@ def _switch(name, dec, rev, index_of) -> float:
     return rev["index"] + 1 if rev else INF
 
 
+# 같은 입력의 결과를 기억해 둔다 (감사 6-08: 작가가 하나 고칠 때마다 줄 수 × 인물 수만큼 이름을 찾았다). 이 모듈은
+# 순수 함수라 ``display`` 와 ``maybe_same`` 의 결과는 인자로만 정해진다. 열쇠에는 함수가 읽는 것을 모두 넣는다:
+# ``display`` 는 줄마다 id·person·scene_id·text 와 show 의 참거짓만 읽고, 결정은 통째로(``_freeze``) 넣는다.
+# 돌려줄 때는 기억해 둔 것의 사본을 준다(받은 쪽이 고쳐도 기억은 그대로). ``MEMO = False`` 이면 늘 계산한다
+MEMO = True
+_DISPLAY_MEMO: dict = {}
+_SAME_MEMO: dict = {}
+_MEMO_MAX = 32                                # 열쇠 수 (넘으면 비운다): 작가가 결정을 바꿔 가는 동안의 몇 판
+
+
+def clear_memo() -> None:
+    """Forget what ``display`` and ``maybe_same`` remember."""
+    _DISPLAY_MEMO.clear()
+    _SAME_MEMO.clear()
+
+
+_PLAIN = (str, int, float, bool, type(None))
+
+
+def _freeze(x):
+    """A key equal for two values only when they are the same JSON-like data, types included
+    (a dict with its items in order, list, tuple, str, int, float, bool, None); TypeError else."""
+    t = type(x)
+    if t is dict:
+        return (dict, tuple((_freeze(k), _freeze(v)) for k, v in x.items()))
+    if t is list or t is tuple:
+        return (t, tuple(_freeze(v) for v in x))
+    if t in _PLAIN:
+        return (t, x)
+    raise TypeError(f"no key for {t.__name__}")
+
+
+def _line_key(ln) -> tuple:
+    """What ``_display`` reads of one line (``.get`` of id, person, scene_id, text; show as true
+    or false); TypeError for a value whose type is not str, int or None."""
+    if type(ln) is not dict:
+        raise TypeError("a line is a dict")
+    out = (ln.get("id"), ln.get("person"), ln.get("scene_id"), ln.get("text"))
+    for v in out:
+        if v is not None and type(v) is not str and type(v) is not int:
+            raise TypeError("no key")
+    return out + (bool(ln.get("show")),)
+
+
+def _copy(blob: bytes):
+    import marshal
+    return marshal.loads(blob)
+
+
+def _remember(memo: dict, key, value):
+    import marshal
+    try:
+        blob = marshal.dumps(value)
+    except ValueError:                        # something marshal cannot copy: not remembered
+        return value
+    if len(memo) >= _MEMO_MAX:
+        memo.clear()
+    memo[key] = blob
+    return value
+
+
 def display(lines, decisions=None, script_people=()) -> dict:
+    """``_display``, remembered by everything it reads (``MEMO``); a fresh copy every time."""
+    if MEMO and type(lines) in (list, tuple):     # (a generator would be used up by the key)
+        try:
+            key = (tuple(_line_key(ln) for ln in lines), _freeze(decisions or {}), _freeze(script_people))
+            got = _DISPLAY_MEMO.get(key)
+        except (TypeError, ValueError):
+            got, key = None, None
+        if got is not None:
+            return _copy(got)
+        if key is not None:
+            return _remember(_DISPLAY_MEMO, key, _display(lines, decisions, script_people))
+    return _display(lines, decisions, script_people)
+
+
+def _display(lines, decisions=None, script_people=()) -> dict:
     """Labels of ``lines`` — the lines in the film that are in the subtitles, in film order:
     ``{"id", "person" (name, 'A/B'), "scene_id", "show" (the label is shown), "text"}``.
     ``decisions``: {name: {"mode", "before", "reveal", "reveal_line"}} (module doc).
@@ -378,6 +454,21 @@ def same_person_hint(a, b) -> str | None:
 
 
 def maybe_same(names, decisions=None) -> dict:
+    """``_maybe_same``, remembered by its arguments (``MEMO``); a fresh copy every time."""
+    if MEMO and type(names) in (list, tuple):
+        try:
+            key = (_freeze(names), _freeze(decisions or {}))
+            got = _SAME_MEMO.get(key)
+        except (TypeError, ValueError):
+            got, key = None, None
+        if got is not None:
+            return _copy(got)
+        if key is not None:
+            return _remember(_SAME_MEMO, key, _maybe_same(names, decisions))
+    return _maybe_same(names, decisions)
+
+
+def _maybe_same(names, decisions=None) -> dict:
     """``{name: [other names that may be the same person]}`` among ``names`` (people, in their
     order), leaving out the pairs the writer said are not (``decisions[name]["not_same"]``, either
     way round). Only offered: nothing is merged (module doc)."""

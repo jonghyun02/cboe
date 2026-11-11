@@ -316,14 +316,52 @@ def _greedy(text: str, max_units: float, hold: int = 0) -> list[str]:
     return lines
 
 
+# 같은 입력의 결과를 기억해 둔다 (감사 6-08: 작가가 하나 고칠 때마다 배치를 다시 하는데, 바뀌지 않은 줄의
+# 글도 매번 줄바꿈을 다시 계산했다). ``wrap`` 의 결과는 그 인자(빈칸을 줄인 글, 한도, kiwi, tidy, hold)와
+# ``_hints``·``_quoted``·``_units`` 의 결과로만 정해지고 그 셋은 이미 글마다 기억된다. 그래서 인자를 열쇠로
+# 기억해 둔 결과는 다시 계산한 것과 같다. ``MEMO = False`` 이면 기억하지 않고 늘 계산한다(시험이 두 길을
+# 견준다). 이 모듈의 상수나 ``style`` 의 표기를 실행 중에 바꾸면 ``clear_memo()`` 를 부른다
+MEMO = True
+_WRAP_MEMO: dict = {}
+_WRAP_MAX = 65536                      # 열쇠 수가 넘으면 비우고 다시 모은다 (2시간 영화 한 번 배치에 약 3만)
+
+
+def clear_memo() -> None:
+    """Forget every result this module remembers (``wrap`` and the caches of ``_units``,
+    ``_quoted``, ``_hints``)."""
+    _WRAP_MEMO.clear()
+    _units.cache_clear()
+    _quoted.cache_clear()
+    _hints.cache_clear()
+
+
 def wrap(text, max_units: float = style.MAX_UNITS, max_lines: int = style.MAX_LINES, kiwi: bool = True,
          tidy=None, hold: int = 0) -> list[str]:
     """Lines of ``text`` (module doc). ``kiwi=False`` skips the Kiwi hints (same feasibility);
     ``tidy`` makes each line as it is displayed (lines that become empty are dropped); ``hold``:
     no break at a space before that position of the text with its white space collapsed (a
     speaker label kept with the first word; the position is passed, not a marker character, so
-    no character of the dialogue can take its place)."""
+    no character of the dialogue can take its place). The result of the same arguments is
+    remembered (``MEMO``; only for ``tidy`` None or ``style.tidy_line``)."""
     text = norm(text)
+    if not MEMO or (tidy is not None and tidy is not style.tidy_line):
+        return _wrap(text, max_units, max_lines, kiwi, tidy, hold)
+    # the types too: 16 and 16.0 are one key and give the same lines, but a hold of 1.0 is no slice
+    key = (text, type(max_units), max_units, type(max_lines), max_lines, bool(kiwi), tidy, type(hold), hold)
+    try:
+        got = _WRAP_MEMO.get(key)
+    except TypeError:                                # an argument that cannot be a key: no memo
+        return _wrap(text, max_units, max_lines, kiwi, tidy, hold)
+    if got is None:
+        got = tuple(_wrap(text, max_units, max_lines, kiwi, tidy, hold))
+        if len(_WRAP_MEMO) >= _WRAP_MAX:
+            _WRAP_MEMO.clear()
+        _WRAP_MEMO[key] = got
+    return list(got)
+
+
+def _wrap(text: str, max_units, max_lines, kiwi, tidy, hold) -> list[str]:
+    """``wrap`` of a text whose white space is collapsed already (``norm``)."""
     if not text:
         return []
     shown = tidy or (lambda s: s)

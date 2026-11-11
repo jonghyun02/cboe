@@ -235,3 +235,52 @@ def test_hold_keeps_the_head_of_a_text_on_one_line():
     assert wrap("가나다라 " * 3 + "마바사아자차카타파하가나다라", hold=14) == ["가나다라 가나다라 가나다라", "마바사아자차카타파하가나다라"]
     assert wrap("가나다라마바사아 자차 카타파하가나다라", kiwi=False) == ["가나다라마바사아", "자차 카타파하가나다라"]
     assert wrap("가나다라마바사아 자차 카타파하가나다라", kiwi=False, hold=9) == ["가나다라마바사아 자차", "카타파하가나다라"]
+
+
+# --------------------------------------------------------------------------- remembered results (감사 6-08)
+
+MEMO_TEXTS = ["가나다", "오늘은 정말로 아무 데도 가지 말고 집에만 있어", "[하늘/속마음] 그래서 우리는 같이 가기로 했어요.",
+              "- [바다] 뭐라고? 진짜로 그렇게 말했어?", "♪ 기억하렴 우리가 함께 부르던 노래를 ♪", "잠깐만요, 거기 누구세요 정말로",
+              "가나다라마바사아자차카타파하가나다라마바사아자차카타파하", "I don't know what you mean, really", "  여러   빈칸이   있는   글  ",
+              "", "3.5초 뒤에 다시 보자.. 알았지...", "‘난 안 그랬어’ 내가 말했지 그때도 분명히",
+              "오늘 우리가 같이 본 무슨 영화가 그렇게 재미있었다고 그래", "가나다라마바사아 자차 카타파하가나다라"]
+
+
+def test_wrap_remembers_only_what_it_would_compute_again(monkeypatch):
+    from cboe import style
+    textutil.clear_memo()
+    args = [(t, mu, ml, kw, td, hold) for t in MEMO_TEXTS for mu in (16, 16.0, 10.0) for ml in (1, 2)
+            for kw in (False, True) for td in (None, style.tidy_line) for hold in (0, 4, 9)]
+    monkeypatch.setattr(textutil, "MEMO", False)
+    want = [wrap(t, mu, ml, kiwi=kw, tidy=td, hold=h) for t, mu, ml, kw, td, h in args]
+    monkeypatch.setattr(textutil, "MEMO", True)
+    for _ in range(2):                                   # cold, then from the memo
+        got = [wrap(t, mu, ml, kiwi=kw, tidy=td, hold=h) for t, mu, ml, kw, td, h in args]
+        assert got == want
+    assert textutil._WRAP_MEMO                           # it did remember
+    # a copy every time: changing what came back changes nothing remembered
+    lines = wrap(MEMO_TEXTS[1])
+    before = list(lines)
+    lines.append("x")
+    assert wrap(MEMO_TEXTS[1]) == before == want[args.index((MEMO_TEXTS[1], 16, 2, True, None, 0))]
+    # fits goes through wrap: the same answers
+    monkeypatch.setattr(textutil, "MEMO", False)
+    fit_off = [fits(t, mu, ml, tidy=td) for t, mu, ml, _, td, _ in args]
+    monkeypatch.setattr(textutil, "MEMO", True)
+    assert [fits(t, mu, ml, tidy=td) for t, mu, ml, _, td, _ in args] == fit_off
+
+
+def test_wrap_does_not_remember_a_tidy_of_its_own_and_forgets_on_clear():
+    textutil.clear_memo()
+    calls = []
+
+    def mine(s):
+        calls.append(s)
+        return s.upper()
+    for _ in range(2):
+        assert wrap("abc def", tidy=mine) == ["ABC DEF"]
+    assert len(calls) == 2 and not textutil._WRAP_MEMO   # computed each time, nothing kept
+    wrap("가나다 라마")
+    assert textutil._WRAP_MEMO
+    textutil.clear_memo()
+    assert not textutil._WRAP_MEMO
