@@ -103,8 +103,11 @@ OFFSCREEN = re.compile(r"멀리서|먼\s*곳에서|밖에서|바깥에서|어디
 # letter; '…문' doors that end in the same two letters stay doors, so 회전문 (전문), 병원문 (원문),
 # 파출소문 (소문), 경찰서문 (서문) and 방문 are not here.
 NOT_DOORS = ("주문", "질문", "논문", "신문", "의문", "명문", "공문", "본문", "영문", "한문", "작문", "예문", "부문", "자문")
-_DOOR = rf"(?<![{''.join(w[0] for w in NOT_DOORS)}])문"
-_DOOR_VERB = r"(?:닫|열|여닫|연다|연(?![가-힣]))"
+# doors that end in one of those words: 격자문 (자문), 내부문·외부문 (부문) (6차 확인 G4-05)
+DOORS_LIKE_NOT_DOORS = ("격자", "내부", "외부")
+_DOOR = rf"(?:(?<![{''.join(w[0] for w in NOT_DOORS)}])|(?<={'|'.join(DOORS_LIKE_NOT_DOORS)}))문"
+# '열' only as the verb ('열린다', '열고', '열자'): not '열차', '열쇠', '열심히' (6차 확인 G4-04)
+_DOOR_VERB = r"(?:닫|열(?=[고어었며면자지려리린릴렸])|여닫|연다|연(?![가-힣]))"
 # a word of the table's onomatopoeia ('쾅쾅'), taken whole: possessive, so a long '탕탕탕…' is not
 # split again in every way when the words after it do not follow (exponential); a word read
 # otherwise only by splitting it so is lost ('삐삐익' = '삐' + '삐익', not '삐삐' + '익')
@@ -137,7 +140,7 @@ SOURCES = (
      rf"{_DOOR}[이을]?\s+(?P<sori>[가-힣]{{1,4}}?){_ONO_TAIL}[-~!,]*\s*(?:하는\s*)?소리(?:를\s*내(?:며|고)|와\s*함께),?\s*"
      rf"(?:(?P<bang>{_ONO_WORD})[-~!,]*\s*(?:(?:하고|하며|하더니)\s*)?)?{_DOOR_VERB}|"
      rf"(?<![가-힣])(?P<ahead>[가-힣]{{1,4}}?){_ONO_TAIL}[-~!,]*\s*(?:하는\s*)?소리(?:를\s*내(?:며|고)|와\s*함께),?\s*"
-     rf"[가-힣]{{0,3}}?{_DOOR}[이을]?\s*{_DOOR_VERB}|"
+     rf"[가-힣]{{0,3}}?{_DOOR}[이을]?\s*(?:(?P<bang2>{_ONO_WORD})[-~!,]*\s*(?:(?:하고|하며|하더니)\s*)?)?{_DOOR_VERB}|"
      rf"{_DOOR}\s*닫히|{_DOOR}\s*열리|{_DOOR}소리|{_DOOR}\s*여는|{_DOOR}\s*닫는", "문", "덜컥", "문소리", ("door", "impact")),
     (r"전화벨|벨이?\s*울|벨소리|따르릉|휴대폰|핸드폰|휴대전화|전화가?\s*(?:울|온|와)|"
      r"울리는\s*(?:[가-힣]+\s+){0,3}전화(?![가-힣])", "전화", "따르릉", "전화벨", ("phone", "alarm", "bell")),
@@ -233,7 +236,7 @@ def _sounds_else(m: re.Match) -> bool:
     g = m.groupdict()
     if g.get("sori") is not None:
         return not g.get("bang") and not _door_sound(g["sori"])
-    return g.get("ahead") is not None and not _door_sound(g["ahead"])
+    return g.get("ahead") is not None and not g.get("bang2") and not _door_sound(g["ahead"])
 
 
 def _door_word(m: re.Match | None) -> tuple[int, str] | None:
@@ -247,13 +250,15 @@ def _door_word(m: re.Match | None) -> tuple[int, str] | None:
 
 def _other_span(m: re.Match | None) -> tuple[int, int] | None:
     """Where a door match that names the cue writes what else sounds: the 'X 소리' of '문이 바람
-    소리와 함께 쾅 닫힌다' (X no sound of the door, the door's ``bang`` after it), the word beside the
-    door's onomatopoeia ('문이 천둥에 덜컹 열린다'). What is written there is no sound of the door:
-    it names nothing (the door does) and all the families of what it names count."""
+    소리와 함께 쾅 닫힌다' and of '바람 소리와 함께 문이 쾅 닫힌다' (X no sound of the door, the door's
+    ``bang`` / ``bang2`` after it; 6차 확인 G4-06), the word beside the door's onomatopoeia ('문이
+    천둥에 덜컹 열린다'). What is written there is no sound of the door: it names nothing (the door
+    does) and all the families of what it names count."""
     if m is None:
         return None
-    if m.group("sori") is not None and m.group("bang") and not _door_sound(m.group("sori")):
-        return m.start("sori"), m.string.index("소리", m.end("sori")) + 2
+    for g, bang in (("sori", "bang"), ("ahead", "bang2")):
+        if m.group(g) is not None and m.group(bang) and not _door_sound(m.group(g)):
+            return m.start(g), m.string.index("소리", m.end(g)) + 2
     for g in ("beside", "beside2"):
         if m.group(g) is not None and not _door_sound(m.group(g)):
             return m.span(g)

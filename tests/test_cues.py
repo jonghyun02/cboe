@@ -242,8 +242,11 @@ def test_a_word_ending_in_mun_that_is_no_door_opens_no_door(text, door_family):
     assert not any("문" in p for p in c["phrases"])
     assert ("door" in c["families"]) == door_family
     for door, phrase in (("회전문이 끼익 열린다.", "[끼익 - 문]"), ("병원문을 끼익 연다.", "[끼익 - 문]"),
-                         ("방문을 끼익 연다.", "[끼익 - 문]")):
-        assert cues.sfx_cue(door)["phrase"] == phrase
+                         ("방문을 끼익 연다.", "[끼익 - 문]"),
+                         # doors that end in such a word (6차 확인 G4-05): 격자문 (자문), 내부문 (부문)
+                         ("격자문이 끼익 열린다.", "[끼익 - 문]"), ("격자문이 쾅 닫힌다.", "[쾅 - 문]"),
+                         ("내부문이 끼익 열린다.", "[끼익 - 문]"), ("외부문이 끼익 열린다.", "[끼익 - 문]")):
+        assert cues.sfx_cue(door)["phrase"] == phrase, door
 
 
 @pytest.mark.parametrize("text, phrase, family", [
@@ -252,6 +255,11 @@ def test_a_word_ending_in_mun_that_is_no_door_opens_no_door(text, door_family):
     ("문이 사이렌 소리와 함께 쾅 닫힌다.", "[쾅 - 문]", "siren"),
     ("문이 총소리와 함께 쾅 닫힌다.", "[쾅 - 문]", "gun"),
     ("현관문이 초인종 소리와 함께 쾅 닫힌다.", "[쾅 - 현관문]", "doorbell"),
+    # the other sound written before the door (6차 확인 G4-06)
+    ("바람 소리와 함께 문이 쾅 닫힌다.", "[쾅 - 문]", "wind"),
+    ("빗소리와 함께 문이 쾅 닫힌다.", "[쾅 - 문]", "rain"),
+    ("사이렌 소리와 함께 문이 쾅 닫힌다.", "[쾅 - 문]", "siren"),
+    ("총소리와 함께 문이 쾅 닫힌다.", "[쾅 - 문]", "gun"),
 ])
 def test_the_door_that_bangs_with_another_sound_is_the_source_of_the_bang(text, phrase, family):
     """'문이 바람 소리와 함께 쾅 닫힌다': the '쾅' is the door's (II.9: '[의성어 - 출처]', the source
@@ -287,6 +295,20 @@ def test_the_doors_onomatopoeia_before_the_door_or_one_word_off_its_verb_is_the_
         assert cues.sfx_cue(text2)["phrase"] == phrase2
     wind = cues.sfx_cue("창문이 바람에 덜컹 열린다.")
     assert "wind" in wind["families"]                  # the word beside it names a sound of its own
+
+
+def test_a_word_that_starts_with_yeol_is_no_door_opening():
+    """6차 확인 G4-04: '열차', '열심히' after a word beside the door are not '열린다' — the train and
+    the brake stay theirs, nothing names the door; the verb itself still is the door's."""
+    c = cues.sfx_cue("창문 너머 덜컹덜컹 열차가 지나간다.")
+    assert c["phrase"] == "[덜컹덜컹 - 기차]" and "train" in c["families"]
+    c = cues.sfx_cue("문 앞에 끼익 열차가 선다.")
+    assert c["phrase"] == "[끼익]" and "[급정거]" in c["phrases"] and "car" in c["families"]
+    c = cues.sfx_cue("문 밖에서 쿵쿵 열심히 뛴다.")
+    assert not any("문" in p for p in c["phrases"])
+    for text in ("문이 끼익 천천히 열렸다.", "문을 천천히 끼익 열자 바람이 분다.", "문을 끼익 열어 본다.",
+                 "문이 끼익 활짝 열려 있다.", "문이 천천히 끼익 열리며 빛이 든다."):
+        assert cues.sfx_cue(text)["phrase"] == "[끼익 - 문]", text
 
 
 def test_a_long_run_of_onomatopoeia_beside_a_door_is_read_at_once():
