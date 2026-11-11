@@ -256,9 +256,29 @@ def test_two_names_that_may_be_one_person(a, b, why):
 @pytest.mark.parametrize("a, b", [
     ("가람 엄마", "가람"), ("가람 친구", "가람"), ("가람모", "가람"),        # a relation is another person
     ("김가람", "이가람"), ("김형사", "형사"), ("전남편", "남편"), ("경찰1", "경찰"),
-    ("소년가람", "가람"), ("가람이", "가람"), ("나래", "래"), ("가람", "가람"), ("", "가람")])
+    ("소년가람", "가람"), ("가람이", "가람"), ("나래", "래"), ("가람", "가람"), ("", "가람"),
+    # 7차: a word for a person in front of a word of family may be its owner (G3-01)
+    ("아기 엄마", "엄마"), ("꼬마 엄마", "엄마"), ("소년 아빠", "아빠"), ("아기 아빠", "아빠"), ("소녀 할머니", "할머니"),
+    # 7차: a title after a prefix that is also a family name, or after a family name (G3-02)
+    ("부대장", "대장"), ("소대장", "대장"), ("전대통령", "대통령"), ("전 대통령", "대통령"), ("여종업원", "종업원"),
+    ("여배우", "배우"), ("여간호사", "간호사"), ("부주장", "주장"), ("부기장", "기장"), ("박의원", "의원"),
+    ("김변호사", "변호사"), ("최목사", "목사")])
 def test_names_that_are_not_offered(a, b):
-    assert people.same_person_hint(a, b) is None
+    assert people.same_person_hint(a, b) is None and people.same_person_hint(b, a) is None
+
+
+@pytest.mark.parametrize("a, b, why", [
+    ("어린 엄마", "엄마", "age"), ("엄마(아역)", "엄마", "age"), ("과거 할머니", "할머니", "age"),
+    ("20대 아빠", "아빠", "age"), ("아기 가람", "가람", "age"), ("전가람", "가람", "surname"), ("여가람", "가람", "surname")])
+def test_an_age_or_a_family_name_is_still_offered_beside_those_words(a, b, why):
+    # 7차: only the owner word and the titles are left out; an adjective, a time, a number or a tail
+    # in front of a word of family, an owner word before a given name, 전 · 여 before a given name stay
+    assert people.same_person_hint(a, b) == why and people.same_person_hint(b, a) == why
+    assert people.maybe_same([a, b]) == {a: [b], b: [a]}
+
+
+def test_maybe_same_does_not_offer_an_owner_or_a_title_pair():
+    assert people.maybe_same(["아기 엄마", "엄마", "부대장", "대장", "김가람", "가람"]) == {"김가람": ["가람"], "가람": ["김가람"]}
 
 
 def test_maybe_same_lists_both_ways_and_leaves_out_what_the_writer_said_no_to():

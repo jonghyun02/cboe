@@ -44,9 +44,10 @@ every time from the lines and the decisions.
 more than one speaker name) — offered only, never merged: the writer merges them by giving all the
 lines of one the other name (scope 'person') or says they are not (``not_same``). Kept narrow: (가) a
 family name in front of the given name ('김가람' and '가람'; not a title or a word of family:
-'김형사' and '형사', '전남편' and '남편'), (나) a word of age or time with the name ('어린 가람',
-'가람(아역)', '가람 (17세)' and '가람', or '가람(성인)'). A name of a relation ('가람 엄마', '가람
-친구', '가람모') is another person and never offered.
+'김형사' and '형사', '전남편' and '남편', '부대장' and '대장'), (나) a word of age or time with the
+name ('어린 가람', '가람(아역)', '가람 (17세)' and '가람', or '가람(성인)'; not a word for a person
+in front of a word of family, which may be its owner: '아기 엄마' and '엄마'). A name of a relation
+('가람 엄마', '가람 친구', '가람모') is another person and never offered.
 """
 from __future__ import annotations
 
@@ -99,13 +100,26 @@ NOT_GIVEN_NAMES = {"남편", "아내", "부인", "엄마", "아빠", "어머니"
                    "실장", "대리", "기사", "선생", "선생님", "의사", "교수", "박사", "검사", "판사", "기자", "감독",
                    "주임", "계장", "소장", "원장", "국장", "차장", "대표", "이사", "비서", "사모", "학생", "손님",
                    "주인", "직원", "대위", "중위", "소위", "병장", "상병", "일병", "이병", "하사", "중사", "상사",
-                   "소령", "중령", "대령", "장군", "남자", "여자"}
+                   "소령", "중령", "대령", "장군", "남자", "여자",
+                   # titles and jobs after a prefix that is also a family name (부·소·전·여:
+                   # '부대장', '소대장', '전 대통령', '여배우') or after a family name ('박의원')
+                   "대장", "중장", "준장", "원사", "준위", "경감", "경정", "총경", "경장", "군인", "병사",
+                   "대통령", "총리", "장관", "의원", "의장", "시장", "군수", "이장", "총장", "단장",
+                   "선장", "기장", "주장", "선수", "코치", "배우", "가수", "작가", "화가", "변호사", "회계사",
+                   "목사", "신부", "수녀", "스님", "간호사", "약사", "교사", "강사", "요리사", "주방장",
+                   "종업원", "점원", "점장", "지배인", "매니저", "사원", "회사원", "공무원", "연구원",
+                   "승무원", "운전사", "경비", "경비원", "소방관", "경찰관", "교도관", "집사", "여사",
+                   "사모님", "아가씨", "총각", "영감", "형님", "누님", "선배", "후배", "친구"}
 # (나) words of age or time said with the name: before it with a space ('소년 가람'), or as a tail
 # ('가람(아역)', '가람 아역'); the adjectives also written onto the name ('어린가람')
 AGE_WORDS = ("어린 시절", "학창 시절", "어린시절", "학창시절", "어린", "젊은", "늙은", "꼬마", "아기", "아역", "성인",
              "청년", "중년", "노년", "노인", "소년", "소녀", "과거", "현재", "미래")
 AGE_ATTACHED = ("어린", "젊은", "늙은")
 AGE_NUMBER = r"\d+\s*(?:대|살|세|년도|년)"       # '20대', '17살', '17세', '1986년'
+# ... but a word for a person in front of a word of family or a title may be its owner: '아기 엄마'
+# (a baby's mother) or '소녀 할머니' is not '엄마' / '할머니' at another age; an adjective, a time or
+# a tail ('어린 엄마', '과거 엄마', '엄마(아역)') still is
+AGE_OWNERS = ("아기", "꼬마", "소년", "소녀", "청년", "노인")
 
 
 def _alt(words) -> str:
@@ -416,6 +430,7 @@ def scope_lines(lines, line_id, which="line") -> list[str]:
 _AGE = _alt(AGE_WORDS)
 _AGE_HEAD = re.compile(rf"^(?:(?:{_AGE}|{AGE_NUMBER})\s+|(?:{_alt(AGE_ATTACHED)})(?=[가-힣]{{2}}))(?P<base>.+)$")
 _AGE_TAIL = re.compile(rf"^(?P<base>.+?)(?:\s*[(（\[]\s*(?:{_AGE}|{AGE_NUMBER}|\d+)\s*[)）\]]|\s+(?:{_AGE}|{AGE_NUMBER}))$")
+_OWNER_HEAD = re.compile(rf"^(?:{_alt(AGE_OWNERS)})\s")
 
 
 def _core(name) -> str:
@@ -447,6 +462,8 @@ def same_person_hint(a, b) -> str | None:
     if not ca or not cb:
         return None
     if ca == cb:
+        if ca in NOT_GIVEN_NAMES and (_OWNER_HEAD.match(a) or _OWNER_HEAD.match(b)):
+            return None                                 # '아기 엄마': the baby's mother (AGE_OWNERS)
         return "age"
     if _surname_of(ca, cb) or _surname_of(cb, ca):
         return "surname"
