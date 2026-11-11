@@ -199,10 +199,13 @@ One sound per dialogue cell, never into a cell that already has two lines (⑤ c
 words of the dialogue are never changed (only line breaks and the display punctuation), and every
 sound ends up in a cell or in ``no_room``. A sound phrase of an older work folder ('♬ 무서운 음악')
 is written in today's notation ('[무서운 음악]').
-Measured in the 6th round (1000 made-up scenes, REAL=1 REALDUR=1): sounds placed 975 -> 1378 of
-3049, sounds in no_room 2074 -> 1671 (120 with a hint), cells with a violation and the checker's musts
-the same (1579, 2038); the copy of the first 30 minutes of a film: sound effects without room 17 -> 6,
-musts 12 -> 12.
+Measured at the end of the 7th round, from commit 0089a2a (before the 6th round's sound rules: ④'s
+cell with the part before the sound, ⑤'s re-split and late cell, the hints) to this code with every
+rule after it (1000 made-up scenes, REAL=1 REALDUR=1): sounds placed 975 -> 1278 of 3049, sounds in
+no_room 2074 -> 1771 (0 -> 93 with a hint: 79 sound effects, 14 music), lines in no_room 110 -> 110
+(0 -> 42 with a hint), cells with a violation 1579 -> 1544, the checker's musts 2038 -> 1984; the copy
+of the first 30 minutes of a film: cells 313 -> 322, sound effects without room 17 -> 8, lines without
+room 2 -> 2, musts 12 -> 7.
 
 End adjustment (memo 5.2 끝 조정, TG1, 2, 4, 5), every cell in time order: ① a gap under half a
 second to the next cell is closed to 2 frames, except after a cell with dialogue that already stays
