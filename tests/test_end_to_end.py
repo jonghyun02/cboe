@@ -7,13 +7,17 @@ stage is the only piece replaced in code (``FakeFaces``). Everything else is the
 ``pipeline.run`` (대본 읽기 → 정렬 → 대본 단서 → 근거 → 추천 → 배치) without an LLM, the review layer
 (``state.Project``), the export (srt · vtt · ttml), the independent guide check (``cboe.check``),
 the export read back as a timed script, and the review server. The seams between the stages —
-one stage's file read by the next — are what is tested here.
+one stage's file read by the next — are what is tested here: also what the writer sets through the
+server (join, position, manner of speech) as it reaches the three files and the checker that reads
+them back, what alignment finds (hints, sung speech) as it reaches the review, a second run and an
+edited script under the writer's decisions, and a subtitle file with nameless two-speaker cells.
 
 The script, the names and the song are made up for this test. No model, no LLM, no network, no
 video and no ffmpeg run.
 """
 from __future__ import annotations
 
+import re
 import shutil
 import wave
 from pathlib import Path
@@ -229,10 +233,10 @@ def make_work(work: Path) -> Path:
     return work
 
 
-def run_pipeline(work: Path, monkeypatch) -> dict:
+def run_pipeline(work: Path, monkeypatch, **kw) -> dict:
     FakeFaces.asked = []
     monkeypatch.setattr(speaker_stage, "Analyser", FakeFaces)
-    return pipeline.run(work, cfg={"llm": False})
+    return pipeline.run(work, cfg={"llm": False}, **kw)
 
 
 def copy_work(src: Path, dst: Path) -> Path:
@@ -282,6 +286,11 @@ def decided(ran, tmp_path_factory):
 
 def by_id(rows: list[dict]) -> dict:
     return {r["id"]: r for r in rows}
+
+
+def frames(cells: list[dict]) -> list[tuple]:
+    """(in-frame, out-frame, lines, position) of each cell: what a file must keep of the draft."""
+    return [(round(c["start"] * FPS), round(c["end"] * FPS), c["lines"], c.get("pos") or "bottom") for c in cells]
 
 
 # ================================================================== 1. the run
@@ -524,6 +533,10 @@ def test_export_formats_pass_the_guide_check_and_read_back(decided):
         got = check.run(path, fps=FPS, cuts=CUTS, profile="adult")
         assert got["ok"] and got["summary"]["must"] == 0 and got["cells"] == 18, fmt
         assert got["summary"]["must"] == res["check"]["summary"]["must"]
+        # the file read back by the checker's own reader: every cell on the frames, with the lines
+        # and the position, of the draft (srt ms, vtt ms, ttml frames)
+        back, _ = check.load(path)
+        assert frames(back) == frames(draft["cells"]), fmt
     text = Path(exports["srt"]["path"]).read_text(encoding="utf-8")
     for form in ("[멍멍]", "[쾅]", "[여자] 거기 누구세요?", "[가온/영어] 커피 두 잔 주세요", "♪ 여름 정거장에 비가 내리면 ♪",
                  "- 누구야?\n- 나야", "[별무리의 '여름 정거장']", "[음악이 멈춘다]"):
@@ -616,14 +629,68 @@ def test_the_exported_srt_as_the_script_of_a_new_work_folder(decided, tmp_path, 
     assert [(x["text"], x["start"]) for x in dj["extras"]] == [("다들 왜 갑자기 조용해진 거야?", 50.0)]
     cells = [" / ".join(c["lines"]) for c in read_json(work / "draft.json")["cells"]]
     assert "[여자] 거기 누구세요? / 이 시간에 무슨 일이에요?" in cells and "♪ 여름 정거장에 비가 내리면 ♪" in cells
+    # the hyphen cell with no name ('- 누구야?' / '- 나야'): two lines of the script, each of its own
+    # row of the cell (turn), placed again as one hyphen cell
+    assert [(ln["text"], ln.get("turn"), ln["speaker"]) for ln in dj["lines"][-2:]] == [
+        ("누구야?", "17-1", None), ("나야", "17-2", None)]
+    assert "- 누구야? / - 나야" in cells
+
+
+# a made-up subtitle file with two two-speaker cells and no names, close together; the second row
+# of cell 2 is heard too (added to the ASR words below)
+ROWS_SRT = """1
+00:01:19,900 --> 00:01:20,450
+- [쾅]
+- 누구야?
+
+2
+00:01:20,550 --> 00:01:21,300
+- 나야.
+- 들어와.
+"""
+
+
+def test_nameless_rows_of_two_subtitle_cells_are_not_put_together(tmp_path, monkeypatch):
+    # 자막 대본 길: '- ' rows nobody is named for are two speakers inside their own cell only; a row of
+    # another cell may be the same person, so it never shares a hyphen cell with them
+    work = make_work(tmp_path / "rows")
+    (work / "subs.srt").write_text(ROWS_SRT, encoding="utf-8")
+    write_json(work / "project.json", dict(read_json(work / "project.json"), script=str(work / "subs.srt")))
+    asr = read_json(work / "asr.json")
+    asr["words"] = sorted(asr["words"] + heard_words("들어와.", 80.95, 81.25), key=lambda w: w["s"])
+    write_json(work / "asr.json", asr)
+    log = run_pipeline(work, monkeypatch)
+    assert log["script"]["format"] == "timed" and log["align"]["status"] == {"ok": 3}
+    doc = read_json(work / "script.json")
+    # the sound row of cell 1 is no line; its dialogue row still has the turn of a two-row cell
+    assert [(ln["text"], ln["turn"], ln["speaker"]) for ln in doc["lines"]] == [
+        ("누구야?", "1-2", None), ("나야.", "2-1", None), ("들어와.", "2-2", None)]
+    p = Project(work)
+    lines, _ = p.placement_inputs()
+    assert [(x["id"], x["person"], x["name"]) for x in lines] == [
+        ("L0001", "#1-2", None), ("L0002", "#2-1", None), ("L0003", "#2-2", None)]
+    cells = {tuple(c["refs"]): c for c in read_json(work / "draft.json")["cells"] if c["kind"] == "dialogue"}
+    # '누구야?' cannot get 5/6 s before '나야' (0.65 s later, both short): it still stays alone, and
+    # its cell says it is short, while the two rows of cell 2 share one hyphen cell in their order
+    assert list(cells) == [("L0001",), ("L0002", "L0003")]
+    assert cells[("L0001",)]["lines"] == ["누구야?"] and cells[("L0002", "L0003")]["lines"] == ["- 나야", "- 들어와"]
+    assert any("5/6" in v for v in cells[("L0001",)]["check"]["violations"])
 
 
 # ================================================================== 8. running again
 def test_a_second_run_and_an_edited_script_keep_the_writers_decisions(decided, tmp_path, monkeypatch):
     work = copy_work(decided[0], tmp_path / "again")
     before = [c["lines"] for c in read_json(work / "draft.json")["cells"]]
-    run_pipeline(work, monkeypatch)
+    done = read_json(work / "run_log.json")             # the records of the run that did the work
+    again = run_pipeline(work, monkeypatch)
     last = read_json(work / "run_history.json")[-1]["stages"]
+    # a stage with nothing to do this time keeps, in run_log.json, the record of the run that did
+    # its work: not overwritten by {"skipped": true}
+    kept = {s["name"] for s in last if s.get("skipped")} - {k for k, r in done.items() if r.get("skipped")}
+    assert kept >= {"script", "align", "speaker", "dialog_ev", "recommend"}
+    log2 = read_json(work / "run_log.json")
+    assert {k: log2[k] for k in kept} == {k: done[k] for k in kept} and again == log2
+    assert log2["align"]["status"] == {"ok": 12, "differs": 1, "unheard": 1, "absent": 2}
     # nothing is made again (the model stages, the script, the alignment and what follows it) ...
     assert {s["name"] for s in last if s.get("skipped")} >= {
         "ingest", "script", "separate", "cuts", "asr", "align", "sfx", "music", "speaker", "screen", "dialog_ev",
@@ -651,6 +718,141 @@ def test_a_second_run_and_an_edited_script_keep_the_writers_decisions(decided, t
     items = by_id(comp["items"])
     assert {k: items[k]["final"] for k in ("S0003", "M0002", "C0007", "A0002")} == {
         "S0003": "include", "M0002": "include", "C0007": "exclude", "A0002": "include"}
+    # the speaker item decisions follow their lines (by fingerprint) although the item ids moved
+    # with the line ids: 'name the English line' was on P0008 and is now on P0009, P0008 is the
+    # sung line's own item, not decided
+    assert (items["P0009"]["speaker"]["line_id"], items["P0009"]["final"], items["P0009"]["decided"]) == (
+        "L0009", "include", True)
+    assert (items["P0008"]["speaker"]["line_id"], items["P0008"]["decided"]) == ("L0008", False)
+    assert comp["aside"] == []
     cells = [" / ".join(c["lines"]) for c in read_json(work / "draft.json")["cells"]]
     assert "[여자] 거기 누구세요? / 이 시간에 무슨 일이에요?" in cells and "[별무리의 '여름 정거장']" in cells
+    assert "[가온/영어] 커피 두 잔 주세요" in cells
     assert "괜찮아, 어서 들어가자" in cells                      # the new line is in (not heard: a guessed time)
+
+
+# ================================================================== 9. the writer's layout, to the files
+def post(client, url: str, body: dict) -> dict:
+    r = client.post(url, json=body)
+    assert r.status_code == 200, (url, r.text)
+    return r.json()
+
+
+def heard_no_cell(st: dict) -> list[tuple]:
+    return [(h["start"], h["end"], h["extra"], h["line"]) for h in st["export_check"]["heard_no_cell"]]
+
+
+def test_join_position_and_manner_set_through_the_server_reach_every_file(ran, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from cboe.server.app import create_app
+    work = copy_work(ran[0], tmp_path / "layout")
+    with TestClient(create_app(work)) as client:
+        # speech heard with no dialogue cell: the open '대본에 없는 말' only ...
+        st = client.get("/api/state").json()
+        assert heard_no_cell(st) == [(66.0, 67.28, "X0001", None)] and st["summary"]["heard_no_cell"] == 1
+        # ... and the words of a line the writer takes out, with that line, until it is back in
+        st = post(client, "/api/lines/L0009", {"include": False})
+        assert heard_no_cell(st) == [(50.0, 51.98, None, "L0009"), (66.0, 67.28, "X0001", None)]
+        assert st["export_check"]["heard_no_cell"][0]["text"] == "다들 왜 갑자기 조용해진 거야?"
+        assert st["summary"]["heard_no_cell"] == 2
+        st = post(client, "/api/lines/L0009", {"include": None})
+        assert heard_no_cell(st) == [(66.0, 67.28, "X0001", None)]
+        # the writer's layout: one cell with the line before (two people: a hyphen cell; one person:
+        # the two texts in one cell), a manner of speech after the name, cells at the top
+        for url, body in (("/api/lines/L0002", {"join": True}), ("/api/lines/L0014", {"join": True}),
+                          ("/api/lines/L0012", {"manner": "울먹이며"}), ("/api/lines/L0006", {"pos": "top"}),
+                          ("/api/items/S0002", {"pos": "top"})):
+            st = post(client, url, body)
+        draft = st["draft"]
+        cells = {tuple(c["refs"]): c for c in draft["cells"]}
+        assert cells[("L0001", "L0002")]["lines"] == ["- 여기가 정말 그 집이 맞는 거지?", "- 응, 파란 대문 집이라고 했어"]
+        assert cells[("L0013", "L0014")]["lines"] == ["걱정 마, 다음 차는 금방", "올 거야, 조용히 따라와"]
+        assert cells[("L0012",)]["lines"] == ["[보람/울먹이며] 버스가 벌써", "떠나 버렸으면 어떡하지?"]
+        assert [k for k, c in cells.items() if c["pos"] == "top"] == [("S0002",), ("L0006",)]
+        assert not any(c["check"].get("notes") for c in draft["cells"])      # no join left undone
+        rows = by_id(st["lines"])
+        assert rows["L0002"].get("joined") and rows["L0014"].get("joined") and not rows["L0001"].get("joined")
+        assert (rows["L0012"]["manner"], rows["L0012"]["label"]) == ("울먹이며", "[보람/울먹이며]")
+        assert rows["L0006"]["pos"] == "top" and by_id(st["items"])["S0002"]["pos"] == "top"
+        by_draft = check.run(draft, cuts=CUTS, profile="adult")
+        files = {}
+        for fmt in ("srt", "vtt", "ttml"):
+            res = post(client, "/api/export", {"format": fmt})
+            assert res["cells"] == len(draft["cells"]) == 14 and res["check"]["ok"]   # 16 cells, 2 joins
+            assert "말이 들리는데 자막 칸이 없는 구간 1곳" in res["warnings"]       # the open extra
+            files[fmt] = Path(res["path"])
+    text = files["srt"].read_text(encoding="utf-8")
+    for form in ("{\\an8}[쾅]\n", "{\\an8}보람아, 이리 와서 같이 앉자\n", "[보람/울먹이며] 버스가 벌써\n",
+                 "- 여기가 정말 그 집이 맞는 거지?\n- 응, 파란 대문 집이라고 했어\n"):
+        assert form in text, form
+    assert files["vtt"].read_text(encoding="utf-8").count(" line:10%\n") == 2
+    assert len(re.findall(r'<p [^>]*region="top"', files["ttml"].read_text(encoding="utf-8"))) == 2
+    for fmt, path in files.items():
+        # the independent checker reads each file back: the cells of the draft, the two on top
+        # (SRT {\an8}, VTT line:10%, TTML the top region), and the same findings as on the draft
+        back, _ = check.load(path)
+        assert frames(back) == frames(draft["cells"]), fmt
+        got = check.run(path, fps=FPS, cuts=CUTS, profile="adult")
+        assert sorted((v["index"], v["code"]) for v in got["violations"]) == sorted(
+            (v["index"], v["code"]) for v in by_draft["violations"]), fmt
+        assert got["summary"] == by_draft["summary"], fmt
+
+
+def test_alignment_hints_and_sung_speech_reach_the_review_and_the_cells(ran, tmp_path, monkeypatch):
+    from fastapi.testclient import TestClient
+
+    from cboe.server.app import create_app
+    work = copy_work(ran[0], tmp_path / "heard")
+    # what is heard otherwise than in the first run: 보람's name misheard in L0006, 가온 stopping for
+    # a sound in the middle of L0001, somebody singing over the scene-4 music (in no script line);
+    # the chunks' languages told from the audio, Japanese where the script marks L0008 English
+    said = {"보람아, 이리 와서 같이 앉자.": "포라마, 이리 와서 같이 앉자."}
+    words = heard_words("여기가 정말", 4.0, 4.9) + heard_words("그 집이 맞는 거지?", 5.6, 6.4)
+    for text, s, e in HEARD[1:]:
+        words += heard_words(said.get(text, text), s, e)
+    words = sorted(words + heard_words("바람 불면 너를 부를게", 76.0, 77.6), key=lambda w: w["s"])
+    asr = read_json(work / "asr.json")
+    asr.update(words=words, vad=sorted(asr["vad"] + [[76.0, 77.6]]), chunks=[
+        {"start": a, "end": b, "language": lang, "detected": True, "prob": 0.9, "words": 0}
+        for a, b, lang in ((0.0, 44.2, "ko"), (44.2, 46.3, "ja"), (46.3, T1, "ko"))])
+    write_json(work / "asr.json", asr)
+    classes = SED_CLASSES + ["Singing"]
+    probs = np.zeros((int(T1 * 25), len(classes)), np.float16)
+    probs[int(75.5 * 25):int(78.5 * 25), -1] = 0.6
+    np.savez_compressed(work / "sed_mix.npz", probs=probs, fps=25, classes=np.array(classes), t0=0.0)
+    log = run_pipeline(work, monkeypatch, force=["align"])   # the alignment and what follows it again
+    al = log["align"]
+    assert al["status"] == {"ok": 12, "differs": 1, "unheard": 1, "absent": 2} and (al["singing"], al["sung"]) == (1, 1)
+    dj = read_json(work / "dialogue.json")
+    ln = by_id(dj["lines"])
+    # only the name differs: a hint, the line stays ok and keeps the script's words
+    assert (ln["L0006"]["status"], ln["L0006"]["hints"], ln["L0006"]["asr_text"], ln["L0006"]["text"]) == (
+        "ok", ["name"], "포라마, 이리 와서 같이 앉자.", "보람아, 이리 와서 같이 앉자.")
+    assert (ln["L0008"]["hints"], ln["L0008"]["heard_language"], ln["L0008"]["language"]) == (["language"], "일본어", "영어")
+    assert dj["singing"] == [[75.48, 78.48]]
+    assert [(x["id"], x["start"], x.get("sung", False)) for x in dj["extras"]] == [("X0001", 66.0, False), ("X0002", 76.0, True)]
+    with TestClient(create_app(work)) as client:
+        st = client.get("/api/state").json()
+        rows = by_id(st["lines"])
+        assert (rows["L0006"]["hints"], rows["L0006"]["status"]) == (["name"], "ok")
+        assert (rows["L0008"]["hints"], rows["L0008"]["heard_language"]) == (["language"], "일본어")
+        assert by_id(st["extras"])["X0002"]["sung"] is True
+        assert heard_no_cell(st) == [(66.0, 67.28, "X0001", None), (76.0, 77.58, "X0002", None)]
+        # the sung speech made a line is sung (♪ … ♪, II.7) unless the writer says otherwise
+        st = post(client, "/api/extras/X0002", {"action": "line", "name": "보람"})
+        assert by_id(st["lines"])["A0001"].get("sung") is True
+        assert heard_no_cell(st) == [(66.0, 67.28, "X0001", None)]
+        # a sound the writer adds where 가온 stops: with the piece before it in one hyphen cell, the
+        # piece after it in the next cell (II.9 the order of the audio; I.4 '…' where the speech stops)
+        st = post(client, "/api/added", {"kind": "sfx", "start": 5.05, "end": 5.4, "phrase": "[쿵]"})
+        cells = [(" / ".join(c["lines"]), c["refs"]) for c in st["draft"]["cells"]]
+        k = cells.index(("- 여기가 정말… / - [쿵]", ["L0001", "A0002"]))
+        assert cells[k + 1] == ("그 집이 맞는 거지?", ["L0001"])
+        assert ("[보람] ♪ 바람 불면 / 너를 부를게 ♪", ["A0001"]) in cells
+        # the hints changed no cell: the script's words, the script's language label
+        assert ("보람아, 이리 와서 같이 앉자", ["L0006"]) in cells and ("[영어] 커피 두 잔 주세요", ["L0008"]) in cells
+        res = post(client, "/api/export", {"format": "srt"})
+        assert res["check"]["ok"]
+    text = Path(res["path"]).read_text(encoding="utf-8")
+    assert "- 여기가 정말…\n- [쿵]\n\n" in text and "♪ 바람 불면\n너를 부를게 ♪" in text
