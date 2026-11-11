@@ -1291,7 +1291,8 @@ def test_the_cell_of_a_line_a_sound_or_an_added_one_goes_up_or_down(tmp_path, br
     # the 새로 넣기 dialog (api/added · api/added/{id} pos) and on a line the writer added (its
     # api/added/{id}); a cell at the top has a mark on its row (old page: nothing to pick).
     # The added row keeps the pos it was made or changed with (약속 나: added[].pos); this branch's
-    # server drops it, so __kept plays the one that keeps it (there it changes nothing).
+    # server drops it, so __kept plays the one that keeps it (there it changes nothing). Its
+    # 넣은 것 고치기 dialog opens at the row's pos, so saving new words there keeps 위.
     work = page_folder(tmp_path, clips["mp4"], t0=0.0, t1=12.0)
     with Served(create_app(work, media=Media("source", clips["mp4"]))) as srv:
         r = run_page(browser, srv.url, r"""export default async (p) => {
@@ -1351,7 +1352,14 @@ def test_the_cell_of_a_line_a_sound_or_an_added_one_goes_up_or_down(tmp_path, br
           await p.ev(`document.querySelector('#modal-box [data-act="add-save"]').click()`);
           await p.idle();
           const addedEnd = await chips('ln-pos');
-          return { line0, lineUp, tops, nCells, ofLine, lineDown, speaker, sound0, soundUp, radios, aid, added0, addedDown, editRadios, addedEnd,
+          await p.ev(`document.querySelector('#evidence [data-act="added-edit"]').click()`);
+          await p.sleep(200);
+          const editAgain = await p.ev(`[...document.querySelectorAll('#modal-box input[name="add-pos"]')].map((i) => i.value + (i.checked ? '*' : ''))`);
+          await p.ev(`document.getElementById('add-text').value = '지어낸 고친 줄이다'`);
+          await p.ev(`document.querySelector('#modal-box [data-act="add-save"]').click()`);
+          await p.idle();
+          const wordsOnly = await chips('ln-pos');
+          return { line0, lineUp, tops, nCells, ofLine, lineDown, speaker, sound0, soundUp, radios, aid, added0, addedDown, editRadios, addedEnd, editAgain, wordsOnly,
                    seen: await p.ev(`window.__seen.filter(([, b]) => 'pos' in b)`) };
         }""".replace("@HOOK@", new_hook()))["result"]
     assert r["line0"] == ["아래*", "위"] and r["lineUp"] == ["아래", "위*"] and r["lineDown"] == ["아래*", "위"], r
@@ -1362,13 +1370,17 @@ def test_the_cell_of_a_line_a_sound_or_an_added_one_goes_up_or_down(tmp_path, br
     # made with 위 it is up (the reply's added[].pos), 아래 on its panel, the dialog opens at 아래, saved at 위
     assert r["added0"] == ["아래", "위*"] and r["addedDown"] == ["아래*", "위"] and r["editRadios"] == ["*", "top"], r
     assert r["addedEnd"] == ["아래", "위*"], r
+    # stored at 위, the dialog opens at 위: it reads the row's added[].pos (아래 above is also what it
+    # opens at by itself); a change of the words alone keeps 위
+    assert r["editAgain"] == ["", "top*"] and r["wordsOnly"] == ["아래", "위*"], r
     seen = r["seen"]
     assert seen[0] == ["api/lines/L0002", {"pos": "top"}] and seen[1] == ["api/lines/L0002", {"pos": None}], seen
     assert seen[2] == ["api/items/S0001", {"pos": "top"}], seen
     assert seen[3][0] == "api/added" and seen[3][1]["pos"] == "top" and seen[3][1]["text"] == "지어낸 새 줄이다", seen
     assert seen[4] == [f"api/added/{r['aid']}", {"pos": None}], seen
     assert seen[5][0] == f"api/added/{r['aid']}" and seen[5][1]["pos"] == "top" and seen[5][1]["text"] == "지어낸 새 줄이다", seen
-    assert len(seen) == 6, seen
+    assert seen[6][0] == f"api/added/{r['aid']}" and seen[6][1]["pos"] == "top" and seen[6][1]["text"] == "지어낸 고친 줄이다", seen
+    assert len(seen) == 7, seen
 
 
 @browser_only
